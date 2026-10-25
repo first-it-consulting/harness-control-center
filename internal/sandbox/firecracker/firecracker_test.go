@@ -1,6 +1,7 @@
 package firecracker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -53,6 +54,7 @@ type fakeHost struct {
 	events   []string // order of jail/network operations
 	netErr   error
 	netSlots []int
+	reqs     []StartRequest
 }
 
 func (h *fakeHost) SetupNetwork(_ context.Context, slot int) (NetInfo, error) {
@@ -102,6 +104,7 @@ func (h *fakeHost) StartVM(req StartRequest, console io.Writer) (Process, error)
 		return nil, err
 	}
 	h.mu.Lock()
+	h.reqs = append(h.reqs, req)
 	defer h.mu.Unlock()
 	h.argv = argv
 	h.argvs = append(h.argvs, argv)
@@ -170,23 +173,16 @@ func newFixture(t *testing.T, b behavior) *fixture {
 	t.Helper()
 	dir := t.TempDir()
 	base := filepath.Join(dir, "staging")
-	k, r := filepath.Join(dir, "vmlinux"), filepath.Join(dir, "rootfs.ext4")
-	if err := os.WriteFile(k, []byte("kernel"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(r, []byte("rootfs"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	host := &fakeHost{t: t, behavior: b, staging: base, jailer: JailerConfig{
 		JailerPath: filepath.Join(dir, "jailer"), FirecrackerPath: filepath.Join(dir, "firecracker"),
 		ChrootBase: filepath.Join(dir, "jails"), UID: 64000, GID: 64000, Identities: 8,
 	}}
-	p, err := New(Config{StagingBase: base, ImageRoot: dir, StopGrace: 20 * time.Millisecond, Host: host})
+	p, err := New(Config{StagingBase: base, StopGrace: 20 * time.Millisecond, Host: host})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &fixture{p: p, host: host, base: base, spec: sandbox.Spec{
-		ID: "run-1", Kernel: k, RootFS: r, CPUs: 2, MemoryMiB: 256, Timeout: time.Minute,
+		ID: "run-1", Image: "base", Task: []byte(`{"prompt":"hello"}`), CPUs: 2, MemoryMiB: 256, Timeout: time.Minute,
 		BootArgs: []string{"hcc.mode=test"},
 	}}
 }
@@ -224,7 +220,7 @@ func TestRunExited(t *testing.T) {
 
 	// Staging held exactly the VM's files, owner-only (the helper makes the
 	// jail copies readable for the VM).
-	want := map[string]os.FileMode{"vmlinux": 0o600, "rootfs.ext4": 0o600, "config.json": 0o600}
+	want := map[string]os.FileMode{"config.json": 0o600, "task.img": 0o600}
 	for name, mode := range want {
 		got, ok := f.host.jailSeen[name]
 		// Windows has no Unix modes; presence is still checked there.
@@ -392,12 +388,12 @@ func TestRunInvalidSpecTouchesNothing(t *testing.T) {
 
 func TestNewRejectsUnsafeConfig(t *testing.T) {
 	d := t.TempDir()
-	good := Config{StagingBase: filepath.Join(d, "s"), ImageRoot: filepath.Join(d, "img"), Host: &fakeHost{}}
+	good := Config{StagingBase: filepath.Join(d, "s"), Host: &fakeHost{}}
 	tests := map[string]func(*Config){
-		"unclean base":  func(c *Config) { c.StagingBase = c.ImageRoot + string(filepath.Separator) + ".." },
-		"no host":       func(c *Config) { c.Host = nil },
-		"no image root": func(c *Config) { c.ImageRoot = "" },
-		"too many ids":  func(c *Config) { c.Identities = MaxIdentities + 1 },
+		"unclean base": func(c *Config) { c.StagingBase += string(filepath.Separator) + ".." },
+		"no host":      func(c *Config) { c.Host = nil },
+		"no staging":   func(c *Config) { c.StagingBase = "" },
+		"too many ids": func(c *Config) { c.Identities = MaxIdentities + 1 },
 	}
 	if _, err := New(good); err != nil {
 		t.Fatalf("good config rejected: %v", err)
@@ -408,66 +404,6 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 		if _, err := New(c); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
-	}
-}
-
-func TestRunConfinesImagesToImageRoot(t *testing.T) {
-	outside := filepath.Join(t.TempDir(), "secret.ext4")
-	if err := os.WriteFile(outside, []byte("not an image"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tests := map[string]func(t *testing.T, f *fixture){
-		"path outside root": func(_ *testing.T, f *fixture) { f.spec.RootFS = outside },
-		"symlink escaping root": func(t *testing.T, f *fixture) {
-			skipWithoutSymlinks(t)
-			link := filepath.Join(filepath.Dir(f.spec.Kernel), "escape.ext4")
-			if err := os.Symlink(outside, link); err != nil {
-				t.Fatal(err)
-			}
-			f.spec.RootFS = link
-		},
-		"dot-dot path": func(t *testing.T, f *fixture) {
-			root := filepath.Dir(f.spec.Kernel)
-			rel, err := filepath.Rel(root, outside)
-			if err != nil || !strings.HasPrefix(rel, "..") {
-				t.Fatalf("test setup: rel = %q, %v", rel, err)
-			}
-			f.spec.Kernel = root + string(filepath.Separator) + rel // keep the ".." unresolved
-		},
-	}
-	for name, mutate := range tests {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, exitsCleanly)
-			mutate(t, f)
-			_, _, err := f.run(context.Background(), t)
-			if err == nil || !strings.Contains(err.Error(), "outside the image root") {
-				t.Fatalf("Run = %v, want outside-the-image-root error", err)
-			}
-			if f.host.argv != nil {
-				t.Error("VM started with an image outside the root")
-			}
-		})
-	}
-}
-
-func TestRunFollowsSymlinksInsideImageRoot(t *testing.T) {
-	skipWithoutSymlinks(t)
-	f := newFixture(t, exitsCleanly)
-	link := filepath.Join(filepath.Dir(f.spec.Kernel), "vmlinux-current")
-	if err := os.Symlink(f.spec.Kernel, link); err != nil {
-		t.Fatal(err)
-	}
-	f.spec.Kernel = link
-	if _, _, err := f.run(context.Background(), t); err != nil {
-		t.Fatalf("symlink inside the image root rejected: %v", err)
-	}
-}
-
-// Creating symlinks on Windows needs elevated rights or developer mode.
-func skipWithoutSymlinks(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("symlinks need extra privileges on Windows")
 	}
 }
 
@@ -692,5 +628,44 @@ func TestPeerListenerAcceptsOnlyItsGuest(t *testing.T) {
 			_ = inner.Close() // unblock the pending Accept
 		}
 		_ = c.Close()
+	}
+}
+
+func TestTaskDriveAndImageName(t *testing.T) {
+	f := newFixture(t, exitsCleanly)
+	var staged []byte
+	f.host.onStart = func(string) {
+		staged, _ = os.ReadFile(filepath.Join(f.base, f.spec.ID, "task.img"))
+	}
+	if _, _, err := f.run(context.Background(), t); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.host.reqs) != 1 || f.host.reqs[0].Image != "base" {
+		t.Errorf("start requests = %+v, want image base", f.host.reqs)
+	}
+	if len(staged) != 512 || string(bytes.TrimRight(staged, "\x00")) != `{"prompt":"hello"}` {
+		t.Errorf("task.img = %d bytes %q, want the task padded to one sector", len(staged), bytes.TrimRight(staged, "\x00"))
+	}
+	drives := f.host.config["drives"].([]any)
+	if len(drives) != 2 {
+		t.Fatalf("drives = %v", drives)
+	}
+	task := drives[1].(map[string]any)
+	if task["path_on_host"] != "task.img" || task["is_read_only"] != true || task["is_root_device"] != false {
+		t.Errorf("task drive = %v", task)
+	}
+}
+
+func TestNoTaskNoDrive(t *testing.T) {
+	f := newFixture(t, exitsCleanly)
+	f.spec.Task = nil
+	if _, _, err := f.run(context.Background(), t); err != nil {
+		t.Fatal(err)
+	}
+	if drives := f.host.config["drives"].([]any); len(drives) != 1 {
+		t.Errorf("drives = %v, want only the root filesystem", drives)
+	}
+	if _, ok := f.host.jailSeen["task.img"]; ok {
+		t.Error("task.img staged without a task")
 	}
 }

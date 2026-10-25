@@ -1,8 +1,6 @@
 package sandbox
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,14 +8,7 @@ import (
 
 func validSpec(t *testing.T) Spec {
 	t.Helper()
-	dir := t.TempDir()
-	k, r := filepath.Join(dir, "vmlinux"), filepath.Join(dir, "rootfs.ext4")
-	for _, p := range []string{k, r} {
-		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return Spec{ID: "run-1", Kernel: k, RootFS: r, CPUs: 1, MemoryMiB: 128, Timeout: time.Minute}
+	return Spec{ID: "run-1", Image: "base", Task: []byte(`{"prompt":"hi"}`), CPUs: 1, MemoryMiB: 128, Timeout: time.Minute}
 }
 
 func TestValidateID(t *testing.T) {
@@ -43,9 +34,10 @@ func TestSpecValidate(t *testing.T) {
 		wantErr string
 	}{
 		{"traversal id", func(s *Spec) { s.ID = "../../etc" }, "invalid id"},
-		{"relative kernel", func(s *Spec) { s.Kernel = "vmlinux" }, "absolute"},
-		{"missing rootfs", func(s *Spec) { s.RootFS = "/nonexistent/rootfs" }, "rootfs"},
-		{"directory as kernel", func(s *Spec) { s.Kernel = filepath.Dir(s.Kernel) }, "regular file"},
+		{"image path", func(s *Spec) { s.Image = "/usr/local/lib/hcc/images/base" }, "invalid image name"},
+		{"image traversal", func(s *Spec) { s.Image = "../etc" }, "invalid image name"},
+		{"no image", func(s *Spec) { s.Image = "" }, "invalid image name"},
+		{"task too big", func(s *Spec) { s.Task = make([]byte, MaxTaskBytes+1) }, "task is"},
 		{"no cpus", func(s *Spec) { s.CPUs = 0 }, "cpus"},
 		{"too much memory", func(s *Spec) { s.MemoryMiB = MaxMemoryMiB + 1 }, "memory"},
 		{"no timeout", func(s *Spec) { s.Timeout = 0 }, "timeout"},

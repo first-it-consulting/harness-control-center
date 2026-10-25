@@ -34,9 +34,9 @@ import (
 )
 
 type e2eEnv struct {
-	images, base, staging, rootfs string
-	provider                      *firecracker.Provider
-	network                       *firecracker.NetworkConfig
+	base, staging string
+	provider      *firecracker.Provider
+	network       *firecracker.NetworkConfig
 }
 
 func setupE2E(t *testing.T) *e2eEnv {
@@ -62,16 +62,11 @@ func setupHelperE2E(t *testing.T, cfgPath string) *e2eEnv {
 	if cfg.Firecracker.Helper == "" {
 		t.Fatal("config has no firecracker.helper")
 	}
-	img, ok := cfg.Images["base"]
-	if !ok {
+	if _, ok := cfg.Images["base"]; !ok {
 		t.Fatal(`config has no "base" image`)
-	}
-	if filepath.Base(img.Kernel) != "vmlinux" {
-		t.Fatalf("base kernel must be named vmlinux, got %s", img.Kernel)
 	}
 	p, err := firecracker.New(firecracker.Config{
 		StagingBase: cfg.Firecracker.StagingDir,
-		ImageRoot:   cfg.Firecracker.ImageRoot,
 		Identities:  cfg.MaxConcurrent,
 		Host:        firecracker.NewHelperHost(cfg.Firecracker.Helper),
 	})
@@ -85,13 +80,12 @@ func setupHelperE2E(t *testing.T, cfgPath string) *e2eEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &e2eEnv{images: filepath.Dir(img.Kernel), base: cfg.Firecracker.ChrootBase, staging: cfg.Firecracker.StagingDir,
-		rootfs: img.RootFS, provider: p, network: netCfg}
+	return &e2eEnv{base: cfg.Firecracker.ChrootBase, staging: cfg.Firecracker.StagingDir, provider: p, network: netCfg}
 }
 
 func (e *e2eEnv) spec(id string, timeout time.Duration, bootArgs ...string) sandbox.Spec {
 	return sandbox.Spec{
-		ID: id, Kernel: filepath.Join(e.images, "vmlinux"), RootFS: e.rootfs,
+		ID: id, Image: "base",
 		CPUs: 1, MemoryMiB: 128, Timeout: timeout, BootArgs: bootArgs,
 	}
 }

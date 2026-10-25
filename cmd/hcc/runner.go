@@ -80,7 +80,6 @@ func serve(configPath string, log *slog.Logger) error {
 	}
 	provider, err := firecracker.New(firecracker.Config{
 		StagingBase: cfg.Firecracker.StagingDir,
-		ImageRoot:   cfg.Firecracker.ImageRoot,
 		// One UID/GID per concurrently running VM: uid..uid+maxConcurrent-1.
 		Identities: cfg.MaxConcurrent,
 		Host:       firecracker.NewHelperHost(cfg.Firecracker.Helper),
@@ -88,9 +87,9 @@ func serve(configPath string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	images := make(map[string]runner.Image, len(cfg.Images))
-	for name, img := range cfg.Images {
-		images[name] = runner.Image{Kernel: img.Kernel, RootFS: img.RootFS}
+	images := make([]string, 0, len(cfg.Images))
+	for name := range cfg.Images {
+		images = append(images, name)
 	}
 	netCfg, err := cfg.NetworkConfig()
 	if err != nil {

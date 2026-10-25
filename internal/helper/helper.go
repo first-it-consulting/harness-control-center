@@ -4,7 +4,8 @@
 // runner calls it through sudo with a single sudoers rule; it performs
 // exactly these operations and trusts nothing it is given:
 //
-//	start    --id ID --slot N --cpus C --memory M   build the jail, exec the jailer
+//	start    --id ID --image NAME --slot N --cpus C --memory M
+//	                                                 build the jail, exec the jailer
 //	kill     --id ID                                 kill everything in the jail's cgroup
 //	remove   --id ID                                 delete the jail and its cgroup
 //	net-up   --slot N                                create slot N's tap link (prints its NetInfo)
@@ -59,9 +60,9 @@ type Config struct {
 	// TrustAnchor is where ownership checks stop walking up: "/" (the
 	// default), except in tests.
 	TrustAnchor string
-	// MaxRootFSBytes caps the staged root filesystem (default
-	// DefaultMaxRootFSBytes): root copies it onto a root-owned filesystem.
-	MaxRootFSBytes int64
+	// Images are the bootable images by name. Their files (and every
+	// directory above them) must be root-owned and writable only by root.
+	Images map[string]Image
 	// Network enables net-up/net-down; nil refuses them.
 	Network *firecracker.NetworkConfig
 	// IPTool and NFTTool are the absolute paths of ip(8) and nft(8).
@@ -70,13 +71,17 @@ type Config struct {
 	SysctlRoot string
 }
 
+// Image is one bootable image (root-side configuration).
+type Image struct {
+	Kernel, RootFS string
+}
+
 // Size caps for staged files. Root copies them, so without a cap a
 // compromised runner could fill the root filesystem (including the blocks
 // reserved for root).
 const (
-	MaxKernelBytes        = 128 << 20
-	MaxConfigBytes        = 1 << 20
-	DefaultMaxRootFSBytes = 8 << 30
+	MaxConfigBytes = 1 << 20
+	MaxTaskBytes   = sandbox.MaxTaskBytes + 512 // padded to whole sectors
 )
 
 // Deps are the side effects, replaceable in tests.
@@ -120,9 +125,6 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 	if cfg.TrustAnchor == "" {
 		cfg.TrustAnchor = "/"
 	}
-	if cfg.MaxRootFSBytes <= 0 {
-		cfg.MaxRootFSBytes = DefaultMaxRootFSBytes
-	}
 	if d.FreeBytes == nil {
 		d.FreeBytes = freeBytes
 	}
@@ -143,7 +145,9 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 	fs.SetOutput(io.Discard)
 	id := fs.String("id", "", "")
 	var slot, cpus, memory *int
+	var image *string
 	if op == "start" {
+		image = fs.String("image", "", "")
 		slot = fs.Int("slot", -1, "")
 		cpus = fs.Int("cpus", 0, "")
 		memory = fs.Int("memory", 0, "")
@@ -174,7 +178,11 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 		if err != nil {
 			return err
 		}
-		if err := buildJail(cfg, d, base, *id); err != nil {
+		img, ok := cfg.Images[*image]
+		if !ok {
+			return fmt.Errorf("unknown image %q", *image)
+		}
+		if err := buildJail(cfg, d, base, *id, img); err != nil {
 			return err
 		}
 		return d.Exec(argv[0], argv, execEnv)
@@ -213,18 +221,15 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 	}
 }
 
-// stagedFiles are the only files copied into a jail.
-var stagedFiles = []string{"vmlinux", "rootfs.ext4", "config.json"}
-
-func (cfg Config) maxBytes(name string) int64 {
-	switch name {
-	case "vmlinux":
-		return MaxKernelBytes
-	case "config.json":
-		return MaxConfigBytes
-	default:
-		return cfg.MaxRootFSBytes
-	}
+// stagedFiles are the only files copied from the runner into a jail:
+// name, size limit, and whether it is optional.
+var stagedFiles = []struct {
+	name     string
+	limit    int64
+	optional bool
+}{
+	{"config.json", MaxConfigBytes, false},
+	{"task.img", MaxTaskBytes, true},
 }
 
 // MinFreeBytes must remain free on the jail filesystem after a jail is
@@ -232,10 +237,10 @@ func (cfg Config) maxBytes(name string) int64 {
 // reserved blocks are never touched.
 const MinFreeBytes = 1 << 30
 
-// buildJail creates base/firecracker/<id>/root as root and copies the
-// staged files into it, read-only for the VM. On any failure the partial
-// jail is removed.
-func buildJail(cfg Config, d Deps, base, id string) (err error) {
+// buildJail creates base/firecracker/<id>/root as root, links (or
+// copies) the image into it and copies the staged files, all read-only
+// for the VM. On any failure the partial jail is removed.
+func buildJail(cfg Config, d Deps, base, id string, img Image) (err error) {
 	parent := filepath.Join(base, "firecracker")
 	// 0711: the runner may check whether its jail still exists, but can
 	// neither list nor change anything.
@@ -283,13 +288,23 @@ func buildJail(cfg Config, d Deps, base, id string) (err error) {
 		}
 	}()
 	var total int64
-	for _, name := range stagedFiles {
-		f, err := openStaged(staging, name, cfg.RunnerUID, cfg.maxBytes(name))
+	for _, sf := range stagedFiles {
+		f, err := openStaged(staging, sf.name, cfg.RunnerUID, sf.limit)
+		if errors.Is(err, unix.ENOENT) && sf.optional {
+			continue
+		}
 		if err != nil {
 			return err
 		}
-		files[name] = f
+		files[sf.name] = f
 		total += f.size
+	}
+	// The image must be root's all the way up: the runner chooses only
+	// its name.
+	for _, p := range []string{img.Kernel, img.RootFS} {
+		if err := checkRootOwnedFile(p, cfg.RootUID, cfg.TrustAnchor); err != nil {
+			return fmt.Errorf("image: %w", err)
+		}
 	}
 	free, err := d.FreeBytes(base)
 	if err != nil {
@@ -317,10 +332,69 @@ func buildJail(cfg Config, d Deps, base, id string) (err error) {
 	if err := os.Chmod(root, 0o711); err != nil { //nolint:gosec // traversal by the jailed UID is required
 		return err
 	}
-	for _, name := range stagedFiles {
-		if err := files[name].copyTo(filepath.Join(root, name)); err != nil {
+	for name, f := range files {
+		if err := f.copyTo(filepath.Join(root, name)); err != nil {
 			return err
 		}
+	}
+	for dst, src := range map[string]string{"vmlinux": img.Kernel, "rootfs.ext4": img.RootFS} {
+		if err := linkOrCopy(d, base, src, filepath.Join(root, dst)); err != nil {
+			return fmt.Errorf("image %s: %w", dst, err)
+		}
+	}
+	return nil
+}
+
+// linkOrCopy hard-links a root-owned image file into the jail (no copy:
+// images can be large, and the VM opens them read-only, as a UID that
+// cannot write them). Across filesystems it copies, if space allows.
+func linkOrCopy(d Deps, base, src, dst string) error {
+	err := os.Link(src, dst)
+	if err == nil || !errors.Is(err, unix.EXDEV) {
+		return err
+	}
+	in, err := os.Open(src) //nolint:gosec // root-owned image path from the configuration
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	fi, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	free, err := d.FreeBytes(base)
+	if err != nil {
+		return err
+	}
+	if uint64(fi.Size())+MinFreeBytes > free { //nolint:gosec // file sizes are non-negative
+		return fmt.Errorf("not enough space to copy %s (%d bytes free)", src, free)
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o444) //nolint:gosec // read-only for the VM
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// checkRootOwnedFile requires a regular file owned by rootUID, writable
+// only by it, in a directory chain that is root's (checkRootOwnedDirs).
+func checkRootOwnedFile(path string, rootUID int, anchor string) error {
+	if !cleanAbs(path) {
+		return fmt.Errorf("path %q must be clean and absolute", path)
+	}
+	if err := checkRootOwnedDirs(filepath.Dir(path), rootUID, anchor); err != nil {
+		return err
+	}
+	var st unix.Stat_t
+	if err := unix.Lstat(path, &st); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || int(st.Uid) != rootUID || st.Mode&0o022 != 0 {
+		return fmt.Errorf("%s must be a regular file owned by root and writable only by root", path)
 	}
 	return nil
 }

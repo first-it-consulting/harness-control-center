@@ -87,7 +87,7 @@ func newRunner(t *testing.T, p *fakeProvider, maxConcurrent int) *Runner {
 	var n atomic.Int32
 	r, err := New(Config{
 		Provider:      p,
-		Images:        map[string]Image{"base": {Kernel: "/img/vmlinux", RootFS: "/img/rootfs.ext4"}},
+		Images:        []string{"base"},
 		MaxConcurrent: maxConcurrent,
 		NewID:         func() string { return fmt.Sprintf("job-%d", n.Add(1)) },
 	})
@@ -152,7 +152,7 @@ func TestSubmitRunsToSuccessWithFullEventTrail(t *testing.T) {
 
 	s := p.startedSpecs()[0]
 	if s.ID != id || s.CPUs != 2 || s.MemoryMiB != 512 || s.Timeout != 10*time.Minute ||
-		s.Kernel != "/img/vmlinux" || s.RootFS != "/img/rootfs.ext4" || len(s.BootArgs) != 0 {
+		s.Image != "base" || len(s.BootArgs) != 0 {
 		t.Errorf("sandbox spec = %+v", s)
 	}
 }
@@ -313,7 +313,7 @@ func TestKillSwitch(t *testing.T) {
 func TestShutdown(t *testing.T) {
 	p := newFakeProvider()
 	p.block = true
-	r, err := New(Config{Provider: p, Images: map[string]Image{"base": {}}})
+	r, err := New(Config{Provider: p, Images: []string{"base"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +416,7 @@ func TestRejectsOtherTargets(t *testing.T) {
 		t.Errorf("local runner accepted a remote harness: %v", err)
 	}
 
-	remote, err := New(Config{Provider: p, Target: "server:homelab-01", Images: map[string]Image{"base": {}}})
+	remote, err := New(Config{Provider: p, Target: "server:homelab-01", Images: []string{"base"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +443,7 @@ func TestConsoleIsClosedWhenJobEnds(t *testing.T) {
 	rec := &closeRecorder{Writer: io.Discard}
 	r, err := New(Config{
 		Provider: newFakeProvider(),
-		Images:   map[string]Image{"base": {}},
+		Images:   []string{"base"},
 		Console:  func(string) io.Writer { return rec },
 	})
 	if err != nil {
@@ -526,7 +526,7 @@ func TestNetworkGetsPerJobProxy(t *testing.T) {
 	var asked []string
 	r, err := New(Config{
 		Provider: p,
-		Images:   map[string]Image{"base": {}},
+		Images:   []string{"base"},
 		Egress: func(h *spec.Harness, jobID string) (sandbox.Proxy, error) {
 			asked = append(asked, h.Metadata.Name+"/"+jobID)
 			return nopProxy{job: jobID}, nil
@@ -563,7 +563,7 @@ func TestNetworkGetsPerJobProxy(t *testing.T) {
 func TestEgressFactoryErrorRejectsJob(t *testing.T) {
 	r, err := New(Config{
 		Provider: newFakeProvider(),
-		Images:   map[string]Image{"base": {}},
+		Images:   []string{"base"},
 		Egress:   func(*spec.Harness, string) (sandbox.Proxy, error) { return nil, errors.New("no subnet") },
 	})
 	if err != nil {

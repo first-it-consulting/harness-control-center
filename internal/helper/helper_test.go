@@ -88,7 +88,7 @@ func newEnv(t *testing.T) *env {
 	e := &env{
 		anchor: dir, base: filepath.Join(dir, "jails"), stage: filepath.Join(dir, "staging"),
 		cg: filepath.Join(dir, "cgroup"), rec: &recorder{}, me: me,
-		start: []string{"start", "--id", "job-1", "--slot", "1", "--cpus", "2", "--memory", "256"},
+		start: []string{"start", "--id", "job-1", "--image", "base", "--slot", "1", "--cpus", "2", "--memory", "256"},
 	}
 	for _, d := range []string{e.base, e.stage} {
 		if err := os.Mkdir(d, 0o700); err != nil {
@@ -107,6 +107,19 @@ func newEnv(t *testing.T) *env {
 		RootUID:     me,
 		TrustAnchor: dir,
 	}
+	// A root-owned image (here: owned by the test user, who plays root).
+	imgDir := filepath.Join(dir, "images", "base")
+	if err := os.MkdirAll(imgDir, 0o755); err != nil { //nolint:gosec // stands in for root-owned 0755 directories
+		t.Fatal(err)
+	}
+	_ = os.Chmod(filepath.Join(dir, "images"), 0o755) //nolint:gosec // as above
+	for _, f := range []string{"vmlinux", "rootfs.ext4"} {
+		if err := os.WriteFile(filepath.Join(imgDir, f), []byte("image "+f), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chmod(filepath.Join(imgDir, f), 0o644) //nolint:gosec // images are world-readable, root-writable
+	}
+	e.cfg.Images = map[string]Image{"base": {Kernel: filepath.Join(imgDir, "vmlinux"), RootFS: filepath.Join(imgDir, "rootfs.ext4")}}
 	return e
 }
 
@@ -117,8 +130,8 @@ func (e *env) stageJob1(t *testing.T) string {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range stagedFiles {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("content of "+name), 0o600); err != nil {
+	for _, sf := range stagedFiles {
+		if err := os.WriteFile(filepath.Join(dir, sf.name), []byte("content of "+sf.name), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -143,14 +156,22 @@ func TestStartBuildsJailAndExecsJailer(t *testing.T) {
 	if fi, err := os.Stat(root); err != nil || fi.Mode().Perm() != 0o711 {
 		t.Errorf("jail root = %v, %v; want mode 0711", fi, err)
 	}
-	for _, name := range stagedFiles {
-		p := filepath.Join(root, name)
+	for _, sf := range stagedFiles {
+		p := filepath.Join(root, sf.name)
 		data, err := os.ReadFile(p)
-		if err != nil || string(data) != "content of "+name {
-			t.Errorf("%s = %q, %v", name, data, err)
+		if err != nil || string(data) != "content of "+sf.name {
+			t.Errorf("%s = %q, %v", sf.name, data, err)
 		}
 		if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o444 {
-			t.Errorf("%s mode = %v, want 0444", name, fi.Mode().Perm())
+			t.Errorf("%s mode = %v, want 0444", sf.name, fi.Mode().Perm())
+		}
+	}
+	// The image is linked, not copied.
+	for name, src := range map[string]string{"vmlinux": e.cfg.Images["base"].Kernel, "rootfs.ext4": e.cfg.Images["base"].RootFS} {
+		a, err1 := os.Stat(filepath.Join(root, name))
+		b, err2 := os.Stat(src)
+		if err1 != nil || err2 != nil || !os.SameFile(a, b) {
+			t.Errorf("%s not hard-linked from the image (%v, %v)", name, err1, err2)
 		}
 	}
 	if len(e.rec.execArgv) != 1 {
@@ -191,12 +212,12 @@ func TestRejectsBadArguments(t *testing.T) {
 		"traversal id":       {"remove", "--id", "../../etc"},
 		"option as id":       {"kill", "--id", "-rf"},
 		"extra argument":     {"kill", "--id", "job-1", "/etc"},
-		"slot out of range":  {"start", "--id", "job-1", "--slot", "2", "--cpus", "1", "--memory", "128"},
-		"negative slot":      {"start", "--id", "job-1", "--slot", "-1", "--cpus", "1", "--memory", "128"},
-		"too many cpus":      {"start", "--id", "job-1", "--slot", "0", "--cpus", "999", "--memory", "128"},
-		"caller chooses uid": {"start", "--id", "job-1", "--slot", "0", "--cpus", "1", "--memory", "128", "--uid", "0"},
-		"caller chooses bin": {"start", "--id", "job-1", "--slot", "0", "--cpus", "1", "--memory", "128", "--exec-file", "/bin/sh"},
-		"nothing staged":     {"start", "--id", "job-2", "--slot", "0", "--cpus", "1", "--memory", "128"},
+		"slot out of range":  {"start", "--id", "job-1", "--image", "base", "--slot", "2", "--cpus", "1", "--memory", "128"},
+		"negative slot":      {"start", "--id", "job-1", "--image", "base", "--slot", "-1", "--cpus", "1", "--memory", "128"},
+		"too many cpus":      {"start", "--id", "job-1", "--image", "base", "--slot", "0", "--cpus", "999", "--memory", "128"},
+		"caller chooses uid": {"start", "--id", "job-1", "--image", "base", "--slot", "0", "--cpus", "1", "--memory", "128", "--uid", "0"},
+		"caller chooses bin": {"start", "--id", "job-1", "--image", "base", "--slot", "0", "--cpus", "1", "--memory", "128", "--exec-file", "/bin/sh"},
+		"nothing staged":     {"start", "--id", "job-2", "--image", "base", "--slot", "0", "--cpus", "1", "--memory", "128"},
 	}
 	for name, args := range tests {
 		if code, _ := e.call(args...); code == 0 {
@@ -219,8 +240,8 @@ func TestRefusesHostileStaging(t *testing.T) {
 		"staging dir is a symlink": func(t *testing.T, e *env) {
 			target := filepath.Join(e.anchor, "elsewhere")
 			_ = os.Mkdir(target, 0o700)
-			for _, n := range stagedFiles {
-				_ = os.WriteFile(filepath.Join(target, n), nil, 0o600)
+			for _, sf := range stagedFiles {
+				_ = os.WriteFile(filepath.Join(target, sf.name), nil, 0o600)
 			}
 			if err := os.Symlink(target, filepath.Join(e.stage, "job-1")); err != nil {
 				t.Fatal(err)
@@ -228,14 +249,14 @@ func TestRefusesHostileStaging(t *testing.T) {
 		},
 		"staged file is a symlink": func(t *testing.T, e *env) {
 			dir := e.stageJob1(t)
-			_ = os.Remove(filepath.Join(dir, "rootfs.ext4"))
-			if err := os.Symlink(secret, filepath.Join(dir, "rootfs.ext4")); err != nil {
+			_ = os.Remove(filepath.Join(dir, "task.img"))
+			if err := os.Symlink(secret, filepath.Join(dir, "task.img")); err != nil {
 				t.Fatal(err)
 			}
 		},
 		"staged file is a hard link": func(t *testing.T, e *env) {
 			dir := e.stageJob1(t)
-			if err := os.Link(filepath.Join(dir, "vmlinux"), filepath.Join(e.anchor, "second-link")); err != nil {
+			if err := os.Link(filepath.Join(dir, "config.json"), filepath.Join(e.anchor, "second-link")); err != nil {
 				t.Fatal(err)
 			}
 		},
@@ -267,7 +288,7 @@ func TestRefusesHostileStaging(t *testing.T) {
 			if len(e.rec.execArgv) != 0 {
 				t.Error("jailer was executed")
 			}
-			if data, err := os.ReadFile(filepath.Join(firecracker.JailDir(e.base, "job-1"), "root", "rootfs.ext4")); err == nil && string(data) == "root only" {
+			if data, err := os.ReadFile(filepath.Join(firecracker.JailDir(e.base, "job-1"), "root", "task.img")); err == nil && string(data) == "root only" {
 				t.Error("secret was copied into the jail")
 			}
 		})
@@ -362,19 +383,18 @@ func TestKillAndRemove(t *testing.T) {
 func TestRefusesOversizedStagedFiles(t *testing.T) {
 	e := newEnv(t)
 	dir := e.stageJob1(t)
-	e.cfg.MaxRootFSBytes = 1024
 	// A sparse file: tiny on disk, but root would write all of it.
-	f, err := os.OpenFile(filepath.Join(dir, "rootfs.ext4"), os.O_WRONLY|os.O_TRUNC, 0)
+	f, err := os.OpenFile(filepath.Join(dir, "task.img"), os.O_WRONLY|os.O_TRUNC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Truncate(1 << 30); err != nil {
+	if err := f.Truncate(MaxTaskBytes + 1); err != nil {
 		t.Fatal(err)
 	}
 	_ = f.Close()
 	code, stderr := e.call(e.start...)
 	if code == 0 || !strings.Contains(stderr, "limit") {
-		t.Fatalf("oversized rootfs accepted: %d %q", code, stderr)
+		t.Fatalf("oversized task accepted: %d %q", code, stderr)
 	}
 	if len(e.rec.execArgv) != 0 {
 		t.Error("jailer was executed")
@@ -459,8 +479,8 @@ func TestConcurrentStartsRespectTheJailLimit(t *testing.T) {
 			if err := os.Mkdir(dir, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			for _, n := range stagedFiles {
-				if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o600); err != nil {
+			for _, sf := range stagedFiles {
+				if err := os.WriteFile(filepath.Join(dir, sf.name), []byte("x"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -469,7 +489,7 @@ func TestConcurrentStartsRespectTheJailLimit(t *testing.T) {
 		for _, id := range []string{"job-1", "job-2"} {
 			go func() {
 				var stderr bytes.Buffer
-				codes <- Main(e.cfg, []string{"start", "--id", id, "--slot", "0", "--cpus", "1", "--memory", "128"}, e.me, (&recorder{}).deps(), io.Discard, &stderr)
+				codes <- Main(e.cfg, []string{"start", "--id", id, "--image", "base", "--slot", "0", "--cpus", "1", "--memory", "128"}, e.me, (&recorder{}).deps(), io.Discard, &stderr)
 			}()
 		}
 		ok := 0
@@ -586,5 +606,51 @@ func TestNetRefusals(t *testing.T) {
 	e.cfg.Network = nil
 	if code, _, stderr := e.callOut("net-up", "--slot", "0"); code == 0 || !strings.Contains(stderr, "not configured") {
 		t.Errorf("without network config: %d %q", code, stderr)
+	}
+}
+
+func TestImagesAreRootsAndChosenByName(t *testing.T) {
+	cases := map[string]func(e *env){
+		"unknown image":      func(e *env) { e.start[4] = "ubuntu" },
+		"image path as name": func(e *env) { e.start[4] = e.cfg.Images["base"].RootFS },
+		"image writable by others": func(e *env) {
+			_ = os.Chmod(e.cfg.Images["base"].RootFS, 0o666) //nolint:gosec // the unsafe mode is the point
+		},
+		"image is a symlink": func(e *env) {
+			img := e.cfg.Images["base"]
+			_ = os.Remove(img.RootFS)
+			_ = os.Symlink("/etc/passwd", img.RootFS)
+		},
+		"image dir writable by others": func(e *env) {
+			_ = os.Chmod(filepath.Dir(e.cfg.Images["base"].RootFS), 0o777) //nolint:gosec // the unsafe mode is the point
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			e.stageJob1(t)
+			setup(e)
+			if code, _ := e.call(e.start...); code == 0 {
+				t.Error("start accepted")
+			}
+			if len(e.rec.execArgv) != 0 {
+				t.Error("jailer was executed")
+			}
+			if _, err := os.Stat(firecracker.JailDir(e.base, "job-1")); !os.IsNotExist(err) {
+				t.Error("jail left behind")
+			}
+		})
+	}
+}
+
+func TestTaskIsOptional(t *testing.T) {
+	e := newEnv(t)
+	dir := e.stageJob1(t)
+	_ = os.Remove(filepath.Join(dir, "task.img"))
+	if code, stderr := e.call(e.start...); code != 0 {
+		t.Fatalf("start without a task: %s", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(firecracker.JailDir(e.base, "job-1"), "root", "task.img")); !os.IsNotExist(err) {
+		t.Error("task.img appeared without being staged")
 	}
 }

@@ -47,7 +47,7 @@ func startTestRunner(t *testing.T) string {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	r, err := runner.New(runner.Config{
 		Provider: cliProvider{},
-		Images:   map[string]runner.Image{"base": {}},
+		Images:   []string{"base"},
 		Console:  runnerd.ConsoleFunc(filepath.Join(dir, "state"), log),
 	})
 	if err != nil {

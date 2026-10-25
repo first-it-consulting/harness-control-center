@@ -75,7 +75,7 @@ func startDaemon(t *testing.T) *testDaemon {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	r, err := runner.New(runner.Config{
 		Provider:      testProvider{},
-		Images:        map[string]runner.Image{"base": {}},
+		Images:        []string{"base"},
 		MaxConcurrent: 2,
 		Console:       ConsoleFunc(state, log),
 	})

@@ -61,7 +61,7 @@ func (h *HelperHost) StartVM(req StartRequest, console io.Writer) (Process, erro
 		return nil, err
 	}
 	return startProcess(h.Prefix, []string{h.HelperPath, "start",
-		"--id", req.ID, "--slot", strconv.Itoa(req.Slot),
+		"--id", req.ID, "--image", req.Image, "--slot", strconv.Itoa(req.Slot),
 		"--cpus", strconv.Itoa(req.CPUs), "--memory", strconv.Itoa(req.MemoryMiB),
 	}, console)
 }

@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -32,10 +30,13 @@ type Spec struct {
 	// ID is unique per run. It ends up in host paths, so it is restricted
 	// to lowercase letters, digits and '-'.
 	ID string
-	// Kernel and RootFS are absolute paths to the guest kernel and the
-	// root filesystem image. The root filesystem is attached read-only.
-	Kernel string
-	RootFS string
+	// Image names a bootable image the provider knows (it resolves the
+	// name itself; callers never pass paths). Its root filesystem is
+	// attached read-only.
+	Image string
+	// Task, if set, is given to the guest read-only (drive vdb), e.g. the
+	// agent's prompt and settings. At most MaxTaskBytes.
+	Task []byte
 	// CPUs and MemoryMiB size the guest.
 	CPUs      int
 	MemoryMiB int
@@ -68,11 +69,13 @@ const (
 	MinMemoryMiB = 128
 	MaxMemoryMiB = 64 * 1024
 	MaxTimeout   = 24 * time.Hour
+	MaxTaskBytes = 1 << 20
 )
 
 var (
-	idRe      = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-	bootArgRe = regexp.MustCompile(`^[a-z0-9_.]+(=[A-Za-z0-9_.,:/-]+)?$`)
+	idRe        = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	imageNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	bootArgRe   = regexp.MustCompile(`^[a-z0-9_.]+(=[A-Za-z0-9_.,:/-]+)?$`)
 	// Kernel parameters that would let a caller change how the guest boots
 	// or what it runs.
 	reservedBootArgs = map[string]bool{
@@ -96,10 +99,11 @@ func (s *Spec) Validate() error {
 	if err := ValidateID(s.ID); err != nil {
 		errs = append(errs, err)
 	}
-	for name, path := range map[string]string{"kernel": s.Kernel, "rootfs": s.RootFS} {
-		if err := checkFile(path); err != nil {
-			errs = append(errs, fmt.Errorf("sandbox: %s: %w", name, err))
-		}
+	if !imageNameRe.MatchString(s.Image) {
+		errs = append(errs, fmt.Errorf("sandbox: invalid image name %q", s.Image))
+	}
+	if len(s.Task) > MaxTaskBytes {
+		errs = append(errs, fmt.Errorf("sandbox: task is %d bytes; the limit is %d", len(s.Task), MaxTaskBytes))
 	}
 	if s.CPUs < 1 || s.CPUs > MaxCPUs {
 		errs = append(errs, fmt.Errorf("sandbox: cpus must be between 1 and %d", MaxCPUs))
@@ -123,20 +127,6 @@ func (s *Spec) Validate() error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-func checkFile(path string) error {
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("path %q must be absolute", path)
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if !fi.Mode().IsRegular() {
-		return fmt.Errorf("%q is not a regular file", path)
-	}
-	return nil
 }
 
 // Outcome says how a run ended.

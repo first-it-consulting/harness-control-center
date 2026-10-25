@@ -3,10 +3,11 @@
 // needs root goes through Host.
 //
 // Per run, the provider:
-//  1. stages the kernel, root filesystem and VM configuration in
+//  1. stages the VM configuration (and the task, if any) in
 //     <StagingBase>/<id> (its own directory),
-//  2. asks its Host to start the VM: root-side, hcc-helper builds a
-//     root-owned jail from the staged files, then the jailer applies
+//  2. asks its Host to start the VM by image name: root-side, hcc-helper
+//     builds a root-owned jail from the image (from its own configuration)
+//     and the staged files, then the jailer applies
 //     cgroup v2 limits, pivot_roots into a private mount namespace, drops
 //     to the slot's UID/GID and execs Firecracker,
 //  3. stops the VM on timeout or cancellation (SIGTERM, then
@@ -58,10 +59,6 @@ type Config struct {
 	// the Host copies them into a root-owned jail. It must match the
 	// Host's configuration.
 	StagingBase string
-	// ImageRoot bounds which files can become a guest's kernel or root
-	// filesystem: Spec.Kernel and Spec.RootFS must resolve (symlinks
-	// included) to regular files inside it.
-	ImageRoot string
 	// Identities is how many VMs can run at once (default 1); it must not
 	// exceed the Host's.
 	Identities int
@@ -87,10 +84,8 @@ var _ sandbox.Provider = (*Provider)(nil)
 // New validates cfg and returns a provider.
 func New(cfg Config) (*Provider, error) {
 	var errs []error
-	for name, p := range map[string]string{"StagingBase": cfg.StagingBase, "ImageRoot": cfg.ImageRoot} {
-		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
-			errs = append(errs, fmt.Errorf("%s must be a clean absolute path, got %q", name, p))
-		}
+	if !filepath.IsAbs(cfg.StagingBase) || filepath.Clean(cfg.StagingBase) != cfg.StagingBase {
+		errs = append(errs, fmt.Errorf("StagingBase must be a clean absolute path, got %q", cfg.StagingBase))
 	}
 	if cfg.Identities == 0 {
 		cfg.Identities = 1
@@ -142,17 +137,6 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 	if err := spec.Validate(); err != nil {
 		return res, err
 	}
-	kernel, err := p.openImage(spec.Kernel)
-	if err != nil {
-		return res, err
-	}
-	defer kernel.Close()
-	rootfs, err := p.openImage(spec.RootFS)
-	if err != nil {
-		return res, err
-	}
-	defer rootfs.Close()
-
 	slot, err := p.acquire()
 	if err != nil {
 		return res, err
@@ -204,14 +188,14 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 		res.Duration = time.Since(start)
 	}()
 
-	if err := p.stage(staging, &spec, link, kernel, rootfs); err != nil {
+	if err := p.stage(staging, &spec, link); err != nil {
 		return res, err
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, spec.Timeout)
 	defer cancel()
 
-	proc, err := p.cfg.Host.StartVM(StartRequest{ID: spec.ID, Slot: slot, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB}, console)
+	proc, err := p.cfg.Host.StartVM(StartRequest{ID: spec.ID, Image: spec.Image, Slot: slot, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB}, console)
 	if err != nil {
 		return res, err
 	}
@@ -263,15 +247,13 @@ func (p *Provider) stop(id string, proc Process, done <-chan error) error {
 	}
 }
 
-// stage writes the VM's files into the staging directory. They are
-// copies, so the VM can never affect the originals; the helper copies
-// them once more into the root-owned jail.
-func (p *Provider) stage(dir string, spec *sandbox.Spec, link *NetInfo, kernel, rootfs *os.File) error {
-	if err := writeStaged(kernel, "vmlinux", filepath.Join(dir, "vmlinux")); err != nil {
-		return err
-	}
-	if err := writeStaged(rootfs, "rootfs.ext4", filepath.Join(dir, "rootfs.ext4")); err != nil {
-		return err
+// stage writes the VM configuration and the task into the staging
+// directory; the helper copies them into the root-owned jail.
+func (p *Provider) stage(dir string, spec *sandbox.Spec, link *NetInfo) error {
+	if len(spec.Task) > 0 {
+		if err := writeStaged(bytes.NewReader(taskImage(spec.Task)), "task.img", filepath.Join(dir, "task.img")); err != nil {
+			return err
+		}
 	}
 	cfg, err := json.MarshalIndent(vmConfig(spec, link), "", "  ")
 	if err != nil {
@@ -296,12 +278,7 @@ func vmConfig(spec *sandbox.Spec, link *NetInfo) map[string]any {
 			"kernel_image_path": "vmlinux",
 			"boot_args":         strings.Join(args, " "),
 		},
-		"drives": []map[string]any{{
-			"drive_id":       "rootfs",
-			"path_on_host":   "rootfs.ext4",
-			"is_root_device": true,
-			"is_read_only":   true,
-		}},
+		"drives": drives(spec),
 		"machine-config": map[string]any{
 			"vcpu_count":   spec.CPUs,
 			"mem_size_mib": spec.MemoryMiB,
@@ -362,34 +339,6 @@ func (p *Provider) startNetwork(ctx context.Context, slot int, proxy sandbox.Pro
 	}, nil
 }
 
-// openImage resolves path, checks that it lies inside ImageRoot, opens it
-// and verifies the opened file (not the path) is a regular file. Copying
-// from this handle means a symlink swapped in after the check cannot
-// redirect what ends up in the guest.
-func (p *Provider) openImage(path string) (*os.File, error) {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return nil, fmt.Errorf("firecracker: image %s: %w", path, err)
-	}
-	root, err := filepath.EvalSymlinks(p.cfg.ImageRoot)
-	if err != nil {
-		return nil, fmt.Errorf("firecracker: image root: %w", err)
-	}
-	if rel, err := filepath.Rel(root, resolved); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, fmt.Errorf("firecracker: image %s is outside the image root %s", path, p.cfg.ImageRoot)
-	}
-	f, err := os.Open(resolved) // confined to ImageRoot above
-	if err != nil {
-		return nil, fmt.Errorf("firecracker: %w", err)
-	}
-	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() {
-		_ = f.Close()
-		return nil, fmt.Errorf("firecracker: image %s is not a regular file", path)
-	}
-	return f, nil
-}
-
 // writeStaged creates dst exclusively (owner-only) and fills it from r.
 func writeStaged(r io.Reader, name, dst string) error {
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // dst is inside our own staging directory
@@ -421,4 +370,32 @@ func (l *peerListener) Accept() (net.Conn, error) {
 		}
 		_ = c.Close()
 	}
+}
+
+func drives(spec *sandbox.Spec) []map[string]any {
+	d := []map[string]any{{
+		"drive_id":       "rootfs",
+		"path_on_host":   "rootfs.ext4",
+		"is_root_device": true,
+		"is_read_only":   true,
+	}}
+	if len(spec.Task) > 0 {
+		// The guest reads its task from /dev/vdb.
+		d = append(d, map[string]any{
+			"drive_id":       "task",
+			"path_on_host":   "task.img",
+			"is_root_device": false,
+			"is_read_only":   true,
+		})
+	}
+	return d
+}
+
+// taskImage pads the task to whole sectors with zero bytes; the guest
+// strips them.
+func taskImage(task []byte) []byte {
+	n := (len(task) + 511) / 512 * 512
+	out := make([]byte, n)
+	copy(out, task)
+	return out
 }

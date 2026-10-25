@@ -31,12 +31,6 @@ var (
 	ErrNotFound = errors.New("runner: no such job")
 )
 
-// Image is a bootable sandbox image.
-type Image struct {
-	Kernel string
-	RootFS string
-}
-
 // Config configures a Runner.
 type Config struct {
 	Provider sandbox.Provider
@@ -44,9 +38,9 @@ type Config struct {
 	// "local" (default) or "server:<name>". Harnesses addressed to any
 	// other target are rejected.
 	Target string
-	// Images maps spec.sandbox.image names to files. Unknown names are
-	// rejected.
-	Images map[string]Image
+	// Images are the spec.sandbox.image names the provider can boot.
+	// Unknown names are rejected.
+	Images []string
 	// MaxConcurrent bounds running jobs (default 1).
 	MaxConcurrent int
 	// Console returns where a job's console output goes (default:
@@ -133,8 +127,7 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 	if err := checkSupported(h); err != nil {
 		return "", err
 	}
-	img, ok := r.cfg.Images[h.Spec.Sandbox.Image]
-	if !ok {
+	if !slices.Contains(r.cfg.Images, h.Spec.Sandbox.Image) {
 		return "", fmt.Errorf("runner: unknown image %q", h.Spec.Sandbox.Image)
 	}
 
@@ -166,8 +159,7 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 		// writable disk, so it can never use more than allowed.
 		spec: sandbox.Spec{
 			ID:        id,
-			Kernel:    img.Kernel,
-			RootFS:    img.RootFS,
+			Image:     h.Spec.Sandbox.Image,
 			CPUs:      h.Spec.Sandbox.CPUs,
 			MemoryMiB: h.Spec.Sandbox.MemoryMiB,
 			Timeout:   h.Spec.Sandbox.Timeout.Duration,

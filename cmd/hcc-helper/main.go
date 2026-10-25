@@ -73,6 +73,10 @@ func setup() (helper.Config, int, error) {
 	if err != nil {
 		return helper.Config{}, 0, err
 	}
+	images := make(map[string]helper.Image, len(c.Images))
+	for name, img := range c.Images {
+		images[name] = helper.Image{Kernel: img.Kernel, RootFS: img.RootFS}
+	}
 	return helper.Config{
 		Jailer: firecracker.JailerConfig{
 			JailerPath:      c.Firecracker.Jailer,
@@ -87,10 +91,9 @@ func setup() (helper.Config, int, error) {
 		CgroupRoot:  firecracker.DefaultCgroupRoot,
 		RunnerUID:   uid,
 		RootUID:     0,
-		// 0 means the helper's default.
-		MaxRootFSBytes: int64(c.Firecracker.MaxRootFSMiB) << 20,
-		Network:        netCfg,
-		IPTool:         "/usr/sbin/ip",
-		NFTTool:        "/usr/sbin/nft",
+		Images:      images,
+		Network:     netCfg,
+		IPTool:      "/usr/sbin/ip",
+		NFTTool:     "/usr/sbin/nft",
 	}, caller, nil
 }

@@ -15,6 +15,8 @@ import (
 // JailerConfig, which is owned by whoever runs as root.
 type StartRequest struct {
 	ID string
+	// Image names an image from the root-side configuration.
+	Image string
 	// Slot selects the VM's identity: UID+Slot and GID+Slot.
 	Slot      int
 	CPUs      int
