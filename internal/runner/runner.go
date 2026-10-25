@@ -1,6 +1,6 @@
-// Package runner executes harnesses in sandboxes: it queues jobs,
-// enforces a concurrency limit, tracks each job through its state
-// machine, and offers a per-job cancel and a global kill switch.
+// Package runner executes harnesses in sandboxes: it queues jobs in
+// submission order, enforces a concurrency limit, tracks each job through
+// its state machine, and offers a per-job cancel and a global kill switch.
 //
 // This is the runner skeleton. It boots the harness's image and treats a
 // clean guest shutdown as success; agent runtimes, the egress proxy,
@@ -40,6 +40,10 @@ type Image struct {
 // Config configures a Runner.
 type Config struct {
 	Provider sandbox.Provider
+	// Target is this runner's own target name as used in spec.target:
+	// "local" (default) or "server:<name>". Harnesses addressed to any
+	// other target are rejected.
+	Target string
 	// Images maps spec.sandbox.image names to files. Unknown names are
 	// rejected.
 	Images map[string]Image
@@ -54,20 +58,23 @@ type Config struct {
 
 type job struct {
 	Job
+	ctx    context.Context
 	cancel context.CancelFunc
+	spec   sandbox.Spec
 }
 
 // Runner runs jobs. It is safe for concurrent use.
 type Runner struct {
-	cfg  Config
-	sem  chan struct{}
-	wg   sync.WaitGroup
-	mu   sync.Mutex
-	jobs map[string]*job
-	subs map[chan Event]struct{}
+	cfg Config
+	wg  sync.WaitGroup // one per job not yet terminal
 
-	killed bool
-	closed bool
+	mu      sync.Mutex
+	jobs    map[string]*job
+	queue   []*job // queued jobs, oldest first
+	running int
+	subs    map[chan Event]struct{}
+	killed  bool
+	closed  bool
 	// root is cancelled by KillAll and Shutdown; every job derives from
 	// the root that was current when it was submitted.
 	root       context.Context
@@ -78,6 +85,9 @@ type Runner struct {
 func New(cfg Config) (*Runner, error) {
 	if cfg.Provider == nil {
 		return nil, errors.New("runner: Provider is required")
+	}
+	if cfg.Target == "" {
+		cfg.Target = spec.DefaultTarget
 	}
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = 1
@@ -91,12 +101,7 @@ func New(cfg Config) (*Runner, error) {
 	if cfg.NewID == nil {
 		cfg.NewID = randomID
 	}
-	r := &Runner{
-		cfg:  cfg,
-		sem:  make(chan struct{}, cfg.MaxConcurrent),
-		jobs: map[string]*job{},
-		subs: map[chan Event]struct{}{},
-	}
+	r := &Runner{cfg: cfg, jobs: map[string]*job{}, subs: map[chan Event]struct{}{}}
 	r.root, r.cancelRoot = context.WithCancel(context.Background())
 	return r, nil
 }
@@ -109,6 +114,9 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 	}
 	if err := h.Validate(); err != nil {
 		return "", fmt.Errorf("runner: invalid harness: %w", err)
+	}
+	if h.Spec.Target != r.cfg.Target {
+		return "", fmt.Errorf("runner: harness targets %q, this runner is %q", h.Spec.Target, r.cfg.Target)
 	}
 	if err := checkSupported(h); err != nil {
 		return "", err
@@ -129,52 +137,72 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 	}
 	id := r.cfg.NewID()
 	ctx, cancel := context.WithCancel(r.root)
-	j := &job{Job: Job{ID: id, Harness: h.Metadata.Name, State: StateQueued, Created: r.cfg.Now()}, cancel: cancel}
+	j := &job{
+		Job:    Job{ID: id, Harness: h.Metadata.Name, State: StateQueued, Created: r.cfg.Now()},
+		ctx:    ctx,
+		cancel: cancel,
+		// spec.sandbox.diskMiB needs no mapping: the sandbox has no
+		// writable disk, so it can never use more than allowed.
+		spec: sandbox.Spec{
+			ID:        id,
+			Kernel:    img.Kernel,
+			RootFS:    img.RootFS,
+			CPUs:      h.Spec.Sandbox.CPUs,
+			MemoryMiB: h.Spec.Sandbox.MemoryMiB,
+			Timeout:   h.Spec.Sandbox.Timeout.Duration,
+		},
+	}
 	r.jobs[id] = j
+	r.queue = append(r.queue, j)
 	r.wg.Add(1)
+	r.emitLocked(Event{JobID: id, Harness: j.Harness, To: StateQueued, At: j.Created})
 	r.mu.Unlock()
 
-	r.emit(Event{JobID: id, Harness: j.Harness, To: StateQueued, At: j.Created})
-	sbx := sandbox.Spec{
-		ID:        id,
-		Kernel:    img.Kernel,
-		RootFS:    img.RootFS,
-		CPUs:      h.Spec.Sandbox.CPUs,
-		MemoryMiB: h.Spec.Sandbox.MemoryMiB,
-		Timeout:   h.Spec.Sandbox.Timeout.Duration,
-	}
-	go r.execute(ctx, j, sbx)
+	r.dispatch()
 	return id, nil
 }
 
-func (r *Runner) execute(ctx context.Context, j *job, sbx sandbox.Spec) {
-	defer r.wg.Done()
-	defer j.cancel()
+// dispatch starts queued jobs, oldest first, while slots are free.
+func (r *Runner) dispatch() {
+	r.mu.Lock()
+	var start []*job
+	for r.running < r.cfg.MaxConcurrent && len(r.queue) > 0 {
+		j := r.queue[0]
+		r.queue = r.queue[1:]
+		r.running++
+		start = append(start, j)
+	}
+	r.mu.Unlock()
+	for _, j := range start {
+		go r.execute(j)
+	}
+}
 
-	select {
-	case r.sem <- struct{}{}:
-		defer func() { <-r.sem }()
-	case <-ctx.Done():
-		r.transition(j, StateCancelled, "cancelled while queued")
-		return
-	}
-	if !r.transition(j, StateProvisioning, "") {
-		return // cancelled in the meantime
-	}
-	if ctx.Err() != nil {
+func (r *Runner) execute(j *job) {
+	defer func() {
+		j.cancel()
+		r.mu.Lock()
+		r.running--
+		r.mu.Unlock()
+		r.wg.Done()
+		r.dispatch()
+	}()
+
+	r.transition(j, StateProvisioning, "")
+	if j.ctx.Err() != nil {
 		r.transition(j, StateCancelled, "cancelled before start")
 		return
 	}
 	r.transition(j, StateRunning, "")
 
-	res, err := r.cfg.Provider.Run(ctx, sbx, r.cfg.Console(j.ID))
+	res, err := r.cfg.Provider.Run(j.ctx, j.spec, r.cfg.Console(j.ID))
 	switch {
 	case err != nil:
 		r.transition(j, StateFailed, err.Error())
 	case res.Outcome == sandbox.OutcomeExited:
 		r.transition(j, StateSucceeded, "")
 	case res.Outcome == sandbox.OutcomeTimedOut:
-		r.transition(j, StateTimedOut, fmt.Sprintf("stopped after %s", sbx.Timeout))
+		r.transition(j, StateTimedOut, fmt.Sprintf("stopped after %s", j.spec.Timeout))
 	case res.Outcome == sandbox.OutcomeKilled:
 		r.transition(j, StateCancelled, "stopped")
 	default:
@@ -182,13 +210,19 @@ func (r *Runner) execute(ctx context.Context, j *job, sbx sandbox.Spec) {
 	}
 }
 
-// transition moves j to state if allowed and emits the event.
-func (r *Runner) transition(j *job, to State, msg string) bool {
+func (r *Runner) transition(j *job, to State, msg string) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.transitionLocked(j, to, msg)
+}
+
+// transitionLocked moves j to state if allowed (otherwise it is a no-op)
+// and emits the event. Emitting under the lock keeps every job's events
+// in order.
+func (r *Runner) transitionLocked(j *job, to State, msg string) {
 	from := j.State
 	if !canTransition(from, to) {
-		r.mu.Unlock()
-		return false
+		return
 	}
 	now := r.cfg.Now()
 	j.State = to
@@ -197,25 +231,42 @@ func (r *Runner) transition(j *job, to State, msg string) bool {
 	}
 	if to.Terminal() {
 		j.Finished = now
-		j.Error = msg
-		if to == StateSucceeded {
-			j.Error = ""
+		if to != StateSucceeded {
+			j.Error = msg
 		}
 	}
-	r.mu.Unlock()
-	r.emit(Event{JobID: j.ID, Harness: j.Harness, From: from, To: to, At: now, Message: msg})
-	return true
+	r.emitLocked(Event{JobID: j.ID, Harness: j.Harness, From: from, To: to, At: now, Message: msg})
+}
+
+// cancelQueuedLocked removes the queued jobs for which match returns true
+// and cancels them. They never reach the provider.
+func (r *Runner) cancelQueuedLocked(match func(*job) bool, msg string) {
+	remaining := r.queue[:0]
+	for _, j := range r.queue {
+		if !match(j) {
+			remaining = append(remaining, j)
+			continue
+		}
+		j.cancel()
+		r.transitionLocked(j, StateCancelled, msg)
+		r.wg.Done()
+	}
+	r.queue = remaining
 }
 
 // Cancel stops one job, queued or running.
 func (r *Runner) Cancel(id string) error {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	j, ok := r.jobs[id]
-	r.mu.Unlock()
 	if !ok {
 		return ErrNotFound
 	}
+	// Always cancel the context: a job dispatch already took off the queue
+	// still reads "queued" until execute moves it on, and execute checks
+	// the context before starting the sandbox.
 	j.cancel()
+	r.cancelQueuedLocked(func(q *job) bool { return q == j }, "cancelled while queued")
 	return nil
 }
 
@@ -224,6 +275,7 @@ func (r *Runner) Cancel(id string) error {
 func (r *Runner) KillAll() {
 	r.mu.Lock()
 	r.killed = true
+	r.cancelQueuedLocked(func(*job) bool { return true }, "cancelled by kill switch")
 	cancel := r.cancelRoot
 	r.root, r.cancelRoot = context.WithCancel(context.Background())
 	r.mu.Unlock()
@@ -273,7 +325,7 @@ func (r *Runner) List() []Job {
 		out = append(out, j.Job)
 	}
 	r.mu.Unlock()
-	slices.SortFunc(out, func(a, b Job) int { return a.Created.Compare(b.Created) })
+	slices.SortStableFunc(out, func(a, b Job) int { return a.Created.Compare(b.Created) })
 	return out
 }
 
@@ -296,9 +348,7 @@ func (r *Runner) Subscribe(buffer int) (<-chan Event, func()) {
 	}
 }
 
-func (r *Runner) emit(e Event) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (r *Runner) emitLocked(e Event) {
 	for ch := range r.subs {
 		select {
 		case ch <- e:

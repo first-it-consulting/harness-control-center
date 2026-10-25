@@ -386,3 +386,50 @@ func TestRandomID(t *testing.T) {
 		t.Errorf("randomID: %q %q", a, b)
 	}
 }
+
+func TestJobsStartInSubmissionOrder(t *testing.T) {
+	p := newFakeProvider()
+	r := newRunner(t, p, 1)
+	var ids []string
+	for range 20 {
+		id, err := r.Submit(harness(t, ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	for _, id := range ids {
+		waitState(t, r, id, StateSucceeded)
+	}
+	var started []string
+	for _, s := range p.startedSpecs() {
+		started = append(started, s.ID)
+	}
+	if !slices.Equal(started, ids) {
+		t.Errorf("start order = %v, want submission order %v", started, ids)
+	}
+}
+
+func TestRejectsOtherTargets(t *testing.T) {
+	p := newFakeProvider()
+	local := newRunner(t, p, 1)
+	if _, err := local.Submit(harness(t, "  target: server:homelab-01\n")); err == nil ||
+		!strings.Contains(err.Error(), `harness targets "server:homelab-01", this runner is "local"`) {
+		t.Errorf("local runner accepted a remote harness: %v", err)
+	}
+
+	remote, err := New(Config{Provider: p, Target: "server:homelab-01", Images: map[string]Image{"base": {}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = remote.Shutdown(context.Background()) }()
+	if _, err := remote.Submit(harness(t, "")); err == nil {
+		t.Error("server runner accepted a harness for local")
+	}
+	if _, err := remote.Submit(harness(t, "  target: server:homelab-01\n")); err != nil {
+		t.Errorf("server runner rejected its own target: %v", err)
+	}
+	if len(local.List()) != 0 {
+		t.Error("rejected harness created a job")
+	}
+}

@@ -394,9 +394,9 @@ func TestRunConfinesImagesToImageRoot(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("not an image"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tests := map[string]func(f *fixture){
-		"path outside root": func(f *fixture) { f.spec.RootFS = outside },
-		"symlink escaping root": func(f *fixture) {
+	tests := map[string]func(t *testing.T, f *fixture){
+		"path outside root": func(_ *testing.T, f *fixture) { f.spec.RootFS = outside },
+		"symlink escaping root": func(t *testing.T, f *fixture) {
 			skipWithoutSymlinks(t)
 			link := filepath.Join(filepath.Dir(f.spec.Kernel), "escape.ext4")
 			if err := os.Symlink(outside, link); err != nil {
@@ -404,7 +404,7 @@ func TestRunConfinesImagesToImageRoot(t *testing.T) {
 			}
 			f.spec.RootFS = link
 		},
-		"dot-dot path": func(f *fixture) {
+		"dot-dot path": func(t *testing.T, f *fixture) {
 			root := filepath.Dir(f.spec.Kernel)
 			rel, err := filepath.Rel(root, outside)
 			if err != nil || !strings.HasPrefix(rel, "..") {
@@ -416,7 +416,7 @@ func TestRunConfinesImagesToImageRoot(t *testing.T) {
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, exitsCleanly)
-			mutate(f)
+			mutate(t, f)
 			_, _, err := f.run(context.Background(), t)
 			if err == nil || !strings.Contains(err.Error(), "outside the image root") {
 				t.Fatalf("Run = %v, want outside-the-image-root error", err)
