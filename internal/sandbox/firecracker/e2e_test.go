@@ -36,7 +36,7 @@ reboot -f
 `
 
 type e2eEnv struct {
-	assets, base, rootfs string
+	images, base, rootfs string
 	provider             *Provider
 }
 
@@ -50,30 +50,36 @@ func setupE2E(t *testing.T) *e2eEnv {
 		t.Skip("no /dev/kvm")
 	}
 	dir := t.TempDir()
-	rootfs := buildRootFS(t, filepath.Join(assets, "alpine-minirootfs.tar.gz"), dir)
+	images := filepath.Join(dir, "images")
+	if err := os.Mkdir(images, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, "cp", filepath.Join(assets, "vmlinux"), filepath.Join(images, "vmlinux"))
+	rootfs := buildRootFS(t, filepath.Join(assets, "alpine-minirootfs.tar.gz"), dir, images)
 	base := filepath.Join(dir, "jails")
 	p, err := New(Config{
 		JailerPath:      filepath.Join(assets, "jailer"),
 		FirecrackerPath: filepath.Join(assets, "firecracker"),
 		ChrootBase:      base,
+		ImageRoot:       images,
 		UID:             64000, GID: 64000,
 		Host: NewSudoHost(base),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &e2eEnv{assets: assets, base: base, rootfs: rootfs, provider: p}
+	return &e2eEnv{images: images, base: base, rootfs: rootfs, provider: p}
 }
 
-func buildRootFS(t *testing.T, tarball, dir string) string {
+func buildRootFS(t *testing.T, tarball, dir, images string) string {
 	t.Helper()
 	tree := filepath.Join(dir, "tree")
-	img := filepath.Join(dir, "rootfs.ext4")
-	if err := os.Mkdir(tree, 0o755); err != nil {
+	img := filepath.Join(images, "rootfs.ext4")
+	if err := os.Mkdir(tree, 0o755); err != nil { //nolint:gosec // becomes the guest's "/" and must be world-traversable
 		t.Fatal(err)
 	}
 	mustRun(t, "tar", "-xzf", tarball, "-C", tree)
-	if err := os.WriteFile(filepath.Join(tree, "init"), []byte(e2eInit), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(tree, "init"), []byte(e2eInit), 0o755); err != nil { //nolint:gosec // the guest's init must be executable
 		t.Fatal(err)
 	}
 	mustRun(t, "mkfs.ext4", "-q", "-F", "-d", tree, "-E", "root_owner=0:0", img, "64M")
@@ -89,7 +95,7 @@ func mustRun(t *testing.T, name string, args ...string) {
 
 func (e *e2eEnv) spec(id string, timeout time.Duration, bootArgs ...string) sandbox.Spec {
 	return sandbox.Spec{
-		ID: id, Kernel: filepath.Join(e.assets, "vmlinux"), RootFS: e.rootfs,
+		ID: id, Kernel: filepath.Join(e.images, "vmlinux"), RootFS: e.rootfs,
 		CPUs: 1, MemoryMiB: 128, Timeout: timeout, BootArgs: bootArgs,
 	}
 }

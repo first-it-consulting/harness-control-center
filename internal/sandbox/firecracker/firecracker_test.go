@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -150,8 +151,8 @@ func newFixture(t *testing.T, b behavior) *fixture {
 	}
 	host := &fakeHost{t: t, behavior: b}
 	p, err := New(Config{
-		JailerPath: "/opt/fc/jailer", FirecrackerPath: "/opt/fc/firecracker",
-		ChrootBase: base, UID: 64000, GID: 64000, StopGrace: 20 * time.Millisecond, Host: host,
+		JailerPath: filepath.Join(dir, "jailer"), FirecrackerPath: filepath.Join(dir, "firecracker"),
+		ChrootBase: base, ImageRoot: dir, UID: 64000, GID: 64000, StopGrace: 20 * time.Millisecond, Host: host,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +213,7 @@ func TestJailerArgv(t *testing.T) {
 	}
 	argv := f.host.argv
 	checks := map[string]string{
-		"--id": "run-1", "--exec-file": "/opt/fc/firecracker", "--uid": "64000", "--gid": "64000",
+		"--id": "run-1", "--exec-file": f.p.cfg.FirecrackerPath, "--uid": "64000", "--gid": "64000",
 		"--chroot-base-dir": f.base, "--cgroup-version": "2", "--config-file": "config.json",
 	}
 	for flag, want := range checks {
@@ -220,7 +221,7 @@ func TestJailerArgv(t *testing.T) {
 			t.Errorf("%s = %q, want %q", flag, got, want)
 		}
 	}
-	if argv[0] != "/opt/fc/jailer" {
+	if argv[0] != f.p.cfg.JailerPath {
 		t.Errorf("argv[0] = %q", argv[0])
 	}
 	for _, want := range []string{"memory.max=335544320", "pids.max=64", "cpu.max=200000 100000"} {
@@ -359,13 +360,18 @@ func TestRunInvalidSpecTouchesNothing(t *testing.T) {
 }
 
 func TestNewRejectsUnsafeConfig(t *testing.T) {
-	good := Config{JailerPath: "/a/jailer", FirecrackerPath: "/a/firecracker", ChrootBase: "/srv/j", UID: 64000, GID: 64000, Host: &fakeHost{}}
+	d := t.TempDir()
+	good := Config{
+		JailerPath: filepath.Join(d, "jailer"), FirecrackerPath: filepath.Join(d, "firecracker"),
+		ChrootBase: filepath.Join(d, "j"), ImageRoot: filepath.Join(d, "img"), UID: 64000, GID: 64000, Host: &fakeHost{},
+	}
 	tests := map[string]func(*Config){
 		"root uid":         func(c *Config) { c.UID = 0 },
 		"root gid":         func(c *Config) { c.GID = 0 },
 		"relative jailer":  func(c *Config) { c.JailerPath = "jailer" },
-		"unclean base":     func(c *Config) { c.ChrootBase = "/srv/../etc" },
+		"unclean base":     func(c *Config) { c.ChrootBase = c.ImageRoot + string(filepath.Separator) + ".." },
 		"no host":          func(c *Config) { c.Host = nil },
+		"no image root":    func(c *Config) { c.ImageRoot = "" },
 		"runner's own uid": func(c *Config) { c.UID = os.Getuid() },
 	}
 	if _, err := New(good); err != nil {
@@ -380,5 +386,65 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 		if _, err := New(c); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+func TestRunConfinesImagesToImageRoot(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "secret.ext4")
+	if err := os.WriteFile(outside, []byte("not an image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]func(f *fixture){
+		"path outside root": func(f *fixture) { f.spec.RootFS = outside },
+		"symlink escaping root": func(f *fixture) {
+			skipWithoutSymlinks(t)
+			link := filepath.Join(filepath.Dir(f.spec.Kernel), "escape.ext4")
+			if err := os.Symlink(outside, link); err != nil {
+				t.Fatal(err)
+			}
+			f.spec.RootFS = link
+		},
+		"dot-dot path": func(f *fixture) {
+			root := filepath.Dir(f.spec.Kernel)
+			rel, err := filepath.Rel(root, outside)
+			if err != nil || !strings.HasPrefix(rel, "..") {
+				t.Fatalf("test setup: rel = %q, %v", rel, err)
+			}
+			f.spec.Kernel = root + string(filepath.Separator) + rel // keep the ".." unresolved
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, exitsCleanly)
+			mutate(f)
+			_, _, err := f.run(context.Background(), t)
+			if err == nil || !strings.Contains(err.Error(), "outside the image root") {
+				t.Fatalf("Run = %v, want outside-the-image-root error", err)
+			}
+			if f.host.argv != nil {
+				t.Error("VM started with an image outside the root")
+			}
+		})
+	}
+}
+
+func TestRunFollowsSymlinksInsideImageRoot(t *testing.T) {
+	skipWithoutSymlinks(t)
+	f := newFixture(t, exitsCleanly)
+	link := filepath.Join(filepath.Dir(f.spec.Kernel), "vmlinux-current")
+	if err := os.Symlink(f.spec.Kernel, link); err != nil {
+		t.Fatal(err)
+	}
+	f.spec.Kernel = link
+	if _, _, err := f.run(context.Background(), t); err != nil {
+		t.Fatalf("symlink inside the image root rejected: %v", err)
+	}
+}
+
+// Creating symlinks on Windows needs elevated rights or developer mode.
+func skipWithoutSymlinks(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need extra privileges on Windows")
 	}
 }

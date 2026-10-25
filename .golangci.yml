@@ -25,10 +25,11 @@ linters:
       - path: cmd/
         linters: [errcheck]
         text: "fmt.Fprint"
-      # Tests read files they created themselves in t.TempDir().
+      # Tests read files they created themselves in t.TempDir(), and run
+      # fixed tools (tar, mkfs.ext4, pgrep) with test-controlled arguments.
       - path: _test\.go
         linters: [gosec]
-        text: "G304"
+        text: "G304|G204|G702"
 
 formatters:
   enable:

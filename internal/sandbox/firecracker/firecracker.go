@@ -52,6 +52,10 @@ type Config struct {
 	// ChrootBase holds the per-run chroots. It must be owned by the
 	// runner's user and must not be shared with anything else.
 	ChrootBase string
+	// ImageRoot bounds which files can become a guest's kernel or root
+	// filesystem: Spec.Kernel and Spec.RootFS must resolve (symlinks
+	// included) to regular files inside it.
+	ImageRoot string
 	// UID and GID the VMM runs as. They need no account but must not be
 	// 0 or the runner's own IDs.
 	UID, GID int
@@ -71,7 +75,7 @@ var _ sandbox.Provider = (*Provider)(nil)
 // New validates cfg and returns a provider.
 func New(cfg Config) (*Provider, error) {
 	var errs []error
-	for name, p := range map[string]string{"JailerPath": cfg.JailerPath, "FirecrackerPath": cfg.FirecrackerPath, "ChrootBase": cfg.ChrootBase} {
+	for name, p := range map[string]string{"JailerPath": cfg.JailerPath, "FirecrackerPath": cfg.FirecrackerPath, "ChrootBase": cfg.ChrootBase, "ImageRoot": cfg.ImageRoot} {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
 			errs = append(errs, fmt.Errorf("%s must be a clean absolute path, got %q", name, p))
 		}
@@ -104,6 +108,16 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 	if err := spec.Validate(); err != nil {
 		return res, err
 	}
+	kernel, err := p.openImage(spec.Kernel)
+	if err != nil {
+		return res, err
+	}
+	defer kernel.Close()
+	rootfs, err := p.openImage(spec.RootFS)
+	if err != nil {
+		return res, err
+	}
+	defer rootfs.Close()
 
 	jail := jailDir(p.cfg.ChrootBase, spec.ID)
 	// Only the jailer (root) walks the directories above the jail root.
@@ -124,7 +138,7 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 		res.Duration = time.Since(start)
 	}()
 
-	if err := p.prepare(filepath.Join(jail, "root"), &spec); err != nil {
+	if err := p.prepare(filepath.Join(jail, "root"), &spec, kernel, rootfs); err != nil {
 		return res, err
 	}
 
@@ -184,16 +198,16 @@ func (p *Provider) stop(id string, proc Process, done <-chan error) error {
 
 // prepare fills the chroot. Files are copied, not linked, so the VM can
 // never affect the originals, and are made read-only.
-func (p *Provider) prepare(root string, spec *sandbox.Spec) error {
+func (p *Provider) prepare(root string, spec *sandbox.Spec, kernel, rootfs *os.File) error {
 	// The jail root becomes the VMM's "/": its UID must traverse it (x)
 	// but needs no listing (r) or writing (w).
 	if err := os.Mkdir(root, 0o711); err != nil { //nolint:gosec // traversal by the jailed UID is required
 		return fmt.Errorf("firecracker: %w", err)
 	}
-	if err := copyReadOnly(spec.Kernel, filepath.Join(root, "vmlinux")); err != nil {
+	if err := copyReadOnly(kernel, filepath.Join(root, "vmlinux")); err != nil {
 		return err
 	}
-	if err := copyReadOnly(spec.RootFS, filepath.Join(root, "rootfs.ext4")); err != nil {
+	if err := copyReadOnly(rootfs, filepath.Join(root, "rootfs.ext4")); err != nil {
 		return err
 	}
 	cfg, err := json.MarshalIndent(vmConfig(spec), "", "  ")
@@ -252,19 +266,42 @@ func jailDir(base, id string) string {
 	return filepath.Join(base, "firecracker", id)
 }
 
-func copyReadOnly(src, dst string) error {
-	in, err := os.Open(src) //nolint:gosec // src was validated by Spec.Validate
+// openImage resolves path, checks that it lies inside ImageRoot, opens it
+// and verifies the opened file (not the path) is a regular file. Copying
+// from this handle means a symlink swapped in after the check cannot
+// redirect what ends up in the guest.
+func (p *Provider) openImage(path string) (*os.File, error) {
+	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return fmt.Errorf("firecracker: %w", err)
+		return nil, fmt.Errorf("firecracker: image %s: %w", path, err)
 	}
-	defer in.Close()
+	root, err := filepath.EvalSymlinks(p.cfg.ImageRoot)
+	if err != nil {
+		return nil, fmt.Errorf("firecracker: image root: %w", err)
+	}
+	if rel, err := filepath.Rel(root, resolved); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("firecracker: image %s is outside the image root %s", path, p.cfg.ImageRoot)
+	}
+	f, err := os.Open(resolved) // confined to ImageRoot above
+	if err != nil {
+		return nil, fmt.Errorf("firecracker: %w", err)
+	}
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("firecracker: image %s is not a regular file", path)
+	}
+	return f, nil
+}
+
+func copyReadOnly(in *os.File, dst string) error {
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o444) //nolint:gosec // dst is inside our own jail
 	if err != nil {
 		return fmt.Errorf("firecracker: %w", err)
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close() // the copy error is the one worth reporting
-		return fmt.Errorf("firecracker: copy %s: %w", filepath.Base(src), err)
+		return fmt.Errorf("firecracker: copy %s: %w", filepath.Base(in.Name()), err)
 	}
 	return out.Close()
 }
