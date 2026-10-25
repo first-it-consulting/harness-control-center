@@ -26,6 +26,8 @@ Living document. Update it in the same PR as any change that affects it.
 |---|---|---|
 | Agent reads secrets | Secrets never enter the sandbox. The broker adds them at the egress proxy, per allowed host. | planned |
 | Agent exfiltrates data | Default: no network. Egress only to allowlisted host names and ports. IP literals rejected. The resolved IP is re-checked at the proxy (blocks DNS rebinding, private ranges, cloud metadata `169.254.169.254`) unless `allowPrivateNetworks` is set. | spec + policy done, proxy planned |
+| Parser differential in egress checks (`evil.com#.allowed.org` suffix-matching a wildcard while the proxy connects elsewhere) | The policy engine matches only plain, label-validated DNS names. The proxy must pass the policy the same host string it then dials. | policy done, proxy planned |
+| Malformed tool references reaching an installer (`pkg@1;rm -rf /`) | Requests must match the strict package syntax before any grant is checked. Installers must never use a shell. | policy done, installer planned |
 | Agent reaches private network | Internal names rejected by default. `allowPrivateNetworks` is an explicit opt-in rated high risk. | spec + policy done |
 | Sandbox escape | One microVM per run (separate kernel) under Firecracker's jailer: chroot, seccomp, cgroups, dropped UID. | planned |
 | Runner compromise escalates | The runner is unprivileged. Only a minimal helper holds privileges. | planned |

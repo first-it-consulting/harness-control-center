@@ -96,6 +96,18 @@ func TestCheckEgress(t *testing.T) {
 		{"[::1]", 443, false},
 		{"169.254.169.254", 80, false},
 		{"", 443, false},
+		// Parser differentials: these suffix-match "*.npmjs.org" but a URL
+		// or socket parser could resolve them to a different host.
+		{"evil.com#.npmjs.org", 443, false},
+		{"evil.com/.npmjs.org", 443, false},
+		{"evil.com?.npmjs.org", 443, false},
+		{"user@evil.com.npmjs.org", 443, false},
+		{"evil.com:443.npmjs.org", 443, false},
+		{"evil.com\x00.npmjs.org", 443, false},
+		{"evil com.npmjs.org", 443, false},
+		{"evil..npmjs.org", 443, false},
+		{"*.npmjs.org", 443, false},
+		{"gitlab.com:443", 443, false},
 	}
 	for _, tt := range tests {
 		if got := e.CheckEgress(tt.host, tt.port); got.Allowed != tt.want {
@@ -116,6 +128,13 @@ func TestCheckCredentialAndTools(t *testing.T) {
 		"node":       false, // pinned grant does not allow unpinned
 		"node@23":    false,
 		"curl":       false,
+		// Malformed references are denied even when the name is granted.
+		"ripgrep@14;rm -rf /": false,
+		"ripgrep@$(id)":       false,
+		"ripgrep@":            false,
+		"ripgrep@14@15":       false,
+		"ripgrep ":            false,
+		"":                    false,
 	}
 	for pkg, want := range tools {
 		if got := e.CheckToolInstall(pkg).Allowed; got != want {
@@ -253,6 +272,9 @@ func FuzzCheckEgress(f *testing.F) {
 			return
 		}
 		h := spec.NormalizeHost(host)
+		if err := spec.ValidateHostName(h); err != nil {
+			t.Fatalf("allowed host %q that is not a plain DNS name: %v", host, err)
+		}
 		if h != "gitlab.com" && !strings.HasSuffix(h, ".npmjs.org") {
 			t.Fatalf("allowed unexpected host %q (%q): %s", host, h, d.Reason)
 		}

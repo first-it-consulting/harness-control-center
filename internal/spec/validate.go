@@ -183,25 +183,42 @@ func ValidateEgressHost(host string, allowPrivate bool) error {
 		return fmt.Errorf("IP addresses are not allowed, use a host name")
 	}
 	name, wildcard := strings.CutPrefix(host, "*.")
-	if len(name) == 0 || len(name) > 253 {
-		return fmt.Errorf("host %q has an invalid length", host)
-	}
-	labels := strings.Split(name, ".")
-	if len(labels) < 2 {
-		if wildcard {
+	if err := ValidateHostName(name); err != nil {
+		if wildcard && !strings.Contains(name, ".") {
 			return fmt.Errorf("wildcard %q is too broad, use e.g. \"*.example.com\"", host)
 		}
-		return fmt.Errorf("host %q must be a fully qualified name", host)
-	}
-	for _, l := range labels {
-		if !labelRe.MatchString(l) {
-			return fmt.Errorf("host %q contains an invalid label %q", host, l)
-		}
+		return err
 	}
 	if !allowPrivate && isPrivateName(name) {
 		return fmt.Errorf("host %q looks internal; set network.allowPrivateNetworks to allow it", host)
 	}
 	return nil
+}
+
+// ValidateHostName checks that name is a normalized, fully qualified DNS
+// name made only of valid labels: no wildcards, no IP literals, and none
+// of the characters ('/', '#', '@', ':', NUL ...) that URL or socket
+// parsers might interpret differently from the policy engine.
+func ValidateHostName(name string) error {
+	if len(name) == 0 || len(name) > 253 {
+		return fmt.Errorf("host %q has an invalid length", name)
+	}
+	labels := strings.Split(name, ".")
+	if len(labels) < 2 {
+		return fmt.Errorf("host %q must be a fully qualified name", name)
+	}
+	for _, l := range labels {
+		if !labelRe.MatchString(l) {
+			return fmt.Errorf("host %q contains an invalid label %q", name, l)
+		}
+	}
+	return nil
+}
+
+// ValidPackage reports whether pkg is a well-formed package reference
+// ("name" or "name@version"), using the same rules as the spec.
+func ValidPackage(pkg string) bool {
+	return packageRe.MatchString(pkg)
 }
 
 func isPrivateName(name string) bool {

@@ -56,6 +56,12 @@ func (e *Engine) CheckEgress(host string, port int) Decision {
 	if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
 		return deny("connections to IP addresses are not allowed (%s)", host)
 	}
+	// Only plain DNS names are matched. Anything else ("evil.com#.a.org",
+	// "evil.com/.a.org", "*.a.org") could suffix-match a rule here while a
+	// proxy or resolver interprets it as a different host.
+	if err := spec.ValidateHostName(host); err != nil {
+		return deny("invalid host: %v", err)
+	}
 	for _, r := range e.h.Spec.Permissions.Network.Egress {
 		if hostMatches(r.Host, host) && slices.Contains(r.Ports, port) {
 			return allow("matches egress rule %s", r.Host)
@@ -87,6 +93,11 @@ func (e *Engine) CheckCredential(name string) Decision {
 // installed. A grant without a version allows any version; a pinned grant
 // allows only that exact version.
 func (e *Engine) CheckToolInstall(pkg string) Decision {
+	// Reject malformed references outright, so an installer can never be
+	// handed something like "ripgrep@14;rm -rf /" because the name matched.
+	if !spec.ValidPackage(pkg) {
+		return deny("invalid package reference %q", pkg)
+	}
 	name, _, _ := strings.Cut(pkg, "@")
 	for _, g := range e.h.Spec.Permissions.Tools.Install {
 		if g == pkg || g == name {
