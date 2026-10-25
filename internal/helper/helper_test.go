@@ -331,3 +331,49 @@ func TestKillAndRemove(t *testing.T) {
 		t.Error("remove accepted a world-writable jail tree")
 	}
 }
+
+func TestRefusesOversizedStagedFiles(t *testing.T) {
+	e := newEnv(t)
+	dir := e.stageJob1(t)
+	e.cfg.MaxRootFSBytes = 1024
+	// A sparse file: tiny on disk, but root would write all of it.
+	f, err := os.OpenFile(filepath.Join(dir, "rootfs.ext4"), os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1 << 30); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	code, stderr := e.call(e.start...)
+	if code == 0 || !strings.Contains(stderr, "limit") {
+		t.Fatalf("oversized rootfs accepted: %d %q", code, stderr)
+	}
+	if len(e.rec.execArgv) != 0 {
+		t.Error("jailer was executed")
+	}
+	if fi, err := os.Stat(filepath.Join(firecracker.JailDir(e.base, "job-1"), "root", "rootfs.ext4")); err == nil && fi.Size() > 1024 {
+		t.Errorf("copied %d bytes despite the limit", fi.Size())
+	}
+}
+
+// remove must fail closed when the chroot base is not root's, even if
+// nothing exists below it yet.
+func TestRemoveFailsClosedOnUnsafeBase(t *testing.T) {
+	for name, setup := range map[string]func(e *env){
+		"base missing":         func(e *env) { _ = os.Remove(e.base) },
+		"base group-writable":  func(e *env) { _ = os.Chmod(e.base, 0o775) }, //nolint:gosec // the unsafe mode is the point
+		"base owned by runner": func(e *env) { e.cfg.RootUID = e.me + 1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			setup(e)
+			if code, _ := e.call("remove", "--id", "job-1"); code == 0 {
+				t.Error("remove accepted an unsafe chroot base")
+			}
+			if len(e.rec.runArgv) != 0 {
+				t.Error("rm was run")
+			}
+		})
+	}
+}

@@ -54,7 +54,19 @@ type Config struct {
 	// TrustAnchor is where ownership checks stop walking up: "/" (the
 	// default), except in tests.
 	TrustAnchor string
+	// MaxRootFSBytes caps the staged root filesystem (default
+	// DefaultMaxRootFSBytes): root copies it onto a root-owned filesystem.
+	MaxRootFSBytes int64
 }
+
+// Size caps for staged files. Root copies them, so without a cap a
+// compromised runner could fill the root filesystem (including the blocks
+// reserved for root).
+const (
+	MaxKernelBytes        = 128 << 20
+	MaxConfigBytes        = 1 << 20
+	DefaultMaxRootFSBytes = 8 << 30
+)
 
 // Deps are the side effects, replaceable in tests.
 type Deps struct {
@@ -91,6 +103,9 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 	if cfg.TrustAnchor == "" {
 		cfg.TrustAnchor = "/"
 	}
+	if cfg.MaxRootFSBytes <= 0 {
+		cfg.MaxRootFSBytes = DefaultMaxRootFSBytes
+	}
 	if len(args) == 0 {
 		return errors.New("expected start, kill or remove")
 	}
@@ -116,6 +131,13 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 	base := cfg.Jailer.ChrootBase
 	jail := firecracker.JailDir(base, *id)
 	cgroup := firecracker.CgroupDir(cfg.CgroupRoot, *id)
+	// Fail closed: the chroot base must exist and be root's all the way
+	// up before anything below it is created, used or deleted.
+	if op == "start" || op == "remove" {
+		if err := checkRootOwnedDirs(base, cfg.RootUID, cfg.TrustAnchor); err != nil {
+			return fmt.Errorf("chroot base: %w", err)
+		}
+	}
 
 	switch op {
 	case "start":
@@ -133,8 +155,14 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 		}
 		return writeCgroupKill(filepath.Join(cgroup, "cgroup.kill"))
 	case "remove":
-		// The whole tree is root's (checked), so nobody can redirect rm.
-		if err := checkRootOwnedDirs(filepath.Join(base, "firecracker"), cfg.RootUID, cfg.TrustAnchor); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// The base is root's (checked above); so must be firecracker/ if it
+		// exists. Then nobody but root can redirect rm.
+		parent := filepath.Join(base, "firecracker")
+		if _, err := os.Lstat(parent); err == nil {
+			if err := checkRootOwnedDirs(parent, cfg.RootUID, cfg.TrustAnchor); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -158,6 +186,17 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 
 // stagedFiles are the only files copied into a jail.
 var stagedFiles = []string{"vmlinux", "rootfs.ext4", "config.json"}
+
+func (cfg Config) maxBytes(name string) int64 {
+	switch name {
+	case "vmlinux":
+		return MaxKernelBytes
+	case "config.json":
+		return MaxConfigBytes
+	default:
+		return cfg.MaxRootFSBytes
+	}
+}
 
 // buildJail creates base/firecracker/<id>/root as root and copies the
 // staged files into it, read-only for the VM.
@@ -193,7 +232,7 @@ func buildJail(cfg Config, base, id string) error {
 		return err
 	}
 	for _, name := range stagedFiles {
-		if err := copyStaged(staging, name, filepath.Join(root, name), cfg.RunnerUID); err != nil {
+		if err := copyStaged(staging, name, filepath.Join(root, name), cfg.RunnerUID, cfg.maxBytes(name)); err != nil {
 			return err
 		}
 	}
@@ -202,9 +241,10 @@ func buildJail(cfg Config, base, id string) error {
 
 // copyStaged copies one staged file, opened relative to the staging
 // directory without following symlinks, into the jail. Only regular,
-// singly linked files owned by the runner are accepted, so root never
-// copies something the runner could not read itself.
-func copyStaged(staging *os.File, name, dst string, runnerUID int) error {
+// singly linked files owned by the runner and at most limit bytes long
+// are accepted, so root never copies something the runner could not read
+// itself, nor more than it was configured to.
+func copyStaged(staging *os.File, name, dst string, runnerUID int, limit int64) error {
 	fd, err := unix.Openat(int(staging.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return fmt.Errorf("staged %s: %w", name, err)
@@ -218,12 +258,22 @@ func copyStaged(staging *os.File, name, dst string, runnerUID int) error {
 	if st.Mode&unix.S_IFMT != unix.S_IFREG || int(st.Uid) != runnerUID || st.Nlink != 1 {
 		return fmt.Errorf("staged %s must be a regular, singly linked file owned by the runner", name)
 	}
+	if st.Size > limit {
+		return fmt.Errorf("staged %s is %d bytes; the limit is %d", name, st.Size, limit)
+	}
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o600) //nolint:gosec // dst is in the jail we just created
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	// Also cap the copy itself: the runner could grow the file after the
+	// size check.
+	n, err := io.Copy(out, io.LimitReader(in, limit+1))
+	if err == nil && n > limit {
+		err = fmt.Errorf("grew beyond the limit of %d bytes", limit)
+	}
+	if err != nil {
 		_ = out.Close()
+		_ = os.Remove(dst)
 		return fmt.Errorf("copy %s: %w", name, err)
 	}
 	// Read-only, and readable by the VMM, which runs as another UID.

@@ -50,6 +50,9 @@ type FirecrackerConfig struct {
 	// for hcc-helper to copy into a jail.
 	StagingDir string `yaml:"stagingDir"`
 	ImageRoot  string `yaml:"imageRoot"`
+	// MaxRootFSMiB caps the root filesystem hcc-helper copies into a jail
+	// (default 8192).
+	MaxRootFSMiB int `yaml:"maxRootfsMiB"`
 	// UID and GID are the first of maxConcurrent IDs; each running VM
 	// gets its own.
 	UID int `yaml:"uid"`
@@ -144,6 +147,9 @@ func (c *Config) Validate() error {
 				add("images.%s.%s must be an absolute path inside firecracker.imageRoot, got %q", name, what, p)
 			}
 		}
+	}
+	if c.Firecracker.MaxRootFSMiB < 0 || c.Firecracker.MaxRootFSMiB > 64<<10 {
+		add("firecracker.maxRootfsMiB must be between 0 (default) and 65536")
 	}
 	if c.Firecracker.UID <= 0 || c.Firecracker.GID <= 0 {
 		add("firecracker.uid and firecracker.gid must be non-root")

@@ -79,5 +79,7 @@ func setup() (helper.Config, int, error) {
 		CgroupRoot:  firecracker.DefaultCgroupRoot,
 		RunnerUID:   uid,
 		RootUID:     0,
+		// 0 means the helper's default.
+		MaxRootFSBytes: int64(c.Firecracker.MaxRootFSMiB) << 20,
 	}, caller, nil
 }
