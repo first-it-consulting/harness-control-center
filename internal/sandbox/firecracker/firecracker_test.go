@@ -201,12 +201,14 @@ func TestRunExited(t *testing.T) {
 	// jail copies readable for the VM).
 	want := map[string]os.FileMode{"vmlinux": 0o600, "rootfs.ext4": 0o600, "config.json": 0o600}
 	for name, mode := range want {
-		if got, ok := f.host.jailSeen[name]; !ok || got != mode {
-			t.Errorf("jail file %s: mode %v present=%v, want %v", name, got, ok, mode)
+		got, ok := f.host.jailSeen[name]
+		// Windows has no Unix modes; presence is still checked there.
+		if !ok || (runtime.GOOS != "windows" && got != mode) {
+			t.Errorf("staged file %s: mode %v present=%v, want %v", name, got, ok, mode)
 		}
 	}
 	if len(f.host.jailSeen) != len(want) {
-		t.Errorf("unexpected jail contents: %v", f.host.jailSeen)
+		t.Errorf("unexpected staged files: %v", f.host.jailSeen)
 	}
 }
 
