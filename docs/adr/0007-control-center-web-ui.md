@@ -21,13 +21,19 @@ injection.
 - **Loopback only.** It refuses any listen address that is not a loopback
   IP. Remote use goes through `ssh -L`.
 - **Login link.** At start it prints a URL with a 256-bit random token.
-  Opening it creates a session (HttpOnly, SameSite=Strict cookie, 12 h)
-  and redirects away from the token. The token is never put on a command
-  line (other local users could read it from the process list).
+  The token is never put on a command line (other local users could read
+  it from the process list). Opening it creates a 12-hour session.
+- **No session cookie.** Browsers send cookies for 127.0.0.1 to every
+  port, so any other local server the browser visits could collect a
+  cookie and replay it. Instead the login redirect hands the session to
+  the page in the URL fragment (never sent to a server); the page keeps
+  it in `sessionStorage`, which only this origin and port can read, and
+  sends it in a header. Other sites cannot set that header, which also
+  rules out CSRF. Downloads, which cannot carry a header, use single-use
+  tickets that expire within a minute.
 - **Every request is checked.** The Host header must be this server's
-  (no DNS rebinding). The API needs a session. Every change also needs
-  the session's CSRF token in a header, a same-origin `Origin` header, and
-  a JSON body (a cross-site form cannot send one). Unknown JSON fields
+  (no DNS rebinding). The API needs the session header. Every change also
+  needs a same-origin `Origin` header and a JSON body. Unknown JSON fields
   are refused.
 - **Strict CSP and headers.** `default-src 'none'`; scripts, styles and
   images only from the server itself; no inline script; no framing
@@ -49,8 +55,8 @@ injection.
 
 ## Consequences
 
-- One browser profile at a time works smoothly; a new browser needs the
-  link again (restart the server for a new one).
+- A new tab opened by typing the address (not from a link) needs the
+  login link again; it stays valid while the server runs.
 - No TLS: traffic never leaves the machine. Over `ssh -L` it is inside
   ssh.
 - The "Stop everything" button only reaches runners the Control Center

@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -36,11 +35,10 @@ spec:
 
 // testServer is a Control Center with a signed-in client.
 type testServer struct {
-	t      *testing.T
-	s      *Server
-	dir    string
-	cookie *http.Cookie
-	csrf   string
+	t       *testing.T
+	s       *Server
+	dir     string
+	session string
 }
 
 func newTestServer(t *testing.T) *testServer {
@@ -54,17 +52,15 @@ func newTestServer(t *testing.T) *testServer {
 	s.auth.setHosts([]string{host, "localhost:7878"})
 	ts := &testServer{t: t, s: s, dir: dir}
 	rec := ts.raw(http.MethodGet, "/login?token="+s.auth.loginToken, "", nil)
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("login: %d", rec.Code)
+	loc := rec.Header().Get("Location")
+	session, ok := strings.CutPrefix(loc, "/#session=")
+	if rec.Code != http.StatusSeeOther || !ok || len(session) != 64 {
+		t.Fatalf("login: %d %q", rec.Code, loc)
 	}
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == cookieName {
-			ts.cookie = c
-		}
+	if len(rec.Result().Cookies()) != 0 {
+		t.Error("login set a cookie: cookies reach every port of 127.0.0.1")
 	}
-	var sess map[string]string
-	ts.do(http.MethodGet, "/api/session", nil, &sess)
-	ts.csrf = sess["csrf"]
+	ts.session = session
 	return ts
 }
 
@@ -73,8 +69,8 @@ func (ts *testServer) raw(method, path, body string, hdr map[string]string) *htt
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
-	if ts.cookie != nil && req.Header.Get("Cookie") == "" {
-		req.AddCookie(ts.cookie)
+	if _, set := hdr[sessionHeader]; !set && ts.session != "" {
+		req.Header.Set(sessionHeader, ts.session)
 	}
 	rec := httptest.NewRecorder()
 	ts.s.ServeHTTP(rec, req)
@@ -88,7 +84,7 @@ func (ts *testServer) do(method, path string, body, out any) int {
 	if body != nil {
 		b, _ = json.Marshal(body)
 	}
-	hdr := map[string]string{"Origin": "http://" + host, csrfHeader: ts.csrf}
+	hdr := map[string]string{"Origin": "http://" + host}
 	if body != nil {
 		hdr["Content-Type"] = "application/json"
 	}
@@ -113,30 +109,30 @@ func TestAuth(t *testing.T) {
 	}
 	// DNS rebinding: a page on evil.example resolving to 127.0.0.1.
 	req := httptest.NewRequest(http.MethodGet, "http://evil.example:7878/api/jobs", nil)
-	req.AddCookie(ts.cookie)
+	req.Header.Set(sessionHeader, ts.session)
 	rec := httptest.NewRecorder()
 	ts.s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMisdirectedRequest {
 		t.Errorf("foreign Host: %d", rec.Code)
 	}
-	if !ts.cookie.HttpOnly || ts.cookie.SameSite != http.SameSiteStrictMode {
-		t.Errorf("cookie = %+v", ts.cookie)
-	}
 	body := `{"yaml":"x"}`
-	for name, hdr := range map[string]map[string]string{
-		"no origin":    {"Content-Type": "application/json", csrfHeader: ts.csrf},
-		"cross origin": {"Content-Type": "application/json", csrfHeader: ts.csrf, "Origin": "http://evil.example"},
-		"no csrf":      {"Content-Type": "application/json", "Origin": "http://" + host},
-		"wrong csrf":   {"Content-Type": "application/json", "Origin": "http://" + host, csrfHeader: "x"},
+	for name, tc := range map[string]struct {
+		hdr  map[string]string
+		code int
+	}{
+		"no session":    {map[string]string{"Content-Type": "application/json", "Origin": "http://" + host, sessionHeader: ""}, http.StatusUnauthorized},
+		"wrong session": {map[string]string{"Content-Type": "application/json", "Origin": "http://" + host, sessionHeader: "x"}, http.StatusUnauthorized},
+		"no origin":     {map[string]string{"Content-Type": "application/json"}, http.StatusForbidden},
+		"cross origin":  {map[string]string{"Content-Type": "application/json", "Origin": "http://evil.example"}, http.StatusForbidden},
 	} {
-		if rec := ts.raw(http.MethodPost, "/api/check", body, hdr); rec.Code != http.StatusForbidden {
-			t.Errorf("%s: %d", name, rec.Code)
+		if rec := ts.raw(http.MethodPost, "/api/check", body, tc.hdr); rec.Code != tc.code {
+			t.Errorf("%s: %d, want %d", name, rec.Code, tc.code)
 		}
 	}
 	// A form post (what another site could make the browser send) is
 	// not JSON.
 	if rec := ts.raw(http.MethodPost, "/api/check", "yaml=x", map[string]string{
-		"Content-Type": "application/x-www-form-urlencoded", "Origin": "http://" + host, csrfHeader: ts.csrf,
+		"Content-Type": "application/x-www-form-urlencoded", "Origin": "http://" + host,
 	}); rec.Code != http.StatusUnsupportedMediaType {
 		t.Errorf("form post: %d", rec.Code)
 	}
@@ -146,6 +142,19 @@ func TestAuth(t *testing.T) {
 	}
 	if rec := ts.raw(http.MethodGet, "/api/jobs", "", nil); rec.Code != http.StatusUnauthorized {
 		t.Errorf("after logout: %d", rec.Code)
+	}
+}
+
+func TestDownloadTickets(t *testing.T) {
+	ts := newTestServer(t)
+	anon := &testServer{t: t, s: ts.s}
+	if rec := anon.raw(http.MethodGet, "/download/"+strings.Repeat("a", 64), "", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown ticket: %d", rec.Code)
+	}
+	id := ts.s.auth.newTicket("r/job-1")
+	ts.s.auth.now = func() time.Time { return time.Now().Add(2 * ticketTTL) }
+	if _, ok := ts.s.auth.redeem(id); ok {
+		t.Error("an expired ticket was redeemed")
 	}
 }
 
@@ -414,7 +423,16 @@ func TestRunThroughTheUI(t *testing.T) {
 	if strings.ContainsAny(console["text"], "\x1b\x07\u202e") || !strings.Contains(console["text"], `^[]0;pwned^G\u202e`) {
 		t.Errorf("console not neutralized: %q", console["text"])
 	}
-	rec := ts.raw(http.MethodGet, jobPath+"/results", "", nil)
+	var ticket map[string]string
+	ts.do(http.MethodPost, jobPath+"/download", map[string]string{}, &ticket)
+	if !strings.HasPrefix(ticket["url"], "/download/") {
+		t.Fatalf("ticket = %v", ticket)
+	}
+	anon := &testServer{t: t, s: ts.s}
+	rec := anon.raw(http.MethodGet, ticket["url"], "", nil) // a link carries no session
+	if again := anon.raw(http.MethodGet, ticket["url"], "", nil); again.Code != http.StatusNotFound {
+		t.Errorf("a ticket worked twice: %d", again.Code)
+	}
 	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/octet-stream" ||
 		!strings.HasPrefix(rec.Header().Get("Content-Disposition"), "attachment") {
 		t.Errorf("results download: %d %v", rec.Code, rec.Header())
@@ -488,8 +506,7 @@ func TestServeOverLoopback(t *testing.T) {
 			t.Errorf("Serve: %v", err)
 		}
 	}()
-	jar := &cookieJar{}
-	client := &http.Client{Jar: jar, Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(s.LoginURL(l))
 	if err != nil {
 		t.Fatal(err)
@@ -498,7 +515,10 @@ func TestServeOverLoopback(t *testing.T) {
 	if resp.Request.URL.Path != "/" || resp.StatusCode != http.StatusOK || resp.Request.URL.RawQuery != "" {
 		t.Errorf("after login: %d %s", resp.StatusCode, resp.Request.URL)
 	}
-	resp, err = client.Get("http://" + l.Addr().String() + "/api/jobs")
+	session := strings.TrimPrefix(resp.Request.Response.Header.Get("Location"), "/#session=")
+	req, _ := http.NewRequest(http.MethodGet, "http://"+l.Addr().String()+"/api/jobs", nil)
+	req.Header.Set(sessionHeader, session)
+	resp, err = client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,8 +535,3 @@ func TestServeOverLoopback(t *testing.T) {
 		}
 	}
 }
-
-type cookieJar struct{ cookies []*http.Cookie }
-
-func (j *cookieJar) SetCookies(_ *url.URL, cs []*http.Cookie) { j.cookies = append(j.cookies, cs...) }
-func (j *cookieJar) Cookies(*url.URL) []*http.Cookie          { return j.cookies }

@@ -31,7 +31,7 @@ var webFS embed.FS
 
 // API routes (JSON unless noted; all need a session, see auth):
 //
-//	GET    /api/session                          the CSRF token
+//	GET    /api/session                          whether the session is valid
 //	POST   /api/logout
 //	GET    /api/runners                          configured runners and their status
 //	POST   /api/runners                          add a runner
@@ -43,7 +43,7 @@ var webFS embed.FS
 //	GET    /api/runners/{runner}/jobs/{id}
 //	POST   /api/runners/{runner}/jobs/{id}/cancel
 //	GET    /api/runners/{runner}/jobs/{id}/console   console, control characters made visible
-//	GET    /api/runners/{runner}/jobs/{id}/results   the results archive (download)
+//	POST   /api/runners/{runner}/jobs/{id}/download  a ticket for GET /download/{ticket}: the results archive
 //	POST   /api/check                            validate and explain a harness
 //	POST   /api/runs                             start a harness (after it was explained)
 //	GET    /api/harnesses                        the library
@@ -98,7 +98,8 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /api/runners/{runner}/jobs/{id}", s.job)
 	mux.HandleFunc("POST /api/runners/{runner}/jobs/{id}/cancel", s.cancel)
 	mux.HandleFunc("GET /api/runners/{runner}/jobs/{id}/console", s.console)
-	mux.HandleFunc("GET /api/runners/{runner}/jobs/{id}/results", s.results)
+	mux.HandleFunc("POST /api/runners/{runner}/jobs/{id}/download", s.download)
+	mux.HandleFunc("GET /download/{ticket}", s.results)
 	mux.HandleFunc("POST /api/check", s.check)
 	mux.HandleFunc("POST /api/runs", s.run)
 	mux.HandleFunc("GET /api/harnesses", s.harnesses)
@@ -167,27 +168,18 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid login link: use the one \"hcc control serve\" printed", http.StatusForbidden)
 		return
 	}
-	http.SetCookie(w, sessionCookie(id, int(SessionTTL/time.Second)))
-	// Away from the URL with the token in it.
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	// Away from the URL with the login token in it. The session goes in
+	// the fragment: the page takes it from there, and fragments are never
+	// sent to a server.
+	http.Redirect(w, r, "/#session="+id, http.StatusSeeOther)
 }
 
-// sessionCookie is HttpOnly and SameSite=Strict. It is not Secure: the
-// UI is plain http on loopback (nothing crosses a network), where not
-// every browser keeps Secure cookies.
-func sessionCookie(value string, maxAge int) *http.Cookie {
-	return &http.Cookie{Name: cookieName, Value: value, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, //nolint:gosec // see above
-		MaxAge: maxAge}
-}
-
-func (s *Server) session(w http.ResponseWriter, r *http.Request) {
-	sess, _ := s.auth.session(r)
-	writeJSON(w, http.StatusOK, map[string]string{"csrf": sess.csrf})
+func (s *Server) session(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{"valid": true}) // the guard checked it
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	s.auth.logout(r)
-	http.SetCookie(w, sessionCookie("", -1))
 	writeJSON(w, http.StatusOK, map[string]string{})
 }
 
@@ -438,17 +430,34 @@ func (s *Server) console(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// results streams a job's archive as a download. It is the agent's
-// content: served as an attachment of an opaque type, never rendered.
-func (s *Server) results(w http.ResponseWriter, r *http.Request) {
-	c, err := s.client(r.PathValue("runner"))
-	if err != nil {
+// download hands out a ticket for a job's results: a link cannot carry
+// the session header.
+func (s *Server) download(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.client(r.PathValue("runner")); err != nil {
 		writeError(w, statusFor(err), err)
 		return
 	}
-	id, err := jobID(r)
-	if err != nil {
+	if _, err := jobID(r); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	t := s.auth.newTicket(r.PathValue("runner") + "/" + r.PathValue("id"))
+	writeJSON(w, http.StatusOK, map[string]string{"url": "/download/" + t})
+}
+
+// results streams a job's archive for a download ticket. It is the
+// agent's content: served as an attachment of an opaque type, never
+// rendered.
+func (s *Server) results(w http.ResponseWriter, r *http.Request) {
+	target, ok := s.auth.redeem(r.PathValue("ticket"))
+	if !ok {
+		http.Error(w, "this download link has expired; download again from the job page", http.StatusNotFound)
+		return
+	}
+	runnerName, id, _ := strings.Cut(target, "/")
+	c, err := s.client(runnerName)
+	if err != nil {
+		writeError(w, statusFor(err), err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), transferTimeout)

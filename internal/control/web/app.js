@@ -26,13 +26,32 @@ const TERMINAL = new Set(["succeeded", "failed", "timed_out", "cancelled", "over
 
 // --- API ---
 
-let csrf = "";
+// The session comes in the URL fragment of the login redirect (never sent
+// to a server) and stays in sessionStorage, which only this origin (this
+// port) can read. It is sent in a header; there is no cookie.
+const SESSION_KEY = "hcc-session";
+let session = "";
+
+function loadSession() {
+  if (location.hash.startsWith("#session=")) {
+    session = location.hash.slice("#session=".length);
+    history.replaceState(null, "", "/#/jobs");
+    try {
+      sessionStorage.setItem(SESSION_KEY, session);
+    } catch {
+      // Private mode: the session lasts as long as this page.
+    }
+    return;
+  }
+  try {
+    session = sessionStorage.getItem(SESSION_KEY) || "";
+  } catch {
+    session = "";
+  }
+}
 
 async function api(method, path, body) {
-  const opts = { method, headers: {}, credentials: "same-origin" };
-  if (method !== "GET") {
-    opts.headers["X-HCC-CSRF"] = csrf;
-  }
+  const opts = { method, headers: { "X-HCC-Session": session }, credentials: "omit" };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
@@ -283,7 +302,7 @@ function resultsBlock(j, jobPath) {
   const out = [h("h2", {}, "Results")];
   if (r.files > 0) {
     out.push(h("p", {}, plural(r.files, "file") + ", " + fmtBytes(r.bytes) + ". ",
-      h("a", { class: "button", href: jobPath + "/results", download: j.id + "-results.tar" }, "Download (.tar)")),
+      h("button", { onclick: () => download(jobPath) }, "Download (.tar)")),
     h("p", { class: "muted" }, "Written by the agent: review it like any download before running anything in it."));
   } else {
     out.push(h("p", { class: "muted" }, "No files."));
@@ -294,6 +313,17 @@ function resultsBlock(j, jobPath) {
       h("ul", {}, r.skipped.map((s) => h("li", {}, h("code", {}, s)))));
   }
   return out;
+}
+
+// download fetches a single-use ticket (a link cannot carry the session
+// header) and lets the browser download from it.
+async function download(jobPath) {
+  try {
+    const r = await api("POST", jobPath + "/download");
+    location.assign(r.url);
+  } catch (err) {
+    fail(err);
+  }
 }
 
 async function cancelJob(jobPath) {
@@ -560,8 +590,9 @@ document.getElementById("stop-all").addEventListener("click", async () => {
 // --- start ---
 
 async function start() {
+  loadSession();
   try {
-    csrf = (await api("GET", "/api/session")).csrf;
+    await api("GET", "/api/session");
   } catch (err) {
     fail(err);
     return;

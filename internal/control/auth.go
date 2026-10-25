@@ -6,16 +6,18 @@ import (
 	"encoding/hex"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
 
 // Session lifetime and limits.
 const (
-	SessionTTL  = 12 * time.Hour
-	maxSessions = 64
-	cookieName  = "hcc_session"
-	csrfHeader  = "X-HCC-CSRF"
+	SessionTTL    = 12 * time.Hour
+	maxSessions   = 64
+	sessionHeader = "X-HCC-Session"
+	ticketTTL     = time.Minute
+	maxTickets    = 256
 )
 
 // auth guards the UI. The Control Center listens on loopback only, but
@@ -24,22 +26,28 @@ const (
 //
 //   - the Host header must name this server (no DNS rebinding),
 //   - every API call needs a session, created only by opening the login
-//     URL with the secret token printed at startup (other local users
-//     and web pages cannot know it),
-//   - the session cookie is HttpOnly and SameSite=Strict, and every
-//     change also needs the session's CSRF token in a header and a
-//     same-origin Origin header.
+//     URL with the secret token printed at startup,
+//   - the session is not a cookie (browsers send cookies to every port
+//     of 127.0.0.1, so another local server could collect it): the login
+//     redirect hands it to the page in the URL fragment, which is never
+//     sent anywhere; the page keeps it in sessionStorage (this origin,
+//     this port only) and sends it in a header that other sites cannot
+//     set, which also rules out CSRF; changes also need a same-origin
+//     Origin header,
+//   - downloads, which cannot carry a header, use single-use tickets
+//     that expire within a minute.
 type auth struct {
 	loginToken string
 	now        func() time.Time
 
 	mu       sync.Mutex
 	hosts    []string // allowed Host headers
-	sessions map[string]session
+	sessions map[string]time.Time
+	tickets  map[string]ticket
 }
 
-type session struct {
-	csrf    string
+type ticket struct {
+	path    string // the API path it opens
 	expires time.Time
 }
 
@@ -52,7 +60,7 @@ func randomToken() string {
 }
 
 func newAuth() *auth {
-	return &auth{loginToken: randomToken(), now: time.Now, sessions: map[string]session{}}
+	return &auth{loginToken: randomToken(), now: time.Now, sessions: map[string]time.Time{}, tickets: map[string]ticket{}}
 }
 
 func (a *auth) setHosts(hosts []string) {
@@ -75,46 +83,71 @@ func (a *auth) login(token string) (id string, ok bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
-	for k, s := range a.sessions {
-		if now.After(s.expires) {
+	for k, exp := range a.sessions {
+		if now.After(exp) {
 			delete(a.sessions, k)
 		}
 	}
 	if len(a.sessions) >= maxSessions { // drop the oldest
 		var oldest string
-		for k, s := range a.sessions {
-			if oldest == "" || s.expires.Before(a.sessions[oldest].expires) {
+		for k, exp := range a.sessions {
+			if oldest == "" || exp.Before(a.sessions[oldest]) {
 				oldest = k
 			}
 		}
 		delete(a.sessions, oldest)
 	}
 	id = randomToken()
-	a.sessions[id] = session{csrf: randomToken(), expires: now.Add(SessionTTL)}
+	a.sessions[id] = now.Add(SessionTTL)
 	return id, true
 }
 
-// session returns the request's live session.
-func (a *auth) session(r *http.Request) (session, bool) {
-	c, err := r.Cookie(cookieName)
-	if err != nil {
-		return session{}, false
+// session reports whether the request carries a live session.
+func (a *auth) session(r *http.Request) bool {
+	id := r.Header.Get(sessionHeader)
+	if id == "" {
+		return false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s, ok := a.sessions[c.Value]
-	if !ok || a.now().After(s.expires) {
-		return session{}, false
-	}
-	return s, true
+	exp, ok := a.sessions[id]
+	return ok && !a.now().After(exp)
 }
 
 func (a *auth) logout(r *http.Request) {
-	if c, err := r.Cookie(cookieName); err == nil {
-		a.mu.Lock()
-		delete(a.sessions, c.Value)
-		a.mu.Unlock()
+	a.mu.Lock()
+	delete(a.sessions, r.Header.Get(sessionHeader))
+	a.mu.Unlock()
+}
+
+// newTicket returns a single-use ticket for GET path.
+func (a *auth) newTicket(path string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	for k, t := range a.tickets {
+		if now.After(t.expires) {
+			delete(a.tickets, k)
+		}
 	}
+	if len(a.tickets) >= maxTickets {
+		clear(a.tickets)
+	}
+	id := randomToken()
+	a.tickets[id] = ticket{path: path, expires: now.Add(ticketTTL)}
+	return id
+}
+
+// redeem consumes a ticket and returns the path it opens.
+func (a *auth) redeem(id string) (string, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	t, ok := a.tickets[id]
+	delete(a.tickets, id)
+	if !ok || a.now().After(t.expires) {
+		return "", false
+	}
+	return t.path, true
 }
 
 // securityHeaders are sent with every response. The UI loads nothing
@@ -140,21 +173,14 @@ func (a *auth) guard(next http.Handler) http.Handler {
 			http.Error(w, "unexpected Host header", http.StatusMisdirectedRequest)
 			return
 		}
-		if len(r.URL.Path) >= 5 && r.URL.Path[:5] == "/api/" {
-			s, ok := a.session(r)
-			if !ok {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if !a.session(r) {
 				writeError(w, http.StatusUnauthorized, errString("not signed in: open the link that \"hcc control serve\" printed"))
 				return
 			}
-			if r.Method != http.MethodGet && r.Method != http.MethodHead {
-				if r.Header.Get("Origin") != "http://"+r.Host {
-					writeError(w, http.StatusForbidden, errString("cross-origin request refused"))
-					return
-				}
-				if subtle.ConstantTimeCompare([]byte(r.Header.Get(csrfHeader)), []byte(s.csrf)) != 1 {
-					writeError(w, http.StatusForbidden, errString("missing or wrong CSRF token"))
-					return
-				}
+			if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Header.Get("Origin") != "http://"+r.Host {
+				writeError(w, http.StatusForbidden, errString("cross-origin request refused"))
+				return
 			}
 		}
 		next.ServeHTTP(w, r)
