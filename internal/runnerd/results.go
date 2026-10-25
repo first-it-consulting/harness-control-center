@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/first-it-consulting/harness-control-center/internal/results"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
@@ -26,8 +27,13 @@ func resultsPath(stateDir, id string) (string, error) {
 // (internal/results) into <stateDir>/jobs/<id>/results.tar. Only a
 // complete, clean archive is kept: on any error, or if it holds no files,
 // nothing is stored.
+//
+// Jobs store one at a time, so the free-space check holds for each.
 func ResultsFunc(stateDir string) func(id string, disk io.Reader, maxBytes int64) (results.Summary, error) {
+	var mu sync.Mutex
 	return func(id string, disk io.Reader, maxBytes int64) (results.Summary, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		var sum results.Summary
 		p, err := resultsPath(stateDir, id)
 		if err != nil {

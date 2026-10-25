@@ -4,7 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -186,6 +189,11 @@ func FuzzSanitize(f *testing.F) {
 	_, _ = tw.Write([]byte("x"))
 	_ = tw.Close()
 	f.Add(seed.Bytes())
+	for _, name := range []string{"sparse-pax.tar", "sparse-gnu.tar"} {
+		if b, err := os.ReadFile(filepath.Join("testdata", name)); err == nil {
+			f.Add(b)
+		}
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var out bytes.Buffer
 		if _, err := Sanitize(&out, bytes.NewReader(data), Limits{MaxBytes: 1 << 20, MaxFiles: 100}); err != nil {
@@ -203,4 +211,71 @@ func FuzzSanitize(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestSanitizeLimitsCannotOverflow(t *testing.T) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	_ = tw.WriteHeader(&tar.Header{Name: "a", Typeflag: tar.TypeReg, Size: 10, Mode: 0o644})
+	_, _ = tw.Write(make([]byte, 10))
+	_ = tw.Flush()
+	// A second header claiming the largest possible size.
+	_ = tw.WriteHeader(&tar.Header{Name: "b", Typeflag: tar.TypeReg, Size: 1<<62 + (1<<62 - 1), Mode: 0o644, Format: tar.FormatPAX})
+	if _, err := Sanitize(io.Discard, bytes.NewReader(buf.Bytes()), Limits{MaxBytes: 100}); !errors.Is(err, ErrTooLarge) {
+		t.Errorf("err = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestSanitizeCountsDirectories(t *testing.T) {
+	var entries []entry
+	for i := range 5 {
+		entries = append(entries, entry{name: fmt.Sprintf("d%d/", i), typ: tar.TypeDir})
+	}
+	if _, err := Sanitize(io.Discard, bytes.NewReader(archive(t, entries...)), Limits{MaxFiles: 3}); !errors.Is(err, ErrTooLarge) {
+		t.Errorf("err = %v, want ErrTooLarge for 5 directories over a limit of 3", err)
+	}
+}
+
+// Sparse entries expand on reading (10 KiB in, any size out). The
+// archives were made by GNU tar --sparse (posix and gnu formats) from a
+// 1 MiB file with one byte of data.
+func TestSanitizeDropsSparseFiles(t *testing.T) {
+	for _, name := range []string{"sparse-pax.tar", "sparse-gnu.tar"} {
+		src, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		sum, err := Sanitize(&out, bytes.NewReader(src), Limits{})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if sum.Files != 0 || len(sum.Skipped) != 1 || !strings.Contains(sum.Skipped[0], "sparse") {
+			t.Errorf("%s: summary = %+v", name, sum)
+		}
+	}
+}
+
+func TestSanitizeDropsDisguisedNames(t *testing.T) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, name := range []string{"c1\u009b31m", "bidi\u202etxt.exe", "bad\xffutf8", "zero\u200bwidth"} {
+		_ = tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Size: 1, Mode: 0o644, Format: tar.FormatPAX})
+		_, _ = tw.Write([]byte("x"))
+	}
+	_ = tw.WriteHeader(&tar.Header{Name: "ok-ünïcode.txt", Typeflag: tar.TypeReg, Size: 1, Mode: 0o644, Format: tar.FormatPAX})
+	_, _ = tw.Write([]byte("x"))
+	_ = tw.Close()
+	var out bytes.Buffer
+	sum, err := Sanitize(&out, &buf, Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, out.Bytes())
+	if len(got) != 1 || got["ok-ünïcode.txt"] == nil {
+		t.Errorf("kept %v, want only the plain unicode name", got)
+	}
+	if sum.Files != 1 || len(sum.Skipped) != 4 {
+		t.Errorf("summary = %+v", sum)
+	}
 }

@@ -129,7 +129,7 @@ func cmdRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			line += fmt.Sprintf(" after %s", ev.At.Sub(started).Round(100*time.Millisecond))
 		}
 		if ev.Message != "" {
-			line += ": " + ev.Message
+			line += ": " + safeString(ev.Message)
 		}
 		fmt.Fprintln(stdout, line)
 		return true
@@ -254,7 +254,7 @@ func cmdResults(args []string, stdout, stderr io.Writer) int {
 			return exitUsage
 		}
 		if err := c.Results(ctx, id, stdout); err != nil {
-			fmt.Fprintln(stderr, "hcc results:", err)
+			printErrSafe(stderr, "hcc results", err)
 			return exitInvalid
 		}
 		return exitOK
@@ -270,7 +270,7 @@ func cmdResults(args []string, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		_ = os.Remove(*out)
-		fmt.Fprintln(stderr, "hcc results:", err)
+		printErrSafe(stderr, "hcc results", err)
 		return exitInvalid
 	}
 	fmt.Fprintf(stdout, "Saved the results of %s to %s.\n", id, *out)
@@ -278,6 +278,21 @@ func cmdResults(args []string, stdout, stderr io.Writer) int {
 		printResults(stdout, j.Results)
 	}
 	return exitOK
+}
+
+// safeString neutralizes control characters in a short message from the
+// runner (job errors can quote what the agent sent).
+func safeString(s string) string {
+	var b strings.Builder
+	_ = writeSafe(&b, strings.NewReader(s))
+	return b.String()
+}
+
+// printErrSafe prints an error that may quote the agent (e.g. a results
+// problem naming one of its files).
+func printErrSafe(w io.Writer, prefix string, err error) {
+	fmt.Fprint(w, prefix+": ")
+	_ = writeSafe(w, strings.NewReader(err.Error()+"\n"))
 }
 
 // printResults summarizes a job's results. Skipped names come from the
@@ -320,7 +335,7 @@ func printJobs(w io.Writer, jobs []runner.Job) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "JOB\tHARNESS\tSTATE\tCREATED\tTOKENS\tDETAIL")
 	for _, j := range jobs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", j.ID, j.Harness, j.State, j.Created.Local().Format("2006-01-02 15:04:05"), formatUsage(j), j.Error)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", j.ID, j.Harness, j.State, j.Created.Local().Format("2006-01-02 15:04:05"), formatUsage(j), safeString(j.Error))
 	}
 	_ = tw.Flush()
 }

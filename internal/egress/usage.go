@@ -286,7 +286,7 @@ func (t *meteredTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 				// Cut short: the model may have generated up to max_tokens.
 				t.meter.Record(0, max(0, maxOut-out))
 			default:
-				t.meter.Fail("model reported no usage for " + req.URL.Path)
+				t.meter.Fail(fmt.Sprintf("model reported no usage for %.200q", req.URL.Path))
 			}
 		},
 	}

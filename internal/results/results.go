@@ -3,9 +3,11 @@
 // host never mounts anything the agent wrote, it only parses that stream
 // here, in userspace, and re-packs what passes into a clean tar:
 //
-//   - only regular files and directories (no links, devices or FIFOs),
-//   - relative, clean names without "..", bounded depth and length,
-//   - bounded total size and file count,
+//   - only regular files and directories (no links, devices, FIFOs or
+//     sparse files),
+//   - relative, clean names without "..", bounded depth and length, in
+//     valid UTF-8 without control or formatting characters,
+//   - bounded total size and entry count,
 //   - normalized metadata (root ownership, 0644/0755, no xattrs).
 package results
 
@@ -17,12 +19,14 @@ import (
 	"path"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Limits bound what is accepted.
 type Limits struct {
 	MaxBytes int64 // total file content
-	MaxFiles int
+	MaxFiles int   // entries kept: files and directories
 }
 
 // DefaultLimits are used for zero fields.
@@ -68,6 +72,7 @@ func Sanitize(dst io.Writer, src io.Reader, limits Limits) (Summary, error) {
 		}
 	}()
 	epoch := time.Unix(0, 0)
+	entries := 0
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -87,6 +92,14 @@ func Sanitize(dst io.Writer, src io.Reader, limits Limits) (Summary, error) {
 			skip(hdr.Name, "unsafe name")
 			continue
 		}
+		if isSparse(hdr) {
+			// Its holes would expand on reading: far more bytes out than in.
+			skip(name, "sparse file")
+			continue
+		}
+		if entries >= limits.MaxFiles {
+			return sum, ErrTooLarge
+		}
 		var out tar.Header
 		switch hdr.Typeflag {
 		case tar.TypeDir:
@@ -96,7 +109,7 @@ func Sanitize(dst io.Writer, src io.Reader, limits Limits) (Summary, error) {
 				skip(name, "invalid size")
 				continue
 			}
-			if sum.Files+1 > limits.MaxFiles || sum.Bytes+hdr.Size > limits.MaxBytes {
+			if hdr.Size > limits.MaxBytes-sum.Bytes { // cannot overflow: both sides are in range
 				return sum, ErrTooLarge
 			}
 			mode := int64(0o644)
@@ -108,6 +121,7 @@ func Sanitize(dst io.Writer, src io.Reader, limits Limits) (Summary, error) {
 			skip(name, "not a regular file or directory")
 			continue
 		}
+		entries++
 		if tw == nil {
 			tw = tar.NewWriter(dst)
 		}
@@ -152,10 +166,28 @@ func cleanName(name string) (string, bool) {
 	if clean == "." || strings.HasPrefix(clean, "../") || strings.Count(clean, "/") >= maxDepth {
 		return "", false
 	}
+	if !utf8.ValidString(clean) {
+		return "", false
+	}
 	for _, r := range clean {
-		if r < 0x20 || r == 0x7f {
+		// C0 and C1 controls, and formatting characters such as bidi
+		// overrides, which can disguise a name when it is displayed.
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return "", false
 		}
 	}
 	return clean, true
+}
+
+// isSparse reports GNU sparse entries, old-style or PAX.
+func isSparse(h *tar.Header) bool {
+	if h.Typeflag == tar.TypeGNUSparse {
+		return true
+	}
+	for k := range h.PAXRecords {
+		if strings.HasPrefix(k, "GNU.sparse.") {
+			return true
+		}
+	}
+	return false
 }
