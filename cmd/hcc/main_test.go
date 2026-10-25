@@ -9,8 +9,12 @@ import (
 )
 
 func runCLI(args ...string) (code int, stdout, stderr string) {
+	return runCLIWithInput("", args...)
+}
+
+func runCLIWithInput(input string, args ...string) (code int, stdout, stderr string) {
 	var out, errOut bytes.Buffer
-	code = run(args, &out, &errOut)
+	code = run(args, strings.NewReader(input), &out, &errOut)
 	return code, out.String(), errOut.String()
 }
 

@@ -49,7 +49,9 @@ type Config struct {
 	Images map[string]Image
 	// MaxConcurrent bounds running jobs (default 1).
 	MaxConcurrent int
-	// Console returns where a job's console output goes (default: discard).
+	// Console returns where a job's console output goes (default:
+	// discard). If the writer is also an io.Closer, it is closed when the
+	// job ends.
 	Console func(jobID string) io.Writer
 	// Now and NewID are injectable for tests.
 	Now   func() time.Time
@@ -58,9 +60,10 @@ type Config struct {
 
 type job struct {
 	Job
-	ctx    context.Context
-	cancel context.CancelFunc
-	spec   sandbox.Spec
+	ctx     context.Context
+	cancel  context.CancelFunc
+	spec    sandbox.Spec
+	history []Event // every event of this job, oldest first (at most one per state)
 }
 
 // Runner runs jobs. It is safe for concurrent use.
@@ -155,7 +158,7 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 	r.jobs[id] = j
 	r.queue = append(r.queue, j)
 	r.wg.Add(1)
-	r.emitLocked(Event{JobID: id, Harness: j.Harness, To: StateQueued, At: j.Created})
+	r.emitLocked(j, Event{JobID: id, Harness: j.Harness, To: StateQueued, At: j.Created})
 	r.mu.Unlock()
 
 	r.dispatch()
@@ -195,7 +198,13 @@ func (r *Runner) execute(j *job) {
 	}
 	r.transition(j, StateRunning, "")
 
-	res, err := r.cfg.Provider.Run(j.ctx, j.spec, r.cfg.Console(j.ID))
+	console := r.cfg.Console(j.ID)
+	res, err := r.cfg.Provider.Run(j.ctx, j.spec, console)
+	if c, ok := console.(io.Closer); ok {
+		if cerr := c.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("console: %w", cerr)
+		}
+	}
 	switch {
 	case err != nil:
 		r.transition(j, StateFailed, err.Error())
@@ -235,7 +244,7 @@ func (r *Runner) transitionLocked(j *job, to State, msg string) {
 			j.Error = msg
 		}
 	}
-	r.emitLocked(Event{JobID: j.ID, Harness: j.Harness, From: from, To: to, At: now, Message: msg})
+	r.emitLocked(j, Event{JobID: j.ID, Harness: j.Harness, From: from, To: to, At: now, Message: msg})
 }
 
 // cancelQueuedLocked removes the queued jobs for which match returns true
@@ -333,10 +342,14 @@ func (r *Runner) List() []Job {
 // Delivery never blocks the runner: a subscriber that falls more than
 // buffer events behind loses events.
 func (r *Runner) Subscribe(buffer int) (<-chan Event, func()) {
-	ch := make(chan Event, max(buffer, 1))
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.subscribeLocked(buffer)
+}
+
+func (r *Runner) subscribeLocked(buffer int) (<-chan Event, func()) {
+	ch := make(chan Event, max(buffer, 1))
 	r.subs[ch] = struct{}{}
-	r.mu.Unlock()
 	var once sync.Once
 	return ch, func() {
 		once.Do(func() {
@@ -348,7 +361,23 @@ func (r *Runner) Subscribe(buffer int) (<-chan Event, func()) {
 	}
 }
 
-func (r *Runner) emitLocked(e Event) {
+// Watch returns job id's events so far and, atomically with that, a
+// subscription to all later events (of every job; filter by JobID). A
+// caller therefore sees each of the job's events exactly once, however
+// late it starts watching.
+func (r *Runner) Watch(id string, buffer int) (history []Event, events <-chan Event, stop func(), err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	j, ok := r.jobs[id]
+	if !ok {
+		return nil, nil, nil, ErrNotFound
+	}
+	ch, stop := r.subscribeLocked(buffer)
+	return slices.Clone(j.history), ch, stop, nil
+}
+
+func (r *Runner) emitLocked(j *job, e Event) {
+	j.history = append(j.history, e)
 	for ch := range r.subs {
 		select {
 		case ch <- e:

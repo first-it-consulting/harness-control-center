@@ -1,7 +1,8 @@
 # Harness Control Center
 
-> **Status: pre-alpha.** The harness spec and policy engine exist; runners,
-> sandboxes and the UI are being built. Nothing here runs agents yet.
+> **Status: pre-alpha.** The harness spec, policy engine, Firecracker
+> sandbox, runner daemon and CLI work. Sandboxes boot and are confined,
+> but no agent runtime runs inside them yet, and there is no UI yet.
 > "Harness Control Center" is a working codename.
 
 Run AI agents on your own machines, safely, without being an expert.
@@ -43,6 +44,22 @@ Risk: high
 • Cannot start other agents.
 • Asks you before: git.push.default-branch, delete.*.
 ```
+
+## Run it on your own server
+
+With a Linux server that has KVM (a Proxmox VM with nested virtualization
+works), see [deploy/README.md](deploy/README.md). Then:
+
+```sh
+hcc run --ssh my-server hello.yaml   # explain, confirm, run, follow; Ctrl-C stops the job
+hcc jobs --ssh my-server             # list jobs
+hcc logs --ssh my-server <job>       # console output
+hcc kill --ssh my-server             # kill switch: stop everything, refuse new jobs
+hcc resume --ssh my-server
+```
+
+The runner listens on no network port. `--ssh` uses your own ssh
+configuration and host keys.
 
 ## Documentation
 

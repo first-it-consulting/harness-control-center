@@ -35,24 +35,24 @@ func canTransition(from, to State) bool {
 
 // Job is a snapshot of one harness run.
 type Job struct {
-	ID       string
-	Harness  string
-	State    State
-	Error    string
-	Created  time.Time
-	Started  time.Time // zero until running
-	Finished time.Time // zero until terminal
+	ID       string    `json:"id"`
+	Harness  string    `json:"harness"`
+	State    State     `json:"state"`
+	Error    string    `json:"error,omitempty"`
+	Created  time.Time `json:"created"`
+	Started  time.Time `json:"started,omitzero"`  // zero until running
+	Finished time.Time `json:"finished,omitzero"` // zero until terminal
 }
 
 // Event reports a state change. Events are the runner's observability
 // stream: every transition of every job produces exactly one.
 type Event struct {
-	JobID   string
-	Harness string
-	From    State
-	To      State
-	At      time.Time
-	Message string
+	JobID   string    `json:"jobId"`
+	Harness string    `json:"harness"`
+	From    State     `json:"from,omitempty"`
+	To      State     `json:"to"`
+	At      time.Time `json:"at"`
+	Message string    `json:"message,omitempty"`
 }
 
 func (e Event) String() string {

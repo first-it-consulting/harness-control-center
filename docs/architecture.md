@@ -63,6 +63,8 @@ These are extension points (see [ADR-0002](adr/0002-plugin-system.md)):
 | `internal/sandbox` | provider-neutral sandbox interface and validated run spec |
 | `internal/sandbox/firecracker` | Firecracker provider: jailer, cgroup v2 limits, kill switch, cleanup |
 | `internal/runner` | job queue and state machine, concurrency limit, per-job cancel, kill switch, event stream |
+| `internal/runnerd` | runner daemon: HTTP API on an owner-only Unix socket, client (Unix socket or ssh), size-capped console logs |
+| `deploy/` | systemd unit and install script for runners |
 | `hack/firecracker-poc` | standalone proof of concept and e2e test assets |
 | `examples/` | example harnesses (tested to stay valid) |
 | `docs/` | vision, architecture, threat model, ADRs |

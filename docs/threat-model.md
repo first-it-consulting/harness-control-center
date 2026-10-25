@@ -38,7 +38,11 @@ Living document. Update it in the same PR as any change that affects it.
 | Destructive actions | Approval gates pause the agent until a human decides. | policy done, runtime planned |
 | User misunderstands permissions | Plain-language `explain` and a risk rating before every start. The spec is strict (unknown fields are errors, single document, size-limited). | done |
 | Malicious plugin | Out-of-process plugins with a permission manifest approved by the user. Official plugins are signed. | planned |
-| Control-plane MITM | SSH with host-key pinning on first use (later mTLS). No plaintext transport. | planned |
+| Control-plane MITM | The runner listens on no network port. `hcc --ssh` reaches it through the user's own ssh (their host keys and pinning), relaying to the Unix socket. | done (ssh); Control Center TOFU pinning planned |
+| Other local users drive the runner | The socket is 0600 in a 0700 directory, owned by the runner user; verified that another user gets "permission denied". | done |
+| Option injection through the ssh host (`--ssh -oProxyCommand=…`) | Hosts must not start with '-', ssh gets "--" before the host, and the remote socket path is restricted to shell-inert characters. | done |
+| Runner user becomes root by replacing the jailer | The daemon refuses to start unless the jailer, Firecracker and every parent directory are root-owned and not group/other-writable. Images and config are root-owned and read-only for the runner. The runner refuses to run as root. | done |
+| Guest fills the host disk through its console | Console logs are capped at 10 MiB per job; further output is dropped. | done (no rotation of old jobs yet) |
 | Tampered release | Keyless cosign signatures, SBOMs, SLSA provenance, SHA-pinned actions, least-privilege workflow tokens. | pipeline done |
 | Log leakage | Secrets are redacted at the broker. Logs stay on the user's machines. | planned |
 

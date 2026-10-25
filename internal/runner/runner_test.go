@@ -433,3 +433,75 @@ func TestRejectsOtherTargets(t *testing.T) {
 		t.Error("rejected harness created a job")
 	}
 }
+
+type closeRecorder struct {
+	io.Writer
+	closed atomic.Bool
+}
+
+func (c *closeRecorder) Close() error { c.closed.Store(true); return nil }
+
+func TestConsoleIsClosedWhenJobEnds(t *testing.T) {
+	rec := &closeRecorder{Writer: io.Discard}
+	r, err := New(Config{
+		Provider: newFakeProvider(),
+		Images:   map[string]Image{"base": {}},
+		Console:  func(string) io.Writer { return rec },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Shutdown(context.Background()) }()
+	id, err := r.Submit(harness(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, r, id, StateSucceeded)
+	if !rec.closed.Load() {
+		t.Error("console writer not closed")
+	}
+}
+
+func TestWatchReplaysHistoryWithoutGapsOrDuplicates(t *testing.T) {
+	p := newFakeProvider()
+	p.block = true
+	r := newRunner(t, p, 1)
+	id, _ := r.Submit(harness(t, ""))
+	waitState(t, r, id, StateRunning)
+
+	history, events, stop, err := r.Watch(id, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	close(p.release)
+	got := slices.Clone(history)
+	for !got[len(got)-1].To.Terminal() {
+		select {
+		case e := <-events:
+			if e.JobID == id {
+				got = append(got, e)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("events so far: %v", got)
+		}
+	}
+	var states []State
+	for _, e := range got {
+		states = append(states, e.To)
+	}
+	want := []State{StateQueued, StateProvisioning, StateRunning, StateSucceeded}
+	if !slices.Equal(states, want) {
+		t.Errorf("watched %v, want %v", states, want)
+	}
+
+	// Watching a finished job returns its whole history.
+	history, _, stop2, _ := r.Watch(id, 1)
+	defer stop2()
+	if len(history) != 4 || history[3].To != StateSucceeded {
+		t.Errorf("history of finished job = %v", history)
+	}
+	if _, _, _, err := r.Watch("job-missing", 1); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Watch(missing) = %v", err)
+	}
+}
