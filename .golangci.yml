@@ -25,6 +25,10 @@ linters:
       - path: cmd/
         linters: [errcheck]
         text: "fmt.Fprint"
+      # Tests read files they created themselves in t.TempDir().
+      - path: _test\.go
+        linters: [gosec]
+        text: "G304"
 
 formatters:
   enable:

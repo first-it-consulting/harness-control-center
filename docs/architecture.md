@@ -60,5 +60,8 @@ These are extension points (see [ADR-0002](adr/0002-plugin-system.md)):
 | `cmd/hcc` | the single binary |
 | `internal/spec` | harness spec: types, defaults, strict parsing, validation |
 | `internal/policy` | permission decisions, risk rating, plain-language explanation |
+| `internal/sandbox` | provider-neutral sandbox interface and validated run spec |
+| `internal/sandbox/firecracker` | Firecracker provider: jailer, cgroup v2 limits, kill switch, cleanup |
+| `hack/firecracker-poc` | standalone proof of concept and e2e test assets |
 | `examples/` | example harnesses (tested to stay valid) |
 | `docs/` | vision, architecture, threat model, ADRs |
