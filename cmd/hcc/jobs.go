@@ -280,12 +280,13 @@ func cmdResults(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// safeString neutralizes control characters in a short message from the
-// runner (job errors can quote what the agent sent).
+// safeString neutralizes control characters in a one-line message from
+// the runner (job errors can quote what the agent sent). Newlines and
+// tabs are shown too, so a message cannot fake table rows or columns.
 func safeString(s string) string {
 	var b strings.Builder
 	_ = writeSafe(&b, strings.NewReader(s))
-	return b.String()
+	return strings.NewReplacer("\n", `\n`, "\t", `\t`).Replace(b.String())
 }
 
 // printErrSafe prints an error that may quote the agent (e.g. a results

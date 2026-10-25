@@ -48,3 +48,10 @@ func TestWriteSafeLeavesNoRawEscapes(t *testing.T) {
 		}
 	}
 }
+
+func TestSafeStringIsOneLine(t *testing.T) {
+	got := safeString("bad\njob-2  hello  succeeded\tx\x1b[2J")
+	if strings.ContainsAny(got, "\n\t\x1b") || got != `bad\njob-2  hello  succeeded\tx^[[2J` {
+		t.Errorf("safeString = %q", got)
+	}
+}
