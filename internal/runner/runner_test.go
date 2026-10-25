@@ -812,3 +812,175 @@ func TestNoResultsStoreNoDisk(t *testing.T) {
 		t.Errorf("disk %d collect %v results %v", s.DiskMiB, s.Collect != nil, j.Results)
 	}
 }
+
+type memStore struct {
+	mu      sync.Mutex
+	jobs    map[string]Job
+	saves   int
+	deleted []string
+}
+
+func newMemStore(jobs ...Job) *memStore {
+	s := &memStore{jobs: map[string]Job{}}
+	for _, j := range jobs {
+		s.jobs[j.ID] = j
+	}
+	return s
+}
+
+func (s *memStore) Save(j Job) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.jobs[j.ID] = j
+	s.saves++
+	return nil
+}
+
+func (s *memStore) Load() ([]Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Job
+	for _, j := range s.jobs {
+		out = append(out, j)
+	}
+	return out, nil
+}
+
+func (s *memStore) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.jobs, id)
+	s.deleted = append(s.deleted, id)
+	return nil
+}
+
+func (s *memStore) get(id string) Job {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.jobs[id]
+}
+
+func TestJobsArePersistedOnEveryChange(t *testing.T) {
+	store := newMemStore()
+	p := newFakeProvider()
+	r, err := New(Config{Provider: p, Images: []string{"base"}, Store: store, NewID: func() string { return "job-1" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Shutdown(context.Background()) }()
+	id, err := r.Submit(harness(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, r, id, StateSucceeded)
+	if got := store.get(id); got.State != StateSucceeded || got.Finished.IsZero() || got.Harness != "hello" {
+		t.Errorf("stored = %+v", got)
+	}
+	if store.saves != 4 { // queued, provisioning, running, succeeded
+		t.Errorf("saves = %d, want 4", store.saves)
+	}
+}
+
+func TestLoadMarksUnfinishedJobsFailedAndRecovers(t *testing.T) {
+	created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	store := newMemStore(
+		Job{ID: "job-old", Harness: "a", State: StateSucceeded, Created: created, Finished: created.Add(time.Minute)},
+		Job{ID: "job-live", Harness: "b", State: StateRunning, Created: created.Add(time.Hour), Started: created.Add(time.Hour)},
+		Job{ID: "job-queued", Harness: "c", State: StateQueued, Created: created.Add(2 * time.Hour)},
+		Job{ID: "../bad", State: StateSucceeded},
+	)
+	var recovered []string
+	r, err := New(Config{Provider: newFakeProvider(), Images: []string{"base"}, Store: store,
+		Recover: func(_ context.Context, ids []string) error { recovered = append(recovered, ids...); return nil },
+		NewID:   func() string { return "job-old" }, // collides with a stored job at first
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Shutdown(context.Background()) }()
+	slices.Sort(recovered)
+	if !slices.Equal(recovered, []string{"job-live", "job-queued"}) {
+		t.Errorf("recovered %v", recovered)
+	}
+	for _, id := range []string{"job-live", "job-queued"} {
+		j, ok := r.Get(id)
+		if !ok || j.State != StateFailed || !strings.Contains(j.Error, "runner stopped while the job was") || j.Finished.IsZero() {
+			t.Errorf("%s = %+v", id, j)
+		}
+		if store.get(id).State != StateFailed {
+			t.Errorf("%s not saved as failed", id)
+		}
+	}
+	if _, ok := r.Get("../bad"); ok {
+		t.Error("a job with an unsafe ID was loaded")
+	}
+	if jobs := r.List(); len(jobs) != 3 || jobs[0].ID != "job-old" {
+		t.Errorf("List = %v", jobs)
+	}
+	// A loaded job can be watched: its one event is terminal.
+	history, _, stop, err := r.Watch("job-old", 1)
+	if err != nil || len(history) != 1 || history[0].To != StateSucceeded {
+		t.Errorf("Watch = %v, %v", history, err)
+	}
+	stop()
+	// New IDs never reuse a stored job's.
+	n := 0
+	r.cfg.NewID = func() string {
+		n++
+		if n == 1 {
+			return "job-old"
+		}
+		return "job-new"
+	}
+	if id, err := r.Submit(harness(t, "")); err != nil || id != "job-new" {
+		t.Errorf("Submit = %q, %v", id, err)
+	}
+}
+
+func TestPrune(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	var stored []Job
+	for i := range 5 {
+		at := now.Add(-time.Duration(5-i) * 24 * time.Hour)
+		stored = append(stored, Job{ID: fmt.Sprintf("job-%d", i), State: StateSucceeded, Created: at, Finished: at})
+	}
+	stored = append(stored, Job{ID: "job-running", State: StateRunning, Created: now.Add(-30 * 24 * time.Hour)})
+	store := newMemStore(stored...)
+	r, err := New(Config{Provider: newFakeProvider(), Images: []string{"base"}, Store: store, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Shutdown(context.Background()) }()
+	// job-running was marked failed on load (finished now): it stays.
+	pruned := r.Prune(0, 3*24*time.Hour+time.Minute)
+	slices.Sort(pruned)
+	if !slices.Equal(pruned, []string{"job-0", "job-1"}) {
+		t.Errorf("by age: pruned %v", pruned)
+	}
+	pruned = r.Prune(2, 0)
+	slices.Sort(pruned)
+	if !slices.Equal(pruned, []string{"job-2", "job-running"}) {
+		t.Errorf("by count: pruned %v (want the oldest beyond 2)", pruned)
+	}
+	if jobs := r.List(); len(jobs) != 2 {
+		t.Errorf("left %v", jobs)
+	}
+	if len(store.deleted) != 4 {
+		t.Errorf("deleted from store: %v", store.deleted)
+	}
+}
+
+func TestPruneKeepsUnfinishedJobs(t *testing.T) {
+	p := newFakeProvider()
+	p.block = true
+	r := newRunner(t, p, 1)
+	id, err := r.Submit(harness(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, r, id, StateRunning)
+	if pruned := r.Prune(0, time.Nanosecond); len(pruned) != 0 {
+		t.Errorf("pruned a running job: %v", pruned)
+	}
+	close(p.release)
+}

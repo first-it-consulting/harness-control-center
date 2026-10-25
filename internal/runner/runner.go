@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -67,6 +68,16 @@ type Config struct {
 	Results func(jobID string, disk io.Reader, maxBytes int64) (results.Summary, error)
 	// MaxDiskMiB bounds spec.sandbox.diskMiB (default DefaultMaxDiskMiB).
 	MaxDiskMiB int
+	// Store, if set, persists every job (on each state change), so the
+	// history survives a restart. Jobs that were not finished when the
+	// runner stopped are marked failed on load.
+	Store Store
+	// Recover, if set, is called once with those unfinished jobs' IDs, to
+	// clean up whatever their sandboxes left behind.
+	Recover func(ctx context.Context, ids []string) error
+	// Log receives problems that do not belong to a single caller, such
+	// as a job that could not be saved (default: discarded).
+	Log *slog.Logger
 	// Now and NewID are injectable for tests.
 	Now   func() time.Time
 	NewID func() string
@@ -124,9 +135,67 @@ func New(cfg Config) (*Runner, error) {
 	if cfg.NewID == nil {
 		cfg.NewID = randomID
 	}
+	if cfg.Log == nil {
+		cfg.Log = slog.New(slog.DiscardHandler)
+	}
 	r := &Runner{cfg: cfg, jobs: map[string]*job{}, subs: map[chan Event]struct{}{}}
 	r.root, r.cancelRoot = context.WithCancel(context.Background())
+	if cfg.Store != nil {
+		if err := r.load(); err != nil {
+			return nil, err
+		}
+	}
 	return r, nil
+}
+
+// load restores the stored jobs. A job that was not finished cannot be
+// resumed (its sandbox died with the previous process, or must be
+// stopped now): it is marked failed, and Recover cleans up after it.
+func (r *Runner) load() error {
+	jobs, err := r.cfg.Store.Load()
+	if err != nil {
+		return fmt.Errorf("runner: load jobs: %w", err)
+	}
+	var unfinished []string
+	for _, sj := range jobs {
+		if sandbox.ValidateID(sj.ID) != nil || r.jobs[sj.ID] != nil {
+			continue
+		}
+		if !sj.State.Terminal() {
+			unfinished = append(unfinished, sj.ID)
+			sj.Error = fmt.Sprintf("the runner stopped while the job was %s", sj.State)
+			sj.State = StateFailed
+			sj.Finished = r.cfg.Now()
+			r.save(sj)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		j := &job{Job: sj, ctx: ctx, cancel: cancel}
+		// The detailed event history is not kept: one event stands for it.
+		j.history = []Event{{JobID: sj.ID, Harness: sj.Harness, To: sj.State, At: sj.Finished, Message: sj.Error}}
+		r.jobs[sj.ID] = j
+	}
+	if len(unfinished) > 0 && r.cfg.Recover != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := r.cfg.Recover(ctx, unfinished); err != nil {
+			r.cfg.Log.Error("cleaning up after unfinished jobs failed", "jobs", unfinished, "err", err)
+		} else {
+			r.cfg.Log.Warn("cleaned up after jobs that were unfinished when the runner stopped", "jobs", unfinished)
+		}
+	}
+	return nil
+}
+
+// save persists a job. Failing to save does not stop the job; it is
+// logged, and the next state change tries again.
+func (r *Runner) save(j Job) {
+	if r.cfg.Store == nil {
+		return
+	}
+	if err := r.cfg.Store.Save(j); err != nil {
+		r.cfg.Log.Error("job not saved", "job", j.ID, "err", err)
+	}
 }
 
 // Submit validates h against what this runner can enforce, queues it and
@@ -176,6 +245,9 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 		return "", ErrKilled
 	}
 	id := r.cfg.NewID()
+	for r.jobs[id] != nil { // a stored job may hold it
+		id = r.cfg.NewID()
+	}
 	var (
 		network *sandbox.Network
 		meter   *budget.Meter
@@ -215,6 +287,7 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 	r.queue = append(r.queue, j)
 	r.wg.Add(1)
 	r.emitLocked(j, Event{JobID: id, Harness: j.Harness, To: StateQueued, At: j.Created})
+	r.save(j.snapshot())
 	r.mu.Unlock()
 
 	r.dispatch()
@@ -306,6 +379,40 @@ func (r *Runner) transitionLocked(j *job, to State, msg string) {
 		}
 	}
 	r.emitLocked(j, Event{JobID: j.ID, Harness: j.Harness, From: from, To: to, At: now, Message: msg})
+	r.save(j.snapshot())
+}
+
+// Prune forgets finished jobs, oldest first, that finished more than
+// maxAge ago or exceed maxJobs (0: no limit), deleting them from the
+// Store. Unfinished jobs are never pruned. It returns the pruned IDs.
+func (r *Runner) Prune(maxJobs int, maxAge time.Duration) []string {
+	r.mu.Lock()
+	var done []*job
+	for _, j := range r.jobs {
+		if j.State.Terminal() {
+			done = append(done, j)
+		}
+	}
+	slices.SortFunc(done, func(a, b *job) int { return a.Created.Compare(b.Created) })
+	now := r.cfg.Now()
+	var pruned []string
+	for i, j := range done {
+		tooMany := maxJobs > 0 && len(done)-i > maxJobs
+		tooOld := maxAge > 0 && now.Sub(j.Finished) > maxAge
+		if tooMany || tooOld {
+			delete(r.jobs, j.ID)
+			pruned = append(pruned, j.ID)
+		}
+	}
+	r.mu.Unlock()
+	if r.cfg.Store != nil {
+		for _, id := range pruned {
+			if err := r.cfg.Store.Delete(id); err != nil {
+				r.cfg.Log.Error("pruned job not deleted", "job", id, "err", err)
+			}
+		}
+	}
+	return pruned
 }
 
 // cancelQueuedLocked removes the queued jobs for which match returns true

@@ -96,6 +96,7 @@ func serve(configPath string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	store := runnerd.NewFileStore(cfg.StateDir, log)
 	rcfg := runner.Config{
 		Provider:      provider,
 		Target:        cfg.Target,
@@ -105,6 +106,11 @@ func serve(configPath string, log *slog.Logger) error {
 		Pricing:       cfg.Pricing,
 		Results:       runnerd.ResultsFunc(cfg.StateDir),
 		MaxDiskMiB:    cfg.MaxDiskMiB,
+		Store:         store,
+		Recover: func(ctx context.Context, ids []string) error {
+			return provider.Recover(ctx, ids, netCfg != nil)
+		},
+		Log: log,
 	}
 	if netCfg != nil {
 		rcfg.Egress = egressFactory(netCfg, cfg.Credentials, log)
@@ -129,11 +135,30 @@ func serve(configPath string, log *slog.Logger) error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	go pruneJobs(ctx, r, store, cfg.Retention, log)
 	log.Info("runner started", "version", version.Version, "target", cfg.Target, "socket", cfg.Socket,
 		"maxConcurrent", cfg.MaxConcurrent, "network", netCfg != nil)
 	err = runnerd.NewServer(r, cfg.StateDir, log).Serve(ctx, l)
 	log.Info("runner stopped; all jobs were stopped")
 	return err
+}
+
+// pruneJobs enforces the retention limits now and then every hour.
+func pruneJobs(ctx context.Context, r *runner.Runner, store *runnerd.FileStore, ret runnerd.Retention, log *slog.Logger) {
+	tick := time.NewTicker(time.Hour)
+	defer tick.Stop()
+	for {
+		jobs := r.Prune(ret.MaxJobs, ret.Age())
+		orphans := store.PruneOrphans(ret.Age(), time.Now())
+		if len(jobs)+len(orphans) > 0 {
+			log.Info("pruned old jobs", "jobs", len(jobs), "orphans", len(orphans))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
 }
 
 // egressFactory builds each networked job's proxy from that job's own

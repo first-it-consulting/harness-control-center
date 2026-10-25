@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -55,6 +56,28 @@ type Config struct {
 	// is reserved on the jail filesystem, and its results are stored in
 	// stateDir.
 	MaxDiskMiB int `yaml:"maxDiskMiB"`
+	// Retention bounds the finished jobs kept in stateDir (record,
+	// console log and results each).
+	Retention Retention `yaml:"retention"`
+}
+
+// Retention defaults.
+const (
+	DefaultRetentionJobs = 1000
+	DefaultRetentionAge  = 30 * 24 * time.Hour
+)
+
+// Retention says how many finished jobs to keep, and for how long.
+type Retention struct {
+	MaxJobs int `yaml:"maxJobs"`
+	// MaxAge is a Go duration such as "720h".
+	MaxAge string `yaml:"maxAge"`
+}
+
+// Age is MaxAge parsed (valid after LoadConfig).
+func (r Retention) Age() time.Duration {
+	d, _ := time.ParseDuration(r.MaxAge)
+	return d
 }
 
 // NetworkSection configures sandbox links and the egress proxy.
@@ -145,6 +168,12 @@ func LoadConfig(path string) (*Config, error) {
 	if c.MaxDiskMiB == 0 {
 		c.MaxDiskMiB = runner.DefaultMaxDiskMiB
 	}
+	if c.Retention.MaxJobs == 0 {
+		c.Retention.MaxJobs = DefaultRetentionJobs
+	}
+	if c.Retention.MaxAge == "" {
+		c.Retention.MaxAge = DefaultRetentionAge.String()
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -194,6 +223,12 @@ func (c *Config) Validate() error {
 				add("images.%s.%s must be an absolute path inside firecracker.imageRoot, got %q", name, what, p)
 			}
 		}
+	}
+	if c.Retention.MaxJobs < 1 || c.Retention.MaxJobs > 1_000_000 {
+		add("retention.maxJobs must be between 1 and 1000000")
+	}
+	if d, err := time.ParseDuration(c.Retention.MaxAge); err != nil || d < time.Hour || d > 10*365*24*time.Hour {
+		add("retention.maxAge must be a duration between 1h and 87600h, got %q", c.Retention.MaxAge)
 	}
 	if c.MaxDiskMiB < 1 || c.MaxDiskMiB > sandbox.MaxDiskMiB {
 		add("maxDiskMiB must be between 1 and %d", sandbox.MaxDiskMiB)

@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 const goodConfig = `
@@ -57,7 +58,8 @@ func TestLoadConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Target != "local" || c.MaxConcurrent != 1 || c.Socket != DefaultSocket || c.MaxDiskMiB != 8192 {
+	if c.Target != "local" || c.MaxConcurrent != 1 || c.Socket != DefaultSocket || c.MaxDiskMiB != 8192 ||
+		c.Retention.MaxJobs != 1000 || c.Retention.Age() != 30*24*time.Hour {
 		t.Errorf("defaults = %+v", c)
 	}
 }
@@ -82,6 +84,9 @@ func TestLoadConfigRejects(t *testing.T) {
 		"relative helper":     {"/usr/local/lib/hcc/hcc-helper", "hcc-helper", "firecracker.helper"},
 		"disk limit too big":  {"maxConcurrent: 2", "maxConcurrent: 2\nmaxDiskMiB: 999999999", "maxDiskMiB"},
 		"negative disk limit": {"maxConcurrent: 2", "maxConcurrent: 2\nmaxDiskMiB: -1", "maxDiskMiB"},
+		"retention too short": {"maxConcurrent: 2", "maxConcurrent: 2\nretention: {maxAge: 5m}", "retention.maxAge"},
+		"retention garbage":   {"maxConcurrent: 2", "maxConcurrent: 2\nretention: {maxAge: forever}", "retention.maxAge"},
+		"retention no jobs":   {"maxConcurrent: 2", "maxConcurrent: 2\nretention: {maxJobs: -3}", "retention.maxJobs"},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {

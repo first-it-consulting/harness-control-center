@@ -54,6 +54,15 @@ type Job struct {
 	Results *Results `json:"results,omitempty"`
 }
 
+// Store persists jobs. Save is called with the runner's lock held, so it
+// must not call back into the runner.
+type Store interface {
+	Save(Job) error
+	Load() ([]Job, error)
+	// Delete removes a job and everything stored with it.
+	Delete(id string) error
+}
+
 // DefaultMaxDiskMiB is the default for Config.MaxDiskMiB.
 const DefaultMaxDiskMiB = 8192
 

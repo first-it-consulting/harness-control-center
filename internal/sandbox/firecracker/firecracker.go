@@ -236,6 +236,51 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 	return res, nil
 }
 
+// Recover cleans up after sandboxes of a previous runner process that
+// did not finish (it crashed or was killed): their VMs may still run,
+// since the jailer moves them out of the runner's cgroup. For each ID it
+// kills the jail's cgroup, removes the jail and the staging directory;
+// with network, it deletes every slot's link. Call it before any Run.
+func (p *Provider) Recover(ctx context.Context, ids []string, network bool) error {
+	var errs []error
+	for _, id := range ids {
+		if err := sandbox.ValidateID(id); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := p.cfg.Host.KillJail(ctx, id); err != nil {
+			errs = append(errs, err)
+		}
+		// cgroup.kill is asynchronous: retry the removal while the
+		// processes die.
+		var rerr error
+		for range 10 {
+			if rerr = p.cfg.Host.RemoveJail(ctx, id); rerr == nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return errors.Join(append(errs, rerr, ctx.Err())...)
+			case <-time.After(p.cfg.StopGrace / 5):
+			}
+		}
+		if rerr != nil {
+			errs = append(errs, rerr)
+		}
+		if err := os.RemoveAll(filepath.Join(p.cfg.StagingBase, id)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if network {
+		for slot := range p.cfg.Identities {
+			if err := p.cfg.Host.TeardownNetwork(ctx, slot); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // stop ends a running VM: SIGTERM to the jailer chain first, then
 // cgroup.kill if it is still running after StopGrace.
 func (p *Provider) stop(id string, proc Process, done <-chan error) error {

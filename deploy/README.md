@@ -101,6 +101,27 @@ hcc results <job> -o results.tar --ssh <host>
 
 See ADR-0006 for what is kept and why.
 
+## Job history
+
+Each job is kept in `/var/lib/hcc/state/jobs/<id>/` (owner-only): its
+record `job.json` (saved on every state change), console log and
+results. History survives restarts. A job that was not finished when
+the runner stopped is marked `failed` on the next start, and whatever its
+sandbox left behind is cleaned up first: a crashed runner can leave VMs
+running (the jailer moves them out of the service's cgroup), so the
+runner kills their cgroups, removes their jails and staging, and deletes
+the sandbox links.
+
+Finished jobs are pruned hourly, by count and by age:
+
+```yaml
+retention:
+  maxJobs: 1000   # default
+  maxAge: 720h    # default (30 days)
+```
+
+The daemon's own log goes to journald, which rotates it.
+
 ## Images
 
 | Image | Contents | Use |
@@ -133,5 +154,6 @@ starts it again afterwards.
 - Only HTTPS (CONNECT) leaves a sandbox.
 - Credential hosts that echo request headers would show the secret to the
   agent; only configure real APIs.
-- Job history lives in memory and is lost on restart; console logs and
-  results stay in `/var/lib/hcc/state` and are not rotated yet.
+- A job's token usage is saved with its state changes, so a job that was
+  running when the runner crashed shows the usage it had when it
+  started.

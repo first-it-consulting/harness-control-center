@@ -752,3 +752,29 @@ func TestNoDiskNoDrive(t *testing.T) {
 		}
 	}
 }
+
+func TestRecover(t *testing.T) {
+	f := newFixture(t, exitsCleanly)
+	leftover := filepath.Join(f.base, "job-dead")
+	if err := os.MkdirAll(leftover, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.p.Recover(context.Background(), []string{"job-dead", "../bad"}, true); err == nil {
+		t.Error("an unsafe id was accepted")
+	}
+	if !slices.Equal(f.host.killed, []string{"job-dead"}) || !slices.Equal(f.host.removed, []string{"job-dead"}) {
+		t.Errorf("killed %v removed %v", f.host.killed, f.host.removed)
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Errorf("staging left: %v", err)
+	}
+	var downs int
+	for _, e := range f.host.events {
+		if strings.HasPrefix(e, "net-down") {
+			downs++
+		}
+	}
+	if downs != len(f.p.inUse) {
+		t.Errorf("tore down %d links, want every slot (%d)", downs, len(f.p.inUse))
+	}
+}

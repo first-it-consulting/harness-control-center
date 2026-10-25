@@ -86,7 +86,13 @@ type testDaemon struct {
 
 func startDaemon(t *testing.T) *testDaemon {
 	t.Helper()
-	dir := shortTempDir(t)
+	return startDaemonIn(t, shortTempDir(t))
+}
+
+// startDaemonIn starts a daemon whose state lives in dir, which may hold
+// a previous daemon's state.
+func startDaemonIn(t *testing.T, dir string) *testDaemon {
+	t.Helper()
 	state := filepath.Join(dir, "state")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	r, err := runner.New(runner.Config{
@@ -95,6 +101,7 @@ func startDaemon(t *testing.T) *testDaemon {
 		MaxConcurrent: 2,
 		Console:       ConsoleFunc(state, log),
 		Results:       ResultsFunc(state),
+		Store:         NewFileStore(state, log),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -408,5 +415,109 @@ func TestResultsFuncKeepsNothingOnError(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Join(state, "jobs", "job-1"))
 	if len(entries) != 0 {
 		t.Errorf("left behind: %v", entries)
+	}
+}
+
+func TestFileStore(t *testing.T) {
+	dir := t.TempDir()
+	log := slog.New(slog.DiscardHandler)
+	s := NewFileStore(dir, log)
+	j := runner.Job{ID: "job-1", Harness: "h", State: runner.StateSucceeded, Created: time.Unix(1700000000, 0).UTC()}
+	if err := s.Save(j); err != nil {
+		t.Fatal(err)
+	}
+	j.Error = "updated"
+	if err := s.Save(j); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "jobs", "job-1", "job.json")
+	if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("record = %v, %v", fi, err)
+	}
+	// Damaged, foreign and misnamed records are skipped.
+	for name, content := range map[string]string{"job-2": "{not json", "job-3": `{"id":"job-1"}`} {
+		_ = os.MkdirAll(filepath.Join(dir, "jobs", name), 0o700)
+		_ = os.WriteFile(filepath.Join(dir, "jobs", name, "job.json"), []byte(content), 0o600)
+	}
+	_ = os.MkdirAll(filepath.Join(dir, "jobs", "Not_An_ID"), 0o700)
+	jobs, err := s.Load()
+	if err != nil || len(jobs) != 1 || jobs[0].Error != "updated" || !jobs[0].Created.Equal(j.Created) {
+		t.Fatalf("Load = %+v, %v", jobs, err)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(dir, "jobs", "job-1")); len(entries) != 1 {
+		t.Errorf("temporary files left: %v", entries)
+	}
+	if err := s.Save(runner.Job{ID: "../x"}); err == nil {
+		t.Error("unsafe id saved")
+	}
+	if err := s.Delete("job-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(p)); !os.IsNotExist(err) {
+		t.Errorf("job directory left: %v", err)
+	}
+}
+
+func TestPruneOrphans(t *testing.T) {
+	dir := t.TempDir()
+	s := NewFileStore(dir, slog.New(slog.DiscardHandler))
+	old := filepath.Join(dir, "jobs", "job-old")
+	_ = os.MkdirAll(old, 0o700)
+	_ = os.WriteFile(filepath.Join(old, "console.log"), []byte("x"), 0o600)
+	_ = os.MkdirAll(filepath.Join(dir, "jobs", "job-new"), 0o700)
+	if err := s.Save(runner.Job{ID: "job-kept"}); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-48 * time.Hour)
+	for _, d := range []string{old, filepath.Join(dir, "jobs", "job-kept")} {
+		_ = os.Chtimes(d, past, past)
+	}
+	pruned := s.PruneOrphans(24*time.Hour, time.Now())
+	if !slices.Equal(pruned, []string{"job-old"}) {
+		t.Errorf("pruned %v, want only the old directory without a record", pruned)
+	}
+}
+
+func TestHistorySurvivesRestart(t *testing.T) {
+	dir := shortTempDir(t)
+	ctx := context.Background()
+	d := startDaemonIn(t, dir)
+	id, err := d.client.Submit(ctx, []byte(harnessDoc+"  sandbox: {cpus: 2, diskMiB: 256}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.client.Follow(ctx, id, func(runner.Event) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	// One job still running when the daemon stops.
+	live, err := d.client.Submit(ctx, []byte(blockingHarnessDoc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.cancel()
+	if err := <-d.done; err != nil {
+		t.Fatal(err)
+	}
+	d.done <- nil // for the first daemon's cleanup
+
+	d2 := startDaemonIn(t, dir)
+	j, err := d2.client.Get(ctx, id)
+	if err != nil || j.State != runner.StateSucceeded || j.Results == nil || j.Results.Files != 1 {
+		t.Fatalf("after restart: %+v, %v", j, err)
+	}
+	var console bytes.Buffer
+	if err := d2.client.Console(ctx, id, &console); err != nil || console.String() != "guest says hello\n" {
+		t.Errorf("console after restart = %q, %v", console.String(), err)
+	}
+	if err := d2.client.Results(ctx, id, io.Discard); err != nil {
+		t.Errorf("results after restart: %v", err)
+	}
+	// Stopped on shutdown, so it ended cancelled, and is listed.
+	l, err := d2.client.Get(ctx, live)
+	if err != nil || !l.State.Terminal() {
+		t.Errorf("job running at shutdown = %+v, %v", l, err)
+	}
+	if last, err := d2.client.Follow(ctx, id, func(runner.Event) bool { return true }); err != nil || last.To != runner.StateSucceeded {
+		t.Errorf("Follow after restart = %v, %v", last, err)
 	}
 }
