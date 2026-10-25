@@ -1,0 +1,16 @@
+name: Feature request
+description: Suggest an idea
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Does this grant agents any new capability? How could it be misused?
+    validations:
+      required: true

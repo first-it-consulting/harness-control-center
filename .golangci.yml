@@ -1,0 +1,32 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - nolintlint
+    - revive
+    - unconvert
+    - unparam
+  settings:
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      # Writes to an in-memory or terminal writer in the CLI; nothing to handle.
+      - path: cmd/
+        linters: [errcheck]
+        text: "fmt.Fprint"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

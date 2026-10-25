@@ -1,0 +1,11 @@
+/bin/
+/dist/
+coverage.out
+*.test
+.DS_Store
+.idea/
+.vscode/
+# Never commit local secrets or runner state.
+.env
+*.pem
+*.key

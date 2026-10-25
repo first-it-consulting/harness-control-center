@@ -1,0 +1,5 @@
+# Security-critical code needs an explicit owner review.
+*                    @first-it-consulting
+/internal/policy/    @first-it-consulting
+/internal/spec/      @first-it-consulting
+/.github/            @first-it-consulting

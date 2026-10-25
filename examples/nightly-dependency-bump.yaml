@@ -1,0 +1,33 @@
+apiVersion: hcc/v1alpha1
+kind: Harness
+metadata:
+  name: nightly-dependency-bump
+  description: Open merge requests for outdated npm dependencies.
+spec:
+  runtime: claude-code
+  prompt: |
+    For each repository in the GitLab group "my-team", check for outdated
+    npm dependencies. For every repository with updates, create a branch,
+    update the dependencies, run the tests, and open a merge request.
+    Never push to the default branch.
+  target: server:homelab-01
+  trigger:
+    schedule: "0 2 * * *"
+  sandbox:
+    image: base-dev
+    cpus: 2
+    memoryMiB: 4096
+    timeout: 2h
+  permissions:
+    network:
+      egress:
+        - host: gitlab.com
+        - host: registry.npmjs.org
+    credentials: [gitlab-my-team]
+    tools:
+      install: [node@22, git]
+  budget:
+    maxCostUSD: 5
+    maxTokens: 2000000
+  approvals:
+    requireFor: [git.push.default-branch, delete.*]

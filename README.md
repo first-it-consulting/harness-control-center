@@ -1,0 +1,75 @@
+# Harness Control Center
+
+> **Status: pre-alpha.** The harness spec and policy engine exist; runners,
+> sandboxes and the UI are being built. Nothing here runs agents yet.
+> "Harness Control Center" is a working codename.
+
+Run AI agents on your own machines, safely, without being an expert.
+
+You describe a task in plain words. The Control Center turns it into a
+**harness**: the task plus exactly what the agent may do, where it runs,
+when it runs, and how much it may spend. A **runner** on your computer or
+on your own server starts the agent in a sandbox and stops it when a limit is hit.
+You watch every agent, its logs and its spending in one place.
+
+## Safety model, in one paragraph
+
+Every agent starts with **nothing**: no network, no credentials, no helpers,
+30 minutes, $1. Everything beyond that is granted explicitly, shown to you in
+plain language before it starts, and enforced outside the agent's reach.
+Secrets never enter the sandbox. A helper agent can only ever get a subset of its
+parent's permissions. Read the [threat model](docs/threat-model.md).
+
+## Try the spec today
+
+```sh
+git clone https://github.com/first-it-consulting/harness-control-center
+cd harness-control-center
+go run ./cmd/hcc explain examples/nightly-dependency-bump.yaml
+```
+
+```
+Risk: high
+  because it can reach the internet
+  because it can act with your credentials
+  because it combines network access with credentials
+
+• Runs the claude-code agent on server homelab-01.
+• Stops after 2h0m0s per run, or once it has spent $5.00 or 2,000,000 tokens.
+• Starts automatically on the schedule "0 2 * * *".
+• Can connect only to: gitlab.com, registry.npmjs.org.
+• Can act as you using: gitlab-my-team. The agent never sees these secrets.
+• May install: node@22, git.
+• Cannot start other agents.
+• Asks you before: git.push.default-branch, delete.*.
+```
+
+## Documentation
+
+- [Vision](docs/vision.md): what this is and who it is for
+- [Architecture](docs/architecture.md): Control Center, runner, sandbox, plugins
+- [Threat model](docs/threat-model.md): what we defend against, and how
+- [Decision records](docs/adr/): why things are the way they are
+
+## Verifying releases
+
+Every release is signed keylessly with [Sigstore](https://www.sigstore.dev/)
+and carries an SBOM and SLSA build provenance.
+
+```sh
+cosign verify-blob checksums.txt \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp '^https://github.com/first-it-consulting/harness-control-center/\.github/workflows/release\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum --ignore-missing -c checksums.txt
+gh attestation verify hcc_*.tar.gz --repo first-it-consulting/harness-control-center
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues privately as
+described in [SECURITY.md](SECURITY.md).
+
+## License
+
+[Apache-2.0](LICENSE)

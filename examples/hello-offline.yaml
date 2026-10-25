@@ -1,0 +1,9 @@
+# The smallest possible harness. Everything not written here is denied:
+# no network, no credentials, no subagents, 30 minutes, $1.
+apiVersion: hcc/v1alpha1
+kind: Harness
+metadata:
+  name: hello-offline
+spec:
+  runtime: claude-code
+  prompt: Write a haiku about sandboxes to haiku.txt.
