@@ -37,8 +37,10 @@ type FirecrackerConfig struct {
 	Firecracker string `yaml:"firecracker"`
 	ChrootBase  string `yaml:"chrootBase"`
 	ImageRoot   string `yaml:"imageRoot"`
-	UID         int    `yaml:"uid"`
-	GID         int    `yaml:"gid"`
+	// UID and GID are the first of maxConcurrent IDs; each running VM
+	// gets its own.
+	UID int `yaml:"uid"`
+	GID int `yaml:"gid"`
 }
 
 // ImageConfig is one bootable image.

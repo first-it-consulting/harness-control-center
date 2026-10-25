@@ -61,6 +61,7 @@ firecracker:
   firecracker: $LIB/firecracker
   chrootBase: /var/lib/hcc/jails
   imageRoot: $IMAGES
+  # Each running VM gets its own IDs: 64000..64000+maxConcurrent-1.
   uid: 64000
   gid: 64000
 images:

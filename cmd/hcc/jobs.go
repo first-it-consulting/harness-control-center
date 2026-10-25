@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -51,6 +52,7 @@ func cmdRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	conn.register(fs)
 	yes := fs.Bool("yes", false, "start without asking for confirmation")
 	console := fs.Bool("console", false, "print the guest console when the job ends")
+	raw := fs.Bool("raw", false, "with --console: print the console byte for byte (control characters included)")
 	pos, err := parseFlags(fs, args)
 	if err != nil {
 		return exitUsage
@@ -127,7 +129,7 @@ func cmdRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if *console {
 		fmt.Fprintln(stdout, "\n--- console ---")
-		if err := c.Console(ctx, id, stdout); err != nil {
+		if err := printConsole(ctx, c, id, *raw, stdout); err != nil {
 			fmt.Fprintln(stderr, "hcc run: console:", err)
 		}
 	}
@@ -158,6 +160,10 @@ func cmdJobs(cmd string, args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var conn connFlags
 	conn.register(fs)
+	var raw *bool
+	if cmd == "logs" {
+		raw = fs.Bool("raw", false, "print the console byte for byte (control characters included)")
+	}
 	pos, err := parseFlags(fs, args)
 	if err != nil {
 		return exitUsage
@@ -180,7 +186,7 @@ func cmdJobs(cmd string, args []string, stdout, stderr io.Writer) int {
 			printJobs(stdout, jobs)
 		}
 	case "logs":
-		err = c.Console(ctx, pos[0], stdout)
+		err = printConsole(ctx, c, pos[0], *raw, stdout)
 	case "cancel":
 		if err = c.Cancel(ctx, pos[0]); err == nil {
 			fmt.Fprintf(stdout, "Stopping %s.\n", pos[0])
@@ -199,6 +205,21 @@ func cmdJobs(cmd string, args []string, stdout, stderr io.Writer) int {
 		return exitInvalid
 	}
 	return exitOK
+}
+
+// printConsole prints a job's console. Unless raw, control characters are
+// shown visibly: the console is written by the agent and must not be able
+// to drive the user's terminal.
+func printConsole(ctx context.Context, c *runnerd.Client, id string, raw bool, w io.Writer) error {
+	var buf bytes.Buffer // at most runnerd.MaxConsoleBytes
+	if err := c.Console(ctx, id, &buf); err != nil {
+		return err
+	}
+	if raw {
+		_, err := w.Write(buf.Bytes())
+		return err
+	}
+	return writeSafe(w, &buf)
 }
 
 func printJobs(w io.Writer, jobs []runner.Job) {

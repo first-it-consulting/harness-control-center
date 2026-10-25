@@ -62,7 +62,7 @@ func setupE2E(t *testing.T) *e2eEnv {
 		FirecrackerPath: filepath.Join(assets, "firecracker"),
 		ChrootBase:      base,
 		ImageRoot:       images,
-		UID:             64000, GID: 64000,
+		UID:             64000, GID: 64000, Identities: 2,
 		Host: NewSudoHost(base),
 	})
 	if err != nil {
@@ -200,27 +200,48 @@ func TestE2EKillSwitch(t *testing.T) {
 	e.assertNoTrace(t, id)
 }
 
+// Two VMs at once, each under its own UID/GID, verified on the host.
 func TestE2EConcurrent(t *testing.T) {
 	e := setupE2E(t)
 	const n = 2
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var wg sync.WaitGroup
 	errs := make(chan error, n)
+	consoles := make([]*console, n)
 	ids := make([]string, n)
 	for i := range n {
 		ids[i] = fmt.Sprintf("e2e-par-%d-%d", i, time.Now().UnixNano())
+		consoles[i] = &console{}
 		wg.Add(1)
-		go func(id string) {
+		go func(i int) {
 			defer wg.Done()
-			var c console
-			res, err := e.provider.Run(context.Background(), e.spec(id, 30*time.Second), &c)
-			if err == nil && res.Outcome != sandbox.OutcomeExited {
+			res, err := e.provider.Run(ctx, e.spec(ids[i], time.Minute, "hcc.mode=hang"), consoles[i])
+			if err == nil && res.Outcome != sandbox.OutcomeKilled {
 				err = fmt.Errorf("outcome %v", res.Outcome)
 			}
 			if err != nil {
-				errs <- fmt.Errorf("%s: %w\n%s", id, err, c.String())
+				errs <- fmt.Errorf("%s: %w\n%s", ids[i], err, consoles[i].String())
 			}
-		}(ids[i])
+		}(i)
 	}
+	for i := range n {
+		if !consoles[i].waitFor("HCC-GUEST-HANG", 20*time.Second) {
+			t.Fatalf("%s never came up:\n%s", ids[i], consoles[i].String())
+		}
+	}
+	out, err := exec.Command("ps", "-o", "uid=,gid=", "-C", "firecracker").Output()
+	if err != nil {
+		t.Fatalf("ps: %v", err)
+	}
+	pairs := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		pairs[strings.Join(strings.Fields(line), ":")] = true
+	}
+	if len(pairs) != n || !pairs["64000:64000"] || !pairs["64001:64001"] {
+		t.Errorf("VMM identities = %v, want 64000:64000 and 64001:64001", pairs)
+	}
+	cancel()
 	wg.Wait()
 	close(errs)
 	for err := range errs {

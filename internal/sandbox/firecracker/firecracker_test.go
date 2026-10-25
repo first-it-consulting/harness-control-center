@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,7 +38,8 @@ type fakeHost struct {
 	onStart  func(jailRoot string)
 
 	mu       sync.Mutex
-	argv     []string
+	argv     []string               // last jailer call
+	argvs    [][]string             // all jailer calls
 	jailSeen map[string]os.FileMode // files in the jail root at start
 	config   map[string]any
 	signals  []os.Signal
@@ -71,6 +74,7 @@ func (h *fakeHost) StartJailer(argv []string, console io.Writer) (Process, error
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.argv = argv
+	h.argvs = append(h.argvs, argv)
 	root := filepath.Join(argValue(argv, "--chroot-base-dir"), "firecracker", argValue(argv, "--id"), "root")
 	h.jailSeen = map[string]os.FileMode{}
 	if h.onStart != nil {
@@ -376,7 +380,12 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 		"unclean base":     func(c *Config) { c.ChrootBase = c.ImageRoot + string(filepath.Separator) + ".." },
 		"no host":          func(c *Config) { c.Host = nil },
 		"no image root":    func(c *Config) { c.ImageRoot = "" },
+		"too many ids":     func(c *Config) { c.Identities = MaxIdentities + 1 },
+		"range overflows":  func(c *Config) { c.UID = math.MaxInt32 },
 		"runner's own uid": func(c *Config) { c.UID = os.Getuid() },
+		"range covers own uid": func(c *Config) {
+			c.UID, c.Identities = os.Getuid()-1, 4
+		},
 	}
 	if _, err := New(good); err != nil {
 		t.Fatalf("good config rejected: %v", err)
@@ -384,7 +393,7 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 	for name, mutate := range tests {
 		c := good
 		mutate(&c)
-		if name == "runner's own uid" && os.Getuid() <= 0 {
+		if (name == "runner's own uid" || name == "range covers own uid") && os.Getuid() <= 0 {
 			continue // running as root or on Windows: covered by "root uid"
 		}
 		if _, err := New(c); err == nil {
@@ -450,5 +459,87 @@ func skipWithoutSymlinks(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks need extra privileges on Windows")
+	}
+}
+
+// Concurrent VMs must never share a UID/GID.
+func TestConcurrentRunsGetDistinctIdentities(t *testing.T) {
+	f := newFixture(t, hangsUntilSIGTERM)
+	f.p.cfg.Identities = 3
+	f.p.inUse = make([]bool, 3)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	for i := range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			spec := f.spec
+			spec.ID = fmt.Sprintf("run-%d", i)
+			if _, err := f.p.Run(ctx, spec, io.Discard); err != nil {
+				t.Errorf("run-%d: %v", i, err)
+			}
+		}()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.host.mu.Lock()
+		n := len(f.host.argvs)
+		f.host.mu.Unlock()
+		if n == 3 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	wg.Wait()
+
+	uids, gids := map[string]bool{}, map[string]bool{}
+	for _, argv := range f.host.argvs {
+		uids[argValue(argv, "--uid")] = true
+		gids[argValue(argv, "--gid")] = true
+	}
+	want := map[string]bool{"64000": true, "64001": true, "64002": true}
+	if len(uids) != 3 || len(gids) != 3 {
+		t.Fatalf("identities not distinct: uids %v gids %v", uids, gids)
+	}
+	for u := range uids {
+		if !want[u] {
+			t.Errorf("uid %s outside the configured range", u)
+		}
+	}
+}
+
+func TestIdentityExhaustionAndRelease(t *testing.T) {
+	f := newFixture(t, exitsCleanly)
+	slot, err := f.p.acquire() // the only identity is now taken
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.run(context.Background(), t); err == nil || !strings.Contains(err.Error(), "identities are in use") {
+		t.Fatalf("Run with no free identity = %v", err)
+	}
+	if f.host.argv != nil {
+		t.Error("VM started without a free identity")
+	}
+	f.p.release(slot)
+	if _, _, err := f.run(context.Background(), t); err != nil {
+		t.Fatalf("Run after release: %v", err)
+	}
+	// Released again after the run.
+	if _, err := f.p.acquire(); err != nil {
+		t.Errorf("identity not released after a run: %v", err)
+	}
+}
+
+func TestUnstoppableVMKeepsItsIdentity(t *testing.T) {
+	f := newFixture(t, unkillable)
+	f.spec.Timeout = 30 * time.Millisecond
+	if _, _, err := f.run(context.Background(), t); err == nil {
+		t.Fatal("want did-not-stop error")
+	}
+	f.host.proc.finish(nil)
+	if _, err := f.p.acquire(); err == nil {
+		t.Error("identity of a VM that could not be stopped was reused")
 	}
 }

@@ -70,7 +70,8 @@ func serve(configPath string, log *slog.Logger) error {
 	provider, err := firecracker.New(firecracker.Config{
 		JailerPath: fc.Jailer, FirecrackerPath: fc.Firecracker,
 		ChrootBase: fc.ChrootBase, ImageRoot: fc.ImageRoot,
-		UID: fc.UID, GID: fc.GID,
+		// One UID/GID per concurrently running VM: uid..uid+maxConcurrent-1.
+		UID: fc.UID, GID: fc.GID, Identities: cfg.MaxConcurrent,
 		Host: firecracker.NewSudoHost(fc.ChrootBase),
 	})
 	if err != nil {

@@ -25,7 +25,7 @@ func (cliProvider) Name() string { return "test" }
 // Run exits at once, except for harnesses with memoryMiB 256, which run
 // until stopped.
 func (cliProvider) Run(ctx context.Context, s sandbox.Spec, console io.Writer) (sandbox.Result, error) {
-	_, _ = io.WriteString(console, "HCC-GUEST-UP\n")
+	_, _ = io.WriteString(console, "HCC-GUEST-UP\n\x1b]52;c;cm0gLXJmIH4=\x07\n")
 	if s.MemoryMiB == 256 {
 		<-ctx.Done()
 		return sandbox.Result{Outcome: sandbox.OutcomeKilled}, nil
@@ -191,5 +191,25 @@ func TestParseFlagsInterspersed(t *testing.T) {
 	pos, err := parseFlags(fs, []string{"a.yaml", "--yes", "--socket", "/s", "b"})
 	if err != nil || !*yes || *sock != "/s" || !slices.Equal(pos, []string{"a.yaml", "b"}) {
 		t.Errorf("pos=%v yes=%v sock=%q err=%v", pos, *yes, *sock, err)
+	}
+}
+
+func TestConsoleEscapesAreNeutralized(t *testing.T) {
+	sock := startTestRunner(t)
+	code, out, _ := runCLI("run", "--yes", "--console", "--socket", sock, "../../examples/hello-offline.yaml")
+	if code != exitOK {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if strings.Contains(out, "\x1b") || !strings.Contains(out, "^[]52;c;cm0gLXJmIH4=^G") {
+		t.Errorf("guest escape sequence reached the terminal raw:\n%q", out)
+	}
+	id := out[strings.Index(out, "job-") : strings.Index(out, "job-")+20]
+	_, logs, _ := runCLI("logs", "--socket", sock, id)
+	if strings.Contains(logs, "\x1b") {
+		t.Errorf("hcc logs printed a raw escape: %q", logs)
+	}
+	_, rawLogs, _ := runCLI("logs", "--raw", "--socket", sock, id)
+	if !strings.Contains(rawLogs, "\x1b]52;") {
+		t.Errorf("hcc logs --raw altered the output: %q", rawLogs)
 	}
 }

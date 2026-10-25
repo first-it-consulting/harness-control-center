@@ -20,10 +20,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -39,6 +41,8 @@ const (
 	// MaxPids bounds the processes in a sandbox's cgroup (VMM + vCPU and
 	// I/O threads).
 	MaxPids = 64
+	// MaxIdentities bounds Config.Identities.
+	MaxIdentities = 1024
 )
 
 // Fixed kernel parameters. Callers cannot override these (see
@@ -57,9 +61,13 @@ type Config struct {
 	// filesystem: Spec.Kernel and Spec.RootFS must resolve (symlinks
 	// included) to regular files inside it.
 	ImageRoot string
-	// UID and GID the VMM runs as. They need no account but must not be
-	// 0 or the runner's own IDs.
+	// UID and GID are the first of Identities consecutive user and group
+	// IDs. Every running VM gets its own pair, so one VMM can never
+	// signal, trace or read another (Firecracker's recommendation). They
+	// need no accounts but must not include 0 or the runner's own IDs.
 	UID, GID int
+	// Identities is how many VMs can run at once (default 1).
+	Identities int
 	// StopGrace is how long to wait after SIGTERM, and again after
 	// cgroup.kill, before giving up.
 	StopGrace time.Duration
@@ -69,6 +77,9 @@ type Config struct {
 // Provider implements sandbox.Provider with Firecracker.
 type Provider struct {
 	cfg Config
+
+	mu    sync.Mutex
+	inUse []bool // identity slots; a slot whose VM could not be stopped stays taken
 }
 
 var _ sandbox.Provider = (*Provider)(nil)
@@ -81,11 +92,20 @@ func New(cfg Config) (*Provider, error) {
 			errs = append(errs, fmt.Errorf("%s must be a clean absolute path, got %q", name, p))
 		}
 	}
+	if cfg.Identities == 0 {
+		cfg.Identities = 1
+	}
+	if cfg.Identities < 0 || cfg.Identities > MaxIdentities {
+		errs = append(errs, fmt.Errorf("identities must be between 1 and %d", MaxIdentities))
+	}
 	if cfg.UID <= 0 || cfg.GID <= 0 {
 		errs = append(errs, errors.New("UID and GID must be non-root"))
 	}
-	if cfg.UID == os.Getuid() || cfg.GID == os.Getgid() {
-		errs = append(errs, errors.New("UID and GID must differ from the runner's own"))
+	if cfg.UID > math.MaxInt32-cfg.Identities || cfg.GID > math.MaxInt32-cfg.Identities {
+		errs = append(errs, errors.New("UID/GID range overflows"))
+	}
+	if inRange(os.Getuid(), cfg.UID, cfg.Identities) || inRange(os.Getgid(), cfg.GID, cfg.Identities) {
+		errs = append(errs, errors.New("the UID/GID range must not include the runner's own IDs"))
 	}
 	if cfg.Host == nil {
 		errs = append(errs, errors.New("Host is required"))
@@ -96,7 +116,28 @@ func New(cfg Config) (*Provider, error) {
 	if cfg.StopGrace <= 0 {
 		cfg.StopGrace = DefaultStopGrace
 	}
-	return &Provider{cfg: cfg}, nil
+	return &Provider{cfg: cfg, inUse: make([]bool, cfg.Identities)}, nil
+}
+
+func inRange(id, first, n int) bool { return id >= first && id < first+n }
+
+// acquire reserves a free identity slot.
+func (p *Provider) acquire() (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, used := range p.inUse {
+		if !used {
+			p.inUse[i] = true
+			return i, nil
+		}
+	}
+	return 0, fmt.Errorf("firecracker: all %d sandbox identities are in use", len(p.inUse))
+}
+
+func (p *Provider) release(slot int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.inUse[slot] = false
 }
 
 // Name implements sandbox.Provider.
@@ -119,6 +160,21 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 		return res, err
 	}
 	defer rootfs.Close()
+
+	slot, err := p.acquire()
+	if err != nil {
+		return res, err
+	}
+	// Released after cleanup (defers run last-in, first-out), and never
+	// if the VM could not be stopped: a live VMM must not share its
+	// identity with the next one.
+	stuck := false
+	defer func() {
+		if !stuck {
+			p.release(slot)
+		}
+	}()
+	uid, gid := p.cfg.UID+slot, p.cfg.GID+slot
 
 	jail := jailDir(p.cfg.ChrootBase, spec.ID)
 	// Only the jailer (root) walks the directories above the jail root.
@@ -146,7 +202,7 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 	runCtx, cancel := context.WithTimeout(ctx, spec.Timeout)
 	defer cancel()
 
-	proc, err := p.cfg.Host.StartJailer(p.jailerArgv(&spec), console)
+	proc, err := p.cfg.Host.StartJailer(p.jailerArgv(&spec, uid, gid), console)
 	if err != nil {
 		return res, err
 	}
@@ -168,6 +224,7 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 		outcome = sandbox.OutcomeTimedOut
 	}
 	if err := p.stop(spec.ID, proc, done); err != nil {
+		stuck = true
 		return res, err
 	}
 	res.Outcome = outcome
@@ -225,14 +282,14 @@ func (p *Provider) prepare(root string, spec *sandbox.Spec, kernel, rootfs *os.F
 	return writeReadOnly(bytes.NewReader(cfg), "config.json", filepath.Join(root, "config.json"))
 }
 
-func (p *Provider) jailerArgv(spec *sandbox.Spec) []string {
+func (p *Provider) jailerArgv(spec *sandbox.Spec, uid, gid int) []string {
 	memMax := int64(spec.MemoryMiB+MemoryOverheadMiB) << 20
 	return []string{
 		p.cfg.JailerPath,
 		"--id", spec.ID,
 		"--exec-file", p.cfg.FirecrackerPath,
-		"--uid", strconv.Itoa(p.cfg.UID),
-		"--gid", strconv.Itoa(p.cfg.GID),
+		"--uid", strconv.Itoa(uid),
+		"--gid", strconv.Itoa(gid),
 		"--chroot-base-dir", p.cfg.ChrootBase,
 		"--cgroup-version", "2",
 		"--cgroup", "memory.max=" + strconv.FormatInt(memMax, 10),

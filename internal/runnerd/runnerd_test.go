@@ -318,7 +318,7 @@ func TestConsoleLogIsCapped(t *testing.T) {
 	if want := int64(MaxConsoleBytes + len(truncatedMarker)); fi.Size() != want {
 		t.Errorf("log size = %d, want %d", fi.Size(), want)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 { // no Unix modes on Windows
 		t.Errorf("log mode = %v", fi.Mode().Perm())
 	}
 	if _, err := openConsoleLog(dir, "../escape"); err == nil {
