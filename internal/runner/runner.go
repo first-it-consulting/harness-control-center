@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/first-it-consulting/harness-control-center/internal/budget"
+	"github.com/first-it-consulting/harness-control-center/internal/results"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
@@ -59,6 +60,13 @@ type Config struct {
 	// budget.maxCostUSD can be enforced for them; unpriced models are
 	// limited by tokens only.
 	Pricing map[string]budget.Price
+	// Results stores what a job hands back: the raw contents of its disk
+	// (spec.sandbox.diskMiB), read after the guest shut itself down. They
+	// are hostile input (see internal/results); at most maxBytes of files
+	// may be kept. Without it, jobs get no disk.
+	Results func(jobID string, disk io.Reader, maxBytes int64) (results.Summary, error)
+	// MaxDiskMiB bounds spec.sandbox.diskMiB (default DefaultMaxDiskMiB).
+	MaxDiskMiB int
 	// Now and NewID are injectable for tests.
 	Now   func() time.Time
 	NewID func() string
@@ -104,6 +112,9 @@ func New(cfg Config) (*Runner, error) {
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = 1
 	}
+	if cfg.MaxDiskMiB <= 0 {
+		cfg.MaxDiskMiB = DefaultMaxDiskMiB
+	}
 	if cfg.Console == nil {
 		cfg.Console = func(string) io.Writer { return io.Discard }
 	}
@@ -141,6 +152,13 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 	}
 	if !slices.Contains(r.cfg.Images, h.Spec.Sandbox.Image) {
 		return "", fmt.Errorf("runner: unknown image %q", h.Spec.Sandbox.Image)
+	}
+	diskMiB := 0
+	if r.cfg.Results != nil {
+		diskMiB = h.Spec.Sandbox.DiskMiB
+		if diskMiB > r.cfg.MaxDiskMiB {
+			return "", fmt.Errorf("runner: spec.sandbox.diskMiB %d exceeds this runner's limit of %d", diskMiB, r.cfg.MaxDiskMiB)
+		}
 	}
 
 	task, err := taskFor(h)
@@ -186,8 +204,12 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 			MemoryMiB: h.Spec.Sandbox.MemoryMiB,
 			Timeout:   h.Spec.Sandbox.Timeout.Duration,
 			Network:   network,
+			DiskMiB:   diskMiB,
 		},
 		meter: meter,
+	}
+	if diskMiB > 0 {
+		j.spec.Collect = func(disk io.Reader) error { return r.collect(j, disk) }
 	}
 	r.jobs[id] = j
 	r.queue = append(r.queue, j)
@@ -372,6 +394,20 @@ func (j *job) snapshot() Job {
 		s.Usage = &u
 	}
 	return s
+}
+
+// collect stores a job's results. A problem with them is reported on the
+// job, not as a failed run: the agent did finish.
+func (r *Runner) collect(j *job, disk io.Reader) error {
+	sum, err := r.cfg.Results(j.ID, disk, int64(j.spec.DiskMiB)<<20)
+	res := &Results{Summary: sum}
+	if err != nil {
+		res.Error = err.Error()
+	}
+	r.mu.Lock()
+	j.Results = res
+	r.mu.Unlock()
+	return nil
 }
 
 // price is the price of h's model, if the runner knows it.

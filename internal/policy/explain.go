@@ -91,6 +91,8 @@ func (e *Engine) Explain() []string {
 		fmt.Sprintf("Stops after %s per run, or once its model has used %s tokens (or cost $%.2f, for models the runner has a price for).",
 			s.Sandbox.Timeout, groupDigits(s.Budget.MaxTokens), s.Budget.MaxCostUSD),
 	}
+	lines = append(lines, fmt.Sprintf("When it finishes, it can hand back up to %s MiB of files (plain files and folders only; nothing else is kept).",
+		groupDigits(int64(s.Sandbox.DiskMiB))))
 
 	if m := s.Model; m != nil {
 		line := fmt.Sprintf("Uses the model %s at %s", m.Name, m.Endpoint)

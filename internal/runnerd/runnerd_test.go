@@ -1,6 +1,7 @@
 package runnerd
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
@@ -31,6 +32,21 @@ func (testProvider) Run(ctx context.Context, s sandbox.Spec, console io.Writer) 
 	if s.MemoryMiB == 256 {
 		<-ctx.Done()
 		return sandbox.Result{Outcome: sandbox.OutcomeKilled}, nil
+	}
+	if s.Collect != nil {
+		// Harnesses with 2 CPUs hand back a file; others leave the disk blank.
+		disk := make([]byte, 4096)
+		if s.CPUs == 2 {
+			var buf bytes.Buffer
+			tw := tar.NewWriter(&buf)
+			_ = tw.WriteHeader(&tar.Header{Name: "out.txt", Typeflag: tar.TypeReg, Size: 5, Mode: 0o600})
+			_, _ = tw.Write([]byte("fib\n\n"))
+			_ = tw.Close()
+			disk = append(buf.Bytes(), disk...)
+		}
+		if err := s.Collect(bytes.NewReader(disk)); err != nil {
+			return sandbox.Result{Outcome: sandbox.OutcomeFailed}, err
+		}
 	}
 	return sandbox.Result{Outcome: sandbox.OutcomeExited}, nil
 }
@@ -78,6 +94,7 @@ func startDaemon(t *testing.T) *testDaemon {
 		Images:        []string{"base"},
 		MaxConcurrent: 2,
 		Console:       ConsoleFunc(state, log),
+		Results:       ResultsFunc(state),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -326,5 +343,70 @@ func TestConsoleLogIsCapped(t *testing.T) {
 	}
 	if _, err := openConsoleLog(dir, "job-1"); err == nil {
 		t.Error("existing log reopened")
+	}
+}
+
+func TestResults(t *testing.T) {
+	d := startDaemon(t)
+	ctx := context.Background()
+	run := func(doc string) string {
+		t.Helper()
+		id, err := d.client.Submit(ctx, []byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if last, err := d.client.Follow(ctx, id, func(runner.Event) bool { return true }); err != nil || last.To != runner.StateSucceeded {
+			t.Fatalf("job ended %s: %v", last.To, err)
+		}
+		return id
+	}
+
+	id := run(harnessDoc + "  sandbox: {cpus: 2, diskMiB: 256}\n")
+	j, err := d.client.Get(ctx, id)
+	if err != nil || j.Results == nil || j.Results.Files != 1 || j.Results.Bytes != 5 {
+		t.Fatalf("job results = %+v, %v", j.Results, err)
+	}
+	var archive bytes.Buffer
+	if err := d.client.Results(ctx, id, &archive); err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(&archive)
+	h, err := tr.Next()
+	if err != nil || h.Name != "out.txt" || h.Mode != 0o644 {
+		t.Fatalf("archive entry = %+v, %v", h, err)
+	}
+	if fi, err := os.Stat(filepath.Join(d.state, "jobs", id, "results.tar")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("stored results: %v, %v", fi, err)
+	}
+
+	// A blank disk: nothing stored, and the API says so.
+	empty := run(harnessDoc)
+	err = d.client.Results(ctx, empty, io.Discard)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != 404 || !strings.Contains(apiErr.Message, "no results") {
+		t.Errorf("results of a blank disk: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(d.state, "jobs", empty, "results.tar")); !os.IsNotExist(err) {
+		t.Errorf("an empty archive was stored: %v", err)
+	}
+}
+
+func TestResultsFuncKeepsNothingOnError(t *testing.T) {
+	state := t.TempDir()
+	store := ResultsFunc(state)
+	if _, err := store("../escape", strings.NewReader(""), 1<<20); err == nil {
+		t.Error("unsafe id accepted")
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	_ = tw.WriteHeader(&tar.Header{Name: "big", Typeflag: tar.TypeReg, Size: 100, Mode: 0o600})
+	_, _ = tw.Write(make([]byte, 100))
+	_ = tw.Close()
+	if _, err := store("job-1", &buf, 50); err == nil {
+		t.Error("oversized results accepted")
+	}
+	entries, _ := os.ReadDir(filepath.Join(state, "jobs", "job-1"))
+	if len(entries) != 0 {
+		t.Errorf("left behind: %v", entries)
 	}
 }

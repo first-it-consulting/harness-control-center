@@ -45,6 +45,8 @@ const (
 	MaxPids = 64
 	// MaxIdentities bounds Config.Identities.
 	MaxIdentities = 1024
+	// CollectTimeout bounds reading a sandbox's disk after it stopped.
+	CollectTimeout = 10 * time.Minute
 )
 
 // Fixed kernel parameters. Callers cannot override these (see
@@ -195,7 +197,9 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 	runCtx, cancel := context.WithTimeout(ctx, spec.Timeout)
 	defer cancel()
 
-	proc, err := p.cfg.Host.StartVM(StartRequest{ID: spec.ID, Image: spec.Image, Slot: slot, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB}, console)
+	proc, err := p.cfg.Host.StartVM(StartRequest{
+		ID: spec.ID, Image: spec.Image, Slot: slot, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB, DiskMiB: spec.DiskMiB,
+	}, console)
 	if err != nil {
 		return res, err
 	}
@@ -206,6 +210,14 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 	case werr := <-done:
 		if werr != nil {
 			return res, fmt.Errorf("firecracker: vmm exited: %w", werr)
+		}
+		if spec.Collect != nil {
+			// The VMM has exited: nothing writes the disk any more.
+			cctx, cancel := context.WithTimeout(context.Background(), CollectTimeout)
+			defer cancel()
+			if err := p.cfg.Host.CollectDisk(cctx, spec.ID, spec.Collect); err != nil {
+				return res, fmt.Errorf("firecracker: results: %w", err)
+			}
 		}
 		res.Outcome = sandbox.OutcomeExited
 		return res, nil
@@ -386,6 +398,16 @@ func drives(spec *sandbox.Spec) []map[string]any {
 			"path_on_host":   "task.img",
 			"is_root_device": false,
 			"is_read_only":   true,
+		})
+	}
+	if spec.DiskMiB > 0 {
+		// The guest's only writable drive (vdb or vdc); the helper creates
+		// disk.img in the jail.
+		d = append(d, map[string]any{
+			"drive_id":       "disk",
+			"path_on_host":   "disk.img",
+			"is_root_device": false,
+			"is_read_only":   false,
 		})
 	}
 	return d

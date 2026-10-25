@@ -236,7 +236,7 @@ func TestRisk(t *testing.T) {
 
 func TestExplain(t *testing.T) {
 	offline := strings.Join(mustEngine(t, base).Explain(), "\n")
-	for _, want := range []string{"this computer", "no network access", "no credentials", "Cannot start other agents", "$1.00", "1,000,000 tokens", "only when you start it"} {
+	for _, want := range []string{"this computer", "no network access", "no credentials", "Cannot start other agents", "$1.00", "1,000,000 tokens", "only when you start it", "hand back up to 4,096 MiB of files"} {
 		if !strings.Contains(offline, want) {
 			t.Errorf("offline explanation missing %q:\n%s", want, offline)
 		}

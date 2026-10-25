@@ -1,7 +1,7 @@
 #!/bin/sh
 # Init of the "base" image: boots, reports, shuts down. Its test modes
 # (harnesses cannot set kernel arguments) exercise stopping, the kill
-# switch and the network guard.
+# switch, the network guard and results.
 . /usr/lib/hcc/common.sh
 hcc_mounts
 echo "HCC-GUEST-UP kernel=$(uname -r)"
@@ -18,6 +18,13 @@ case " $(cat /proc/cmdline) " in
 	if nc -w 2 1.1.1.1 443 </dev/null 2>/dev/null; then echo "HCC-NET-DIRECT open"; else echo "HCC-NET-DIRECT blocked"; fi
 	if nc -w 2 "$H" 22 </dev/null 2>/dev/null; then echo "HCC-NET-HOSTPORT open"; else echo "HCC-NET-HOSTPORT blocked"; fi
 	if [ -s /tmp/hcc-ca.pem ]; then echo "HCC-NET-CA present"; else echo "HCC-NET-CA absent"; fi
+	;;
+*" hcc.mode=results "*)
+	mkdir -p /tmp/out/sub
+	echo "hello from the guest" >/tmp/out/sub/hello.txt
+	ln -s /etc/shadow /tmp/out/link
+	mkfifo /tmp/out/fifo
+	hcc_save_results /tmp/out
 	;;
 esac
 echo "HCC-GUEST-DONE no agent runtime in this image; shutting down"

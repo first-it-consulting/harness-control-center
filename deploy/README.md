@@ -80,8 +80,26 @@ pricing:
   claude-sonnet-5-5: {input: 3, output: 15}
 ```
 
-A job that reaches its budget is stopped and ends `over_budget`; a limit
-can be overshot by at most one request.
+A job that reaches its budget is stopped and ends `over_budget`. At most
+4 model requests run at once per job, so a limit can be overshot by at
+most those. Metering fails closed: a model response whose usage cannot be
+read (compressed, cut short without `max_tokens`, or missing) also stops
+the job.
+
+## Results
+
+Every job gets a blank disk of `spec.sandbox.diskMiB` (default 4096,
+at most `maxDiskMiB` in `/etc/hcc/runner.yaml`, default 8192). It is
+sparse, but its full size is reserved on the jail filesystem while the
+job runs. The `claude-code` image archives the agent's workspace onto it;
+after a clean shutdown the runner re-packs that archive (plain files and
+directories only) into `/var/lib/hcc/state/jobs/<id>/results.tar`.
+
+```sh
+hcc results <job> -o results.tar --ssh <host>
+```
+
+See ADR-0006 for what is kept and why.
 
 ## Images
 
@@ -92,7 +110,8 @@ can be overshot by at most one request.
 
 Claude Code runs as the unprivileged user `agent` with its home and
 workspace in memory, and prints its result between `HCC-RESULT-BEGIN` and
-`HCC-RESULT-END exit=<status>` (a non-zero status fails the job).
+`HCC-RESULT-END exit=<status>` (a non-zero status fails the job). Its
+workspace is handed back as the job's results.
 
 ## Testing an installation
 
@@ -114,5 +133,5 @@ starts it again afterwards.
 - Only HTTPS (CONNECT) leaves a sandbox.
 - Credential hosts that echo request headers would show the secret to the
   agent; only configure real APIs.
-- Job history lives in memory and is lost on restart; console logs stay in
-  `/var/lib/hcc/state` and are not rotated yet.
+- Job history lives in memory and is lost on restart; console logs and
+  results stay in `/var/lib/hcc/state` and are not rotated yet.

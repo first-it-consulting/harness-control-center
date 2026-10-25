@@ -103,6 +103,8 @@ func serve(configPath string, log *slog.Logger) error {
 		MaxConcurrent: cfg.MaxConcurrent,
 		Console:       runnerd.ConsoleFunc(cfg.StateDir, log),
 		Pricing:       cfg.Pricing,
+		Results:       runnerd.ResultsFunc(cfg.StateDir),
+		MaxDiskMiB:    cfg.MaxDiskMiB,
 	}
 	if netCfg != nil {
 		rcfg.Egress = egressFactory(netCfg, cfg.Credentials, log)

@@ -21,6 +21,9 @@ type StartRequest struct {
 	Slot      int
 	CPUs      int
 	MemoryMiB int
+	// DiskMiB sizes the guest's writable disk (0: none). The helper
+	// creates it in the jail, owned by the slot's identity.
+	DiskMiB int
 }
 
 // JailerConfig holds the root-side settings for starting VMs.
@@ -79,6 +82,9 @@ func (c *JailerConfig) Argv(req StartRequest) ([]string, error) {
 	}
 	if req.MemoryMiB < sandbox.MinMemoryMiB || req.MemoryMiB > sandbox.MaxMemoryMiB {
 		return nil, fmt.Errorf("firecracker: memory %d MiB outside %d..%d", req.MemoryMiB, sandbox.MinMemoryMiB, sandbox.MaxMemoryMiB)
+	}
+	if req.DiskMiB < 0 || req.DiskMiB > sandbox.MaxDiskMiB {
+		return nil, fmt.Errorf("firecracker: disk %d MiB outside 0..%d", req.DiskMiB, sandbox.MaxDiskMiB)
 	}
 	memMax := int64(req.MemoryMiB+MemoryOverheadMiB) << 20
 	return []string{

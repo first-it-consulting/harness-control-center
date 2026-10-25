@@ -3,6 +3,7 @@ package firecracker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,6 +30,8 @@ type Host interface {
 	SetupNetwork(ctx context.Context, slot int) (NetInfo, error)
 	// TeardownNetwork deletes slot's link; a missing one is not an error.
 	TeardownNetwork(ctx context.Context, slot int) error
+	// CollectDisk passes the stopped sandbox's disk contents to fn.
+	CollectDisk(ctx context.Context, id string, fn func(io.Reader) error) error
 }
 
 // Process is a started VM.
@@ -63,7 +66,32 @@ func (h *HelperHost) StartVM(req StartRequest, console io.Writer) (Process, erro
 	return startProcess(h.Prefix, []string{h.HelperPath, "start",
 		"--id", req.ID, "--image", req.Image, "--slot", strconv.Itoa(req.Slot),
 		"--cpus", strconv.Itoa(req.CPUs), "--memory", strconv.Itoa(req.MemoryMiB),
+		"--disk", strconv.Itoa(req.DiskMiB),
 	}, console)
+}
+
+// CollectDisk implements Host: the helper streams the disk's bytes (up
+// to the end of its data), the caller parses them unprivileged.
+func (h *HelperHost) CollectDisk(ctx context.Context, id string, fn func(io.Reader) error) error {
+	if err := sandbox.ValidateID(id); err != nil {
+		return err
+	}
+	cmd := command(ctx, h.Prefix, h.HelperPath, "collect", "--id", id)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("firecracker: collect: %w", err)
+	}
+	ferr := fn(out)
+	_, _ = io.Copy(io.Discard, out) // the rest (bounded by the disk size), so Wait sees a clean exit
+	if werr := cmd.Wait(); werr != nil {
+		return errors.Join(ferr, fmt.Errorf("firecracker: collect: %w: %s", werr, strings.TrimSpace(stderr.String())))
+	}
+	return ferr
 }
 
 // KillJail implements Host.

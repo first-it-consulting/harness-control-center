@@ -17,6 +17,8 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/first-it-consulting/harness-control-center/internal/budget"
+	"github.com/first-it-consulting/harness-control-center/internal/runner"
+	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox/firecracker"
 )
 
@@ -49,6 +51,10 @@ type Config struct {
 	// Pricing gives models a price in USD per million tokens, so that
 	// budget.maxCostUSD can be enforced for them.
 	Pricing map[string]budget.Price `yaml:"pricing"`
+	// MaxDiskMiB bounds a harness's spec.sandbox.diskMiB: each job's disk
+	// is reserved on the jail filesystem, and its results are stored in
+	// stateDir.
+	MaxDiskMiB int `yaml:"maxDiskMiB"`
 }
 
 // NetworkSection configures sandbox links and the egress proxy.
@@ -136,6 +142,9 @@ func LoadConfig(path string) (*Config, error) {
 	if c.Socket == "" {
 		c.Socket = DefaultSocket
 	}
+	if c.MaxDiskMiB == 0 {
+		c.MaxDiskMiB = runner.DefaultMaxDiskMiB
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -185,6 +194,9 @@ func (c *Config) Validate() error {
 				add("images.%s.%s must be an absolute path inside firecracker.imageRoot, got %q", name, what, p)
 			}
 		}
+	}
+	if c.MaxDiskMiB < 1 || c.MaxDiskMiB > sandbox.MaxDiskMiB {
+		add("maxDiskMiB must be between 1 and %d", sandbox.MaxDiskMiB)
 	}
 	if c.Firecracker.UID <= 0 || c.Firecracker.GID <= 0 {
 		add("firecracker.uid and firecracker.gid must be non-root")

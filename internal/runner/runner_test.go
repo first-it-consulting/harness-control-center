@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/first-it-consulting/harness-control-center/internal/budget"
+	"github.com/first-it-consulting/harness-control-center/internal/results"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
@@ -26,6 +27,7 @@ type fakeProvider struct {
 	err     error
 	block   bool
 	release chan struct{}
+	disk    string // handed to Spec.Collect after a clean exit
 
 	mu      sync.Mutex
 	specs   []sandbox.Spec
@@ -54,6 +56,11 @@ func (p *fakeProvider) Run(ctx context.Context, s sandbox.Spec, _ io.Writer) (sa
 		case <-p.release:
 		case <-ctx.Done():
 			return sandbox.Result{Outcome: sandbox.OutcomeKilled}, nil
+		}
+	}
+	if s.Collect != nil && p.outcome == sandbox.OutcomeExited && p.err == nil {
+		if err := s.Collect(strings.NewReader(p.disk)); err != nil {
+			return sandbox.Result{Outcome: sandbox.OutcomeFailed}, err
 		}
 	}
 	return sandbox.Result{Outcome: p.outcome}, p.err
@@ -723,5 +730,85 @@ func TestOfflineJobsHaveNoMeter(t *testing.T) {
 	id, _ := r.Submit(harness(t, ""))
 	if j := waitState(t, r, id, StateSucceeded); j.Usage != nil {
 		t.Errorf("offline job has usage %+v", j.Usage)
+	}
+}
+
+func diskHarness(t *testing.T, mib int) *spec.Harness {
+	t.Helper()
+	h := harness(t, "")
+	h.Spec.Sandbox.DiskMiB = mib
+	return h
+}
+
+func resultsRunner(t *testing.T, p *fakeProvider, store func(string, io.Reader, int64) (results.Summary, error)) *Runner {
+	t.Helper()
+	r, err := New(Config{Provider: p, Images: []string{"base"}, Results: store, MaxDiskMiB: 4096,
+		NewID: func() string { return "job-1" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Shutdown(context.Background()) })
+	return r
+}
+
+func TestResultsAreCollectedAndReported(t *testing.T) {
+	p := newFakeProvider()
+	p.disk = "archive"
+	var gotID, gotDisk string
+	var gotMax int64
+	r := resultsRunner(t, p, func(id string, disk io.Reader, maxBytes int64) (results.Summary, error) {
+		b, _ := io.ReadAll(disk)
+		gotID, gotDisk, gotMax = id, string(b), maxBytes
+		return results.Summary{Files: 3, Bytes: 42}, nil
+	})
+	id, err := r.Submit(diskHarness(t, 512))
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := waitState(t, r, id, StateSucceeded)
+	if gotID != id || gotDisk != "archive" || gotMax != 512<<20 {
+		t.Errorf("store got %q %q %d", gotID, gotDisk, gotMax)
+	}
+	if j.Results == nil || j.Results.Files != 3 || j.Results.Bytes != 42 || j.Results.Error != "" {
+		t.Errorf("results = %+v", j.Results)
+	}
+	if s := p.startedSpecs()[0]; s.DiskMiB != 512 {
+		t.Errorf("disk = %d MiB", s.DiskMiB)
+	}
+}
+
+// Bad results are reported on the job; the run itself still succeeded.
+func TestResultsErrorIsReportedNotFatal(t *testing.T) {
+	p := newFakeProvider()
+	r := resultsRunner(t, p, func(string, io.Reader, int64) (results.Summary, error) {
+		return results.Summary{Files: 1}, results.ErrTooLarge
+	})
+	id, err := r.Submit(harness(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := waitState(t, r, id, StateSucceeded)
+	if j.Results == nil || !strings.Contains(j.Results.Error, "exceeds the limits") {
+		t.Errorf("results = %+v", j.Results)
+	}
+}
+
+func TestResultsDiskLimit(t *testing.T) {
+	r := resultsRunner(t, newFakeProvider(), func(string, io.Reader, int64) (results.Summary, error) { return results.Summary{}, nil })
+	if _, err := r.Submit(diskHarness(t, 8192)); err == nil || !strings.Contains(err.Error(), "exceeds this runner's limit") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestNoResultsStoreNoDisk(t *testing.T) {
+	p := newFakeProvider()
+	r := newRunner(t, p, 1)
+	id, err := r.Submit(harness(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := waitState(t, r, id, StateSucceeded)
+	if s := p.startedSpecs()[0]; s.DiskMiB != 0 || s.Collect != nil || j.Results != nil {
+		t.Errorf("disk %d collect %v results %v", s.DiskMiB, s.Collect != nil, j.Results)
 	}
 }

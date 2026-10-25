@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/first-it-consulting/harness-control-center/internal/budget"
+	"github.com/first-it-consulting/harness-control-center/internal/results"
 )
 
 // State is a job's lifecycle state.
@@ -49,6 +50,19 @@ type Job struct {
 	Finished time.Time `json:"finished,omitzero"` // zero until terminal
 	// Usage is the job's metered model usage (jobs with network access).
 	Usage *budget.Usage `json:"usage,omitempty"`
+	// Results is what the job handed back, once collected.
+	Results *Results `json:"results,omitempty"`
+}
+
+// DefaultMaxDiskMiB is the default for Config.MaxDiskMiB.
+const DefaultMaxDiskMiB = 8192
+
+// Results describes what a job handed back: the files of its disk
+// archive that passed sanitizing.
+type Results struct {
+	results.Summary
+	// Error says why the results are missing or incomplete.
+	Error string `json:"error,omitempty"`
 }
 
 // Event reports a state change. Events are the runner's observability

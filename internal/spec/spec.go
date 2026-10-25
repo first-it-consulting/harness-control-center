@@ -100,11 +100,12 @@ type Loop struct {
 
 // Sandbox describes the isolated environment the agent runs in.
 type Sandbox struct {
-	Image     string   `yaml:"image,omitempty"`
-	CPUs      int      `yaml:"cpus,omitempty"`
-	MemoryMiB int      `yaml:"memoryMiB,omitempty"`
-	DiskMiB   int      `yaml:"diskMiB,omitempty"`
-	Timeout   Duration `yaml:"timeout,omitempty"`
+	Image     string `yaml:"image,omitempty"`
+	CPUs      int    `yaml:"cpus,omitempty"`
+	MemoryMiB int    `yaml:"memoryMiB,omitempty"`
+	// DiskMiB bounds the files the agent can hand back (see ADR-0006).
+	DiskMiB int      `yaml:"diskMiB,omitempty"`
+	Timeout Duration `yaml:"timeout,omitempty"`
 }
 
 // Permissions lists everything the agent is granted beyond an empty,

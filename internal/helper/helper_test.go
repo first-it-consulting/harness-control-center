@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/netip"
 	"os"
@@ -27,6 +28,7 @@ type recorder struct {
 	free     uint64          // reported free space; 0 means plenty
 	links    map[string]bool // existing network interfaces
 	failOn   string          // a Run whose argv contains this fails
+	chowns   []string        // "path uid:gid"
 }
 
 func (r *recorder) deps() Deps {
@@ -53,6 +55,10 @@ func (r *recorder) deps() Deps {
 			return nil
 		},
 		LinkExists: func(name string) bool { return r.links[name] },
+		Chown: func(f *os.File, uid, gid int) error {
+			r.chowns = append(r.chowns, fmt.Sprintf("%s %d:%d", filepath.Base(f.Name()), uid, gid))
+			return nil
+		},
 		FreeBytes: func(string) (uint64, error) {
 			if r.free == 0 {
 				return 1 << 40, nil
@@ -653,4 +659,169 @@ func TestTaskIsOptional(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(firecracker.JailDir(e.base, "job-1"), "root", "task.img")); !os.IsNotExist(err) {
 		t.Error("task.img appeared without being staged")
 	}
+}
+
+func TestStartCreatesSparseDiskForTheSlot(t *testing.T) {
+	e := newEnv(t)
+	e.stageJob1(t)
+	if code, stderr := e.call(append(e.start, "--disk", "64")...); code != 0 {
+		t.Fatalf("start: %s", stderr)
+	}
+	p := filepath.Join(firecracker.JailDir(e.base, "job-1"), "root", diskName)
+	fi, err := os.Stat(p)
+	if err != nil || fi.Size() != 64<<20 || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("disk = %v, %v; want 64 MiB, 0600", fi, err)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Blocks*512 >= fi.Size() {
+		t.Errorf("disk is not sparse (%d blocks)", st.Blocks)
+	}
+	if !slices.Equal(e.rec.chowns, []string{"disk.img 64001:64001"}) {
+		t.Errorf("chowns = %v, want the slot's identity", e.rec.chowns)
+	}
+}
+
+func TestStartWithoutDiskCreatesNone(t *testing.T) {
+	e := newEnv(t)
+	e.stageJob1(t)
+	if code, stderr := e.call(e.start...); code != 0 {
+		t.Fatalf("start: %s", stderr)
+	}
+	if _, err := os.Lstat(filepath.Join(firecracker.JailDir(e.base, "job-1"), "root", diskName)); !os.IsNotExist(err) {
+		t.Errorf("disk created without --disk: %v", err)
+	}
+}
+
+func TestDiskSpaceIsReserved(t *testing.T) {
+	e := newEnv(t)
+	// Another jail's disk may still grow by 512 MiB.
+	old := filepath.Join(firecracker.JailDir(e.base, "old-1"), "root")
+	if err := os.MkdirAll(old, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(old, diskName), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(filepath.Join(old, diskName), 512<<20); err != nil {
+		t.Fatal(err)
+	}
+	e.stageJob1(t)
+	e.rec.free = MinFreeBytes + 600<<20 // room for 600 MiB: not for 512 + 128
+	if code, stderr := e.call(append(e.start, "--disk", "128")...); code == 0 || !strings.Contains(stderr, "not enough space") {
+		t.Errorf("start over the reservation: %d %q", code, stderr)
+	}
+	if _, err := os.Stat(firecracker.JailDir(e.base, "job-1")); !os.IsNotExist(err) {
+		t.Error("jail created without space for its disk")
+	}
+	e.rec.free = MinFreeBytes + 700<<20
+	if code, stderr := e.call(append(e.start, "--disk", "128")...); code != 0 {
+		t.Errorf("start within the reservation: %s", stderr)
+	}
+}
+
+func TestStartRejectsBadDiskSizes(t *testing.T) {
+	e := newEnv(t)
+	e.stageJob1(t)
+	for _, d := range []string{"-1", "262145", "x"} {
+		if code, _ := e.call(append(e.start, "--disk", d)...); code == 0 {
+			t.Errorf("--disk %s accepted", d)
+		}
+	}
+}
+
+func TestCollectStreamsTheDiskUpToItsData(t *testing.T) {
+	e := newEnv(t)
+	e.stageJob1(t)
+	if code, stderr := e.call(append(e.start, "--disk", "64")...); code != 0 {
+		t.Fatalf("start: %s", stderr)
+	}
+	// The jailer hands root/ to the VM's identity; collect works anyway
+	// (not owned by "root" is simulated by a mode the check would refuse).
+	if err := os.Chmod(filepath.Join(firecracker.JailDir(e.base, "job-1"), "root"), 0o777); err != nil { //nolint:gosec // simulates the jailer's chown
+		t.Fatal(err)
+	}
+	p := filepath.Join(firecracker.JailDir(e.base, "job-1"), "root", diskName)
+	f, err := os.OpenFile(p, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("the guest's archive"), 0); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	code, out, stderr := e.callOut("collect", "--id", "job-1")
+	if code != 0 {
+		t.Fatalf("collect: %s", stderr)
+	}
+	if !strings.HasPrefix(out, "the guest's archive") {
+		t.Errorf("collected %q…", out[:min(len(out), 40)])
+	}
+	if len(out) > 16<<20 {
+		t.Errorf("collected %d bytes: the trailing hole was copied", len(out))
+	}
+}
+
+func TestCollectRefusesUnsafeDisks(t *testing.T) {
+	setup := func(t *testing.T) (*env, string) {
+		e := newEnv(t)
+		e.stageJob1(t)
+		if code, stderr := e.call(e.start...); code != 0 {
+			t.Fatalf("start: %s", stderr)
+		}
+		return e, filepath.Join(firecracker.JailDir(e.base, "job-1"), "root")
+	}
+	t.Run("missing", func(t *testing.T) {
+		e, _ := setup(t)
+		if code, _, _ := e.callOut("collect", "--id", "job-1"); code == 0 {
+			t.Error("collected a missing disk")
+		}
+	})
+	t.Run("symlink", func(t *testing.T) {
+		e, root := setup(t)
+		if err := os.Symlink(filepath.Join(root, "config.json"), filepath.Join(root, diskName)); err != nil {
+			t.Fatal(err)
+		}
+		if code, out, _ := e.callOut("collect", "--id", "job-1"); code == 0 || len(out) != 0 {
+			t.Error("followed a symlinked disk")
+		}
+	})
+	t.Run("hard link", func(t *testing.T) {
+		e, root := setup(t)
+		if err := os.Link(filepath.Join(root, "config.json"), filepath.Join(root, diskName)); err != nil {
+			t.Fatal(err)
+		}
+		if code, _, _ := e.callOut("collect", "--id", "job-1"); code == 0 {
+			t.Error("collected a hard-linked disk")
+		}
+	})
+	t.Run("symlinked root", func(t *testing.T) {
+		e, root := setup(t)
+		other := filepath.Join(e.anchor, "elsewhere")
+		if err := os.Mkdir(other, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(other, diskName), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(root); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(other, root); err != nil {
+			t.Fatal(err)
+		}
+		if code, out, _ := e.callOut("collect", "--id", "job-1"); code == 0 || len(out) != 0 {
+			t.Error("followed a symlinked jail root")
+		}
+	})
+	t.Run("writable jail", func(t *testing.T) {
+		e, root := setup(t)
+		if err := os.WriteFile(filepath.Join(root, diskName), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Dir(root), 0o777); err != nil { //nolint:gosec // the unsafe state under test
+			t.Fatal(err)
+		}
+		if code, _, _ := e.callOut("collect", "--id", "job-1"); code == 0 {
+			t.Error("collected from a jail others can write")
+		}
+	})
 }

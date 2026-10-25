@@ -165,6 +165,32 @@ func (c *Client) Console(ctx context.Context, id string, w io.Writer) error {
 	return err
 }
 
+// Results writes a job's results archive to w.
+func (c *Client) Results(ctx context.Context, id string, w io.Writer) error {
+	if err := sandbox.ValidateID(id); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1/jobs/"+id+"/results", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("runner unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var e struct{ Error string }
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&e)
+		if e.Error == "" {
+			e.Error = resp.Status
+		}
+		return &APIError{Status: resp.StatusCode, Message: e.Error}
+	}
+	_, err = io.Copy(w, resp.Body)
+	return err
+}
+
 // Follow calls fn for each event of job id, from the first, until the
 // job is terminal (it then returns that final event), fn returns false,
 // or ctx ends.

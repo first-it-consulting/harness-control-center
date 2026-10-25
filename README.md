@@ -4,8 +4,8 @@
 > sandbox, runner daemon, CLI, egress proxy, credential broker and the
 > Claude Code runtime work: an agent runs in a confined microVM, reaches
 > exactly the hosts its harness allows, and uses credentials it never
-> sees, within a token budget enforced at the proxy. Results come back on
-> the console; there is no UI yet.
+> sees, within a token budget enforced at the proxy. Its files come back
+> as a sanitized archive (`hcc results`); there is no UI yet.
 > "Harness Control Center" is a working codename.
 
 Run AI agents on your own machines, safely, without being an expert.

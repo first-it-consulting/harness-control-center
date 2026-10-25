@@ -38,6 +38,17 @@ func (c *connFlags) client() (*runnerd.Client, error) {
 	return runnerd.NewUnixClient(c.socket), nil
 }
 
+// flags repeats the connection flags for a suggested command line.
+func (c *connFlags) flags() string {
+	if c.ssh != "" {
+		return " --ssh " + c.ssh
+	}
+	if c.socket != runnerd.DefaultSocket {
+		return " --socket " + c.socket
+	}
+	return ""
+}
+
 func (c *connFlags) where() string {
 	if c.ssh != "" {
 		return c.ssh
@@ -133,6 +144,13 @@ func cmdRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "hcc run: console:", err)
 		}
 	}
+	if j, err := c.Get(ctx, id); err == nil && j.Results != nil {
+		fmt.Fprintln(stdout)
+		printResults(stdout, j.Results)
+		if j.Results.Files > 0 {
+			fmt.Fprintf(stdout, "Save them with: hcc results %s -o %s.tar%s\n", id, id, conn.flags())
+		}
+	}
 	if last.To != runner.StateSucceeded {
 		return exitJob
 	}
@@ -205,6 +223,78 @@ func cmdJobs(cmd string, args []string, stdout, stderr io.Writer) int {
 		return exitInvalid
 	}
 	return exitOK
+}
+
+// cmdResults saves a job's results archive. It never writes to a
+// terminal: the archive is the agent's content.
+func cmdResults(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("results", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var conn connFlags
+	conn.register(fs)
+	out := fs.String("o", "", `file to create (it must not exist), or "-" for stdout (not a terminal)`)
+	pos, err := parseFlags(fs, args)
+	if err != nil {
+		return exitUsage
+	}
+	if len(pos) != 1 || *out == "" {
+		fmt.Fprintf(stderr, "hcc results: expected a job and -o <file>\n\n%s", usage)
+		return exitUsage
+	}
+	c, err := conn.client()
+	if err != nil {
+		fmt.Fprintln(stderr, "hcc results:", err)
+		return exitUsage
+	}
+	ctx := context.Background()
+	id := pos[0]
+	if *out == "-" {
+		if f, ok := stdout.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+			fmt.Fprintln(stderr, "hcc results: refusing to write an archive to a terminal; use -o <file>")
+			return exitUsage
+		}
+		if err := c.Results(ctx, id, stdout); err != nil {
+			fmt.Fprintln(stderr, "hcc results:", err)
+			return exitInvalid
+		}
+		return exitOK
+	}
+	f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		fmt.Fprintln(stderr, "hcc results:", err)
+		return exitInvalid
+	}
+	err = c.Results(ctx, id, f)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(*out)
+		fmt.Fprintln(stderr, "hcc results:", err)
+		return exitInvalid
+	}
+	fmt.Fprintf(stdout, "Saved the results of %s to %s.\n", id, *out)
+	if j, err := c.Get(ctx, id); err == nil && j.Results != nil {
+		printResults(stdout, j.Results)
+	}
+	return exitOK
+}
+
+// printResults summarizes a job's results. Skipped names come from the
+// agent, so they are printed safely.
+func printResults(w io.Writer, r *runner.Results) {
+	fmt.Fprintf(w, "Results: %d files, %d bytes.\n", r.Files, r.Bytes)
+	if r.Error != "" {
+		fmt.Fprintf(w, "Results problem: ")
+		_ = writeSafe(w, strings.NewReader(r.Error+"\n"))
+	}
+	if len(r.Skipped) > 0 {
+		fmt.Fprintln(w, "Left out (only regular files and directories with safe names are kept):")
+		for _, s := range r.Skipped {
+			fmt.Fprint(w, "  ")
+			_ = writeSafe(w, strings.NewReader(s+"\n"))
+		}
+	}
 }
 
 // printConsole prints a job's console. Unless raw, control characters are

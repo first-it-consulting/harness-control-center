@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,9 @@ func TestSpecValidate(t *testing.T) {
 		{"guest ip", func(s *Spec) { s.BootArgs = []string{"ip=10.0.0.2::10.0.0.1:255.0.0.0::eth0:off"} }, "controlled by the provider"},
 		{"proxy override", func(s *Spec) { s.BootArgs = []string{"hcc.proxy=evil.example:3128"} }, "controlled by the provider"},
 		{"network without proxy", func(s *Spec) { s.Network = &Network{} }, "without a proxy"},
+		{"negative disk", func(s *Spec) { s.DiskMiB = -1 }, "disk must be"},
+		{"disk too big", func(s *Spec) { s.DiskMiB = MaxDiskMiB + 1 }, "disk must be"},
+		{"collect without disk", func(s *Spec) { s.Collect = func(io.Reader) error { return nil } }, "collect without a disk"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

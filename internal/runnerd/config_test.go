@@ -57,7 +57,7 @@ func TestLoadConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Target != "local" || c.MaxConcurrent != 1 || c.Socket != DefaultSocket {
+	if c.Target != "local" || c.MaxConcurrent != 1 || c.Socket != DefaultSocket || c.MaxDiskMiB != 8192 {
 		t.Errorf("defaults = %+v", c)
 	}
 }
@@ -80,6 +80,8 @@ func TestLoadConfigRejects(t *testing.T) {
 		"no runner user":      {"runnerUser: hcc-runner\n", "", "runnerUser"},
 		"root socket group":   {"socketGroup: hcc", "socketGroup: root", "socketGroup"},
 		"relative helper":     {"/usr/local/lib/hcc/hcc-helper", "hcc-helper", "firecracker.helper"},
+		"disk limit too big":  {"maxConcurrent: 2", "maxConcurrent: 2\nmaxDiskMiB: 999999999", "maxDiskMiB"},
+		"negative disk limit": {"maxConcurrent: 2", "maxConcurrent: 2\nmaxDiskMiB: -1", "maxDiskMiB"},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {

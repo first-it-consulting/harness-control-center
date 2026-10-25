@@ -4,8 +4,9 @@
 // runner calls it through sudo with a single sudoers rule; it performs
 // exactly these operations and trusts nothing it is given:
 //
-//	start    --id ID --image NAME --slot N --cpus C --memory M
+//	start    --id ID --image NAME --slot N --cpus C --memory M --disk D
 //	                                                 build the jail, exec the jailer
+//	collect  --id ID                                 stream the jail's disk to stdout
 //	kill     --id ID                                 kill everything in the jail's cgroup
 //	remove   --id ID                                 delete the jail and its cgroup
 //	net-up   --slot N                                create slot N's tap link (prints its NetInfo)
@@ -23,6 +24,11 @@
 // runner. A compromised runner therefore cannot swap parts of a jail
 // between check and use, redirect a chroot or a deletion, or make root
 // copy files it could not read itself.
+//
+// The guest's writable disk is a sparse file in the jail, owned by the
+// slot's identity. Its full size is reserved against the free space when
+// a jail is built. collect only copies its bytes out; root never parses
+// or mounts what a guest wrote.
 package helper
 
 import (
@@ -97,6 +103,8 @@ type Deps struct {
 	// FreeBytes reports unprivileged free space on a path's filesystem
 	// (default: statfs).
 	FreeBytes func(path string) (uint64, error)
+	// Chown changes a file's owner (default: fchown).
+	Chown func(f *os.File, uid, gid int) error
 }
 
 // execEnv is the entire environment the jailer gets.
@@ -128,6 +136,9 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 	if d.FreeBytes == nil {
 		d.FreeBytes = freeBytes
 	}
+	if d.Chown == nil {
+		d.Chown = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }
+	}
 	if d.LinkExists == nil {
 		d.LinkExists = func(name string) bool {
 			_, err := os.Lstat(filepath.Join("/sys/class/net", name))
@@ -135,7 +146,7 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 		}
 	}
 	if len(args) == 0 {
-		return errors.New("expected start, kill, remove, net-up or net-down")
+		return errors.New("expected start, collect, kill, remove, net-up or net-down")
 	}
 	op, rest := args[0], args[1:]
 	if op == "net-up" || op == "net-down" {
@@ -144,13 +155,14 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 	fs := flag.NewFlagSet(op, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	id := fs.String("id", "", "")
-	var slot, cpus, memory *int
+	var slot, cpus, memory, disk *int
 	var image *string
 	if op == "start" {
 		image = fs.String("image", "", "")
 		slot = fs.Int("slot", -1, "")
 		cpus = fs.Int("cpus", 0, "")
 		memory = fs.Int("memory", 0, "")
+		disk = fs.Int("disk", 0, "")
 	}
 	if err := fs.Parse(rest); err != nil {
 		return err
@@ -166,7 +178,7 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 	cgroup := firecracker.CgroupDir(cfg.CgroupRoot, *id)
 	// Fail closed: the chroot base must exist and be root's all the way
 	// up before anything below it is created, used or deleted.
-	if op == "start" || op == "remove" {
+	if op == "start" || op == "remove" || op == "collect" {
 		if err := checkRootOwnedDirs(base, cfg.RootUID, cfg.TrustAnchor); err != nil {
 			return fmt.Errorf("chroot base: %w", err)
 		}
@@ -174,7 +186,8 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 
 	switch op {
 	case "start":
-		argv, err := cfg.Jailer.Argv(firecracker.StartRequest{ID: *id, Slot: *slot, CPUs: *cpus, MemoryMiB: *memory})
+		req := firecracker.StartRequest{ID: *id, Slot: *slot, CPUs: *cpus, MemoryMiB: *memory, DiskMiB: *disk}
+		argv, err := cfg.Jailer.Argv(req)
 		if err != nil {
 			return err
 		}
@@ -182,10 +195,12 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 		if !ok {
 			return fmt.Errorf("unknown image %q", *image)
 		}
-		if err := buildJail(cfg, d, base, *id, img); err != nil {
+		if err := buildJail(cfg, d, base, req, img); err != nil {
 			return err
 		}
 		return d.Exec(argv[0], argv, execEnv)
+	case "collect":
+		return collectDisk(cfg, jail, stdout)
 	case "kill":
 		if _, err := os.Lstat(cgroup); errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -237,10 +252,15 @@ var stagedFiles = []struct {
 // reserved blocks are never touched.
 const MinFreeBytes = 1 << 30
 
+// diskName is the guest's writable disk in the jail root.
+const diskName = "disk.img"
+
 // buildJail creates base/firecracker/<id>/root as root, links (or
 // copies) the image into it and copies the staged files, all read-only
-// for the VM. On any failure the partial jail is removed.
-func buildJail(cfg Config, d Deps, base, id string, img Image) (err error) {
+// for the VM, and creates the VM's disk. On any failure the partial jail
+// is removed.
+func buildJail(cfg Config, d Deps, base string, req firecracker.StartRequest, img Image) (err error) {
+	id := req.ID
 	parent := filepath.Join(base, "firecracker")
 	// 0711: the runner may check whether its jail still exists, but can
 	// neither list nor change anything.
@@ -306,6 +326,10 @@ func buildJail(cfg Config, d Deps, base, id string, img Image) (err error) {
 			return fmt.Errorf("image: %w", err)
 		}
 	}
+	// Sparse disks grow as guests write: count what every existing jail's
+	// disk may still take, and this one's in full.
+	diskBytes := int64(req.DiskMiB) << 20
+	total += diskBytes + reservedDiskBytes(parent, entries)
 	free, err := d.FreeBytes(base)
 	if err != nil {
 		return err
@@ -342,7 +366,99 @@ func buildJail(cfg Config, d Deps, base, id string, img Image) (err error) {
 			return fmt.Errorf("image %s: %w", dst, err)
 		}
 	}
+	if diskBytes > 0 {
+		if err := createDisk(d, filepath.Join(root, diskName), diskBytes, cfg.Jailer.UID+req.Slot, cfg.Jailer.GID+req.Slot); err != nil {
+			return fmt.Errorf("disk: %w", err)
+		}
+	}
 	return nil
+}
+
+// createDisk creates the VM's sparse disk, owner-only for the slot's
+// identity (the VMM opens it as that user; the root-owned jail root keeps
+// it from being replaced or linked).
+func createDisk(d Deps, path string, size int64, uid, gid int) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o600) //nolint:gosec // path is in the jail we just created
+	if err != nil {
+		return err
+	}
+	if err := f.Truncate(size); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := d.Chown(f, uid, gid); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// reservedDiskBytes is what the existing jails' sparse disks may still
+// allocate.
+func reservedDiskBytes(parent string, jails []os.DirEntry) int64 {
+	var n int64
+	for _, j := range jails {
+		var st unix.Stat_t
+		if unix.Lstat(filepath.Join(parent, j.Name(), "root", diskName), &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG {
+			continue
+		}
+		n += max(0, st.Size-st.Blocks*512)
+	}
+	return n
+}
+
+// collectDisk copies a jail's disk to w, up to the end of its last data
+// (a guest writes from the start; the zeros after that need no copying).
+// The jail directory must be root's all the way up. Its root/ belongs to
+// the VM's identity once the jailer ran, so inside it nothing is trusted:
+// root/ and the disk are opened without following links, and the disk
+// must be a regular, singly linked file within the size limit. Its
+// content is not looked at.
+func collectDisk(cfg Config, jail string, w io.Writer) error {
+	if err := checkRootOwnedDirs(jail, cfg.RootUID, cfg.TrustAnchor); err != nil {
+		return err
+	}
+	dir, err := openNoFollow(filepath.Join(jail, "root"), true)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	fd, err := unix.Openat(int(dir.Fd()), diskName, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return fmt.Errorf("disk: %w", err)
+	}
+	f := os.NewFile(uintptr(fd), diskName)
+	defer f.Close()
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 || st.Size < 0 || st.Size > int64(sandbox.MaxDiskMiB)<<20 {
+		return errors.New("disk must be a regular, singly linked file within the size limit")
+	}
+	_, err = io.Copy(w, io.NewSectionReader(f, 0, dataEnd(f, st.Size)))
+	return err
+}
+
+// dataEnd is where f's last data region ends (size if the filesystem
+// cannot tell).
+func dataEnd(f *os.File, size int64) int64 {
+	var end, off int64
+	for off < size {
+		data, err := f.Seek(off, unix.SEEK_DATA)
+		if errors.Is(err, unix.ENXIO) {
+			break // only holes from off on
+		}
+		if err != nil {
+			return size
+		}
+		hole, err := f.Seek(data, unix.SEEK_HOLE)
+		if err != nil || hole <= data {
+			return size
+		}
+		end, off = hole, hole
+	}
+	return min(end, size)
 }
 
 // linkOrCopy hard-links a root-owned image file into the jail (no copy:

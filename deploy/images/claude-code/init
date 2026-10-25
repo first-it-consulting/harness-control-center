@@ -18,9 +18,12 @@ echo "$TASK" | jq -r .prompt >/tmp/prompt.txt
 MODEL=$(echo "$TASK" | jq -r '.model.name // empty')
 ENDPOINT=$(echo "$TASK" | jq -r '.model.endpoint // empty')
 
-# Writable home and workspace in memory, owned by the agent.
+# Writable home and workspace in memory, owned by the agent. The
+# workspace is handed back as the job's results.
 mount -t tmpfs -o size=512m,uid=1000,gid=1000,mode=0700 tmpfs /home/agent
-mkdir -p /tmp/workspace && chown agent:agent /tmp/workspace /tmp/prompt.txt
+mkdir -p /tmp/workspace
+mount -t tmpfs -o size=50%,uid=1000,gid=1000,mode=0755 tmpfs /tmp/workspace
+chown agent:agent /tmp/prompt.txt
 
 export HOME=/home/agent USER=agent SHELL=/bin/bash TERM=dumb PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 # A placeholder: the egress proxy replaces it with the real credential.
@@ -35,5 +38,6 @@ export DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 \
 echo "HCC-RESULT-BEGIN"
 su -s /bin/sh agent -c 'cd /tmp/workspace && /usr/local/bin/claude -p --output-format text --dangerously-skip-permissions </tmp/prompt.txt' 2>&1
 rc=$?
+hcc_save_results /tmp/workspace
 echo "HCC-RESULT-END exit=$rc"
 reboot -f

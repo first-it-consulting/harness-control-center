@@ -35,3 +35,26 @@ hcc_network() {
 
 # The task (JSON, read-only drive vdb), zero padding removed.
 hcc_task() { [ -b /dev/vdb ] && tr -d '\000' </dev/vdb; }
+
+# The writable disk (spec.sandbox.diskMiB), if the runner attached one:
+# the only virtio disk that is not read-only.
+hcc_disk() {
+	for d in /sys/block/vd*; do
+		[ -e "$d/ro" ] && [ "$(cat "$d/ro")" = 0 ] && { echo "/dev/${d##*/}"; return 0; }
+	done
+	return 1
+}
+
+# Hands a directory back as the job's results: a tar archive on the disk,
+# which the runner reads and sanitizes after shutdown (it keeps only
+# regular files and directories). Must run before shutdown; "reboot -f"
+# does not sync.
+hcc_save_results() {
+	dev=$(hcc_disk) || { echo "HCC-RESULTS none (no disk)"; return 0; }
+	if (cd "$1" && tar -cf "$dev" .) 2>/tmp/hcc-tar.err; then
+		echo "HCC-RESULTS saved"
+	else
+		echo "HCC-RESULTS failed: $(head -c 200 /tmp/hcc-tar.err | tr -d '\000-\037')"
+	fi
+	sync
+}

@@ -31,6 +31,7 @@ Jobs (on a local runner, or a remote one with --ssh HOST):
   run <file>               show what the harness may do, confirm, run it and follow it
   jobs                     list jobs
   logs <job>               print a job's console output
+  results <job> -o <file>  save what a job handed back (a tar archive)
   cancel <job>             stop one job
   kill                     kill switch: stop all jobs and refuse new ones
   resume                   accept jobs again after kill
@@ -61,6 +62,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdRun(rest, stdin, stdout, stderr)
 	case "jobs", "logs", "cancel", "kill", "resume":
 		return cmdJobs(cmd, rest, stdout, stderr)
+	case "results":
+		return cmdResults(rest, stdout, stderr)
 	case "runner":
 		return cmdRunner(rest, stdin, stdout, stderr)
 	case "version", "--version":

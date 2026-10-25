@@ -27,6 +27,7 @@ import (
 //	GET  /v1/jobs/{id}          one job
 //	POST /v1/jobs/{id}/cancel   cancel one job
 //	GET  /v1/jobs/{id}/console  console log
+//	GET  /v1/jobs/{id}/results  the job's results (a sanitized tar archive)
 //	GET  /v1/events[?job=ID]    NDJSON event stream
 //	POST /v1/kill               kill switch
 //	POST /v1/resume             accept jobs again
@@ -49,6 +50,7 @@ func NewServer(r *runner.Runner, stateDir string, log *slog.Logger) *Server {
 	mux.HandleFunc("GET /v1/jobs/{id}", s.get)
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", s.cancel)
 	mux.HandleFunc("GET /v1/jobs/{id}/console", s.console)
+	mux.HandleFunc("GET /v1/jobs/{id}/results", s.results)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("POST /v1/kill", s.kill)
 	mux.HandleFunc("POST /v1/resume", s.resume)
@@ -227,6 +229,41 @@ func (s *Server) console(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = io.Copy(w, io.LimitReader(f, MaxConsoleBytes+int64(len(truncatedMarker))))
+}
+
+// results serves a job's stored results archive. It was re-packed from
+// the guest's disk by internal/results, so it is a plain tar of regular
+// files and directories; it is still the agent's content.
+func (s *Server) results(w http.ResponseWriter, req *http.Request) {
+	j, ok := s.job(w, req)
+	if !ok {
+		return
+	}
+	p, err := resultsPath(s.stateDir, j.ID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	f, err := os.Open(p) //nolint:gosec // path built from a validated id
+	if errors.Is(err, os.ErrNotExist) {
+		msg := "job has no results"
+		if j.Results != nil && j.Results.Error != "" {
+			msg += ": " + j.Results.Error
+		} else if !j.State.Terminal() {
+			msg += " yet"
+		}
+		writeError(w, http.StatusNotFound, errors.New(msg))
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/x-tar")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+j.ID+`.tar"`)
+	_, _ = io.Copy(w, f)
 }
 
 // events streams events as NDJSON. With ?job=ID it first replays that

@@ -11,9 +11,11 @@
 package firecracker_test
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -27,6 +29,7 @@ import (
 	"github.com/first-it-consulting/harness-control-center/internal/credentials"
 	"github.com/first-it-consulting/harness-control-center/internal/egress"
 	"github.com/first-it-consulting/harness-control-center/internal/policy"
+	"github.com/first-it-consulting/harness-control-center/internal/results"
 	"github.com/first-it-consulting/harness-control-center/internal/runnerd"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox/firecracker"
@@ -342,4 +345,48 @@ func consoleLine(console, marker string) string {
 		}
 	}
 	return ""
+}
+
+// The guest hands a directory back on its disk; only what passes the
+// sanitizer arrives.
+func TestE2EResults(t *testing.T) {
+	e := setupE2E(t)
+	id := fmt.Sprintf("e2e-results-%d", time.Now().UnixNano())
+	s := e.spec(id, 30*time.Second, "hcc.mode=results")
+	s.DiskMiB = 64
+	var archive bytes.Buffer
+	var sum results.Summary
+	s.Collect = func(disk io.Reader) error {
+		var err error
+		sum, err = results.Sanitize(&archive, disk, results.Limits{MaxBytes: 64 << 20})
+		return err
+	}
+	var c console
+	res, err := e.provider.Run(context.Background(), s, &c)
+	if err != nil || res.Outcome != sandbox.OutcomeExited {
+		t.Fatalf("Run = %v, %v\nconsole:\n%s", res.Outcome, err, c.String())
+	}
+	if !strings.Contains(c.String(), "HCC-RESULTS saved") {
+		t.Fatalf("guest did not save results:\n%s", c.String())
+	}
+	got := map[string]string{}
+	tr := tar.NewReader(&archive)
+	for {
+		h, err := tr.Next()
+		if err != nil {
+			break
+		}
+		b, _ := io.ReadAll(tr)
+		got[h.Name] = string(b)
+	}
+	if got["sub/hello.txt"] != "hello from the guest\n" {
+		t.Errorf("archive = %v", got)
+	}
+	if _, ok := got["link"]; ok {
+		t.Error("a symlink passed")
+	}
+	if sum.Files != 1 || len(sum.Skipped) != 2 {
+		t.Errorf("summary = %+v (want 1 file; the link and the fifo skipped)", sum)
+	}
+	e.assertNoTrace(t, id)
 }

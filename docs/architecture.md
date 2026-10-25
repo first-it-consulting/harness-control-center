@@ -65,7 +65,9 @@ These are extension points (see [ADR-0002](adr/0002-plugin-system.md)):
 | `internal/sandbox` | provider-neutral sandbox interface and validated run spec |
 | `internal/sandbox/firecracker` | Firecracker provider: jailer, cgroup v2 limits, kill switch, cleanup |
 | `internal/runner` | job queue and state machine, concurrency limit, per-job cancel, kill switch, event stream |
-| `internal/helper`, `cmd/hcc-helper` | the only root-side code: start, kill, remove a jail; validates every argument |
+| `internal/helper`, `cmd/hcc-helper` | the only root-side code: start, kill, remove a jail, network links, copy out a jail's disk; validates every argument |
+| `internal/budget` | per-job token and cost meter |
+| `internal/results` | re-packs a guest's results archive into a safe one (ADR-0006) |
 | `internal/egress` | per-VM HTTPS (CONNECT) egress proxy enforcing the harness's network policy (ADR-0004); credential broker with a per-job CA (ADR-0005) |
 | `internal/credentials` | the broker's store: secrets bound to hosts and headers |
 | `internal/runnerd` | runner daemon: HTTP API on an owner-only Unix socket, client (Unix socket or ssh), size-capped console logs |

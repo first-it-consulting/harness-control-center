@@ -18,6 +18,7 @@ cover:
 fuzz:
 	$(GO) test ./internal/spec -run='^$$' -fuzz=FuzzParse -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/policy -run='^$$' -fuzz=FuzzCheckEgress -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/results -run='^$$' -fuzz=FuzzSanitize -fuzztime=$(FUZZTIME)
 
 lint:
 	golangci-lint run

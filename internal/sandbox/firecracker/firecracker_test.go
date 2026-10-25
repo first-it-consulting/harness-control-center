@@ -42,19 +42,34 @@ type fakeHost struct {
 	jailer  JailerConfig
 	staging string
 
-	mu       sync.Mutex
-	argv     []string               // last jailer call
-	argvs    [][]string             // all jailer calls
-	jailSeen map[string]os.FileMode // staged files at start
-	config   map[string]any
-	signals  []os.Signal
-	killed   []string
-	removed  []string
-	proc     *fakeProc
-	events   []string // order of jail/network operations
-	netErr   error
-	netSlots []int
-	reqs     []StartRequest
+	mu         sync.Mutex
+	argv       []string               // last jailer call
+	argvs      [][]string             // all jailer calls
+	jailSeen   map[string]os.FileMode // staged files at start
+	config     map[string]any
+	signals    []os.Signal
+	killed     []string
+	removed    []string
+	proc       *fakeProc
+	events     []string // order of jail/network operations
+	netErr     error
+	netSlots   []int
+	reqs       []StartRequest
+	disk       string // what CollectDisk hands out
+	collectErr error
+	collected  []string
+}
+
+func (h *fakeHost) CollectDisk(_ context.Context, id string, fn func(io.Reader) error) error {
+	h.mu.Lock()
+	h.collected = append(h.collected, id)
+	h.events = append(h.events, "collect "+id)
+	disk, cerr := h.disk, h.collectErr
+	h.mu.Unlock()
+	if cerr != nil {
+		return cerr
+	}
+	return fn(strings.NewReader(disk))
 }
 
 func (h *fakeHost) SetupNetwork(_ context.Context, slot int) (NetInfo, error) {
@@ -667,5 +682,73 @@ func TestNoTaskNoDrive(t *testing.T) {
 	}
 	if _, ok := f.host.jailSeen["task.img"]; ok {
 		t.Error("task.img staged without a task")
+	}
+}
+
+func TestRunCollectsDiskAfterCleanExit(t *testing.T) {
+	f := newFixture(t, exitsCleanly)
+	f.host.disk = "guest bytes"
+	var got string
+	f.spec.DiskMiB = 64
+	f.spec.Collect = func(r io.Reader) error {
+		b, err := io.ReadAll(r)
+		got = string(b)
+		return err
+	}
+	if _, _, err := f.run(context.Background(), t); err != nil {
+		t.Fatal(err)
+	}
+	if got != "guest bytes" {
+		t.Errorf("collected %q", got)
+	}
+	if f.host.reqs[0].DiskMiB != 64 {
+		t.Errorf("start request disk = %d", f.host.reqs[0].DiskMiB)
+	}
+	// Collected before the jail is removed.
+	if i, j := slices.Index(f.host.events, "collect run-1"), slices.Index(f.host.events, "remove run-1"); i < 0 || j < i {
+		t.Errorf("events = %v", f.host.events)
+	}
+	drives, _ := f.host.config["drives"].([]any)
+	last, _ := drives[len(drives)-1].(map[string]any)
+	if last["drive_id"] != "disk" || last["is_read_only"] != false || last["path_on_host"] != "disk.img" {
+		t.Errorf("disk drive = %v", last)
+	}
+	f.assertCleanedUp(t)
+}
+
+func TestRunDoesNotCollectAfterTimeout(t *testing.T) {
+	f := newFixture(t, hangsUntilSIGTERM)
+	f.spec.Timeout = 50 * time.Millisecond
+	f.spec.DiskMiB = 64
+	f.spec.Collect = func(io.Reader) error { t.Error("collected a stopped VM's disk"); return nil }
+	if res, _, err := f.run(context.Background(), t); err != nil || res.Outcome != sandbox.OutcomeTimedOut {
+		t.Fatalf("Run = %v, %v", res.Outcome, err)
+	}
+	if len(f.host.collected) != 0 {
+		t.Errorf("collected %v", f.host.collected)
+	}
+}
+
+func TestRunCollectFailureFailsTheRun(t *testing.T) {
+	f := newFixture(t, exitsCleanly)
+	f.host.collectErr = errors.New("helper failed")
+	f.spec.DiskMiB = 64
+	f.spec.Collect = func(io.Reader) error { return nil }
+	if _, _, err := f.run(context.Background(), t); err == nil || !strings.Contains(err.Error(), "helper failed") {
+		t.Errorf("err = %v", err)
+	}
+	f.assertCleanedUp(t)
+}
+
+func TestNoDiskNoDrive(t *testing.T) {
+	f := newFixture(t, exitsCleanly)
+	if _, _, err := f.run(context.Background(), t); err != nil {
+		t.Fatal(err)
+	}
+	drives, _ := f.host.config["drives"].([]any)
+	for _, d := range drives {
+		if m, _ := d.(map[string]any); m["is_read_only"] != true {
+			t.Errorf("writable drive without a disk: %v", m)
+		}
 	}
 }

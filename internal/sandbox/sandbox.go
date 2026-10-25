@@ -50,6 +50,13 @@ type Spec struct {
 	// reachable peer is an egress proxy served by Network.Proxy. Without
 	// it the sandbox has no network at all.
 	Network *Network
+	// DiskMiB, if set, gives the guest a blank writable drive of this
+	// size, its only writable drive. This is how results get out.
+	DiskMiB int
+	// Collect, if set, gets the disk's raw contents after the guest shut
+	// itself down (not after a timeout or kill: a half-written disk is
+	// not worth reading). The guest wrote them, so they are hostile input.
+	Collect func(disk io.Reader) error
 }
 
 // Network is a sandbox's network access.
@@ -70,6 +77,7 @@ const (
 	MaxMemoryMiB = 64 * 1024
 	MaxTimeout   = 24 * time.Hour
 	MaxTaskBytes = 1 << 20
+	MaxDiskMiB   = 256 * 1024
 )
 
 var (
@@ -113,6 +121,12 @@ func (s *Spec) Validate() error {
 	}
 	if s.Timeout <= 0 || s.Timeout > MaxTimeout {
 		errs = append(errs, fmt.Errorf("sandbox: timeout must be greater than 0 and at most %s", MaxTimeout))
+	}
+	if s.DiskMiB < 0 || s.DiskMiB > MaxDiskMiB {
+		errs = append(errs, fmt.Errorf("sandbox: disk must be between 0 and %d MiB", MaxDiskMiB))
+	}
+	if s.Collect != nil && s.DiskMiB == 0 {
+		errs = append(errs, errors.New("sandbox: collect without a disk"))
 	}
 	if s.Network != nil && s.Network.Proxy == nil {
 		errs = append(errs, errors.New("sandbox: network without a proxy"))
