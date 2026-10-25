@@ -273,12 +273,15 @@ func TestConfig(t *testing.T) {
 			t.Errorf("saved %+v", b)
 		}
 	}
-	good := &Config{Runners: []RunnerRef{{Name: "dev", SSH: "hcc-dev"}, {Name: "local", Socket: "/run/hcc/runner.sock"}}}
+	good := &Config{Runners: []RunnerRef{{Name: "dev", SSH: "hcc-dev"}}}
+	if runtime.GOOS != "windows" { // runners are Unix; from Windows they are reached over ssh
+		good.Runners = append(good.Runners, RunnerRef{Name: "local", Socket: "/run/hcc/runner.sock"})
+	}
 	if err := SaveConfig(p, good); err != nil {
 		t.Fatal(err)
 	}
 	c, err = LoadConfig(p)
-	if err != nil || len(c.Runners) != 2 || c.Runners[0].SSH != "hcc-dev" {
+	if err != nil || len(c.Runners) != len(good.Runners) || c.Runners[0].SSH != "hcc-dev" {
 		t.Errorf("reloaded %+v, %v", c, err)
 	}
 	_ = os.WriteFile(p, []byte("runners: []\nextra: 1\n"), 0o600)
@@ -444,6 +447,9 @@ func TestRunThroughTheUI(t *testing.T) {
 }
 
 func TestUnreachableRunnerIsReported(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sockets")
+	}
 	ts := newTestServer(t)
 	var ref map[string]any
 	ts.do(http.MethodPost, "/api/runners", RunnerRef{Name: "gone", Socket: "/nonexistent/hcc.sock"}, &ref)
