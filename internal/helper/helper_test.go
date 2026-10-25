@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox/firecracker"
@@ -34,42 +35,67 @@ func (r *recorder) deps() Deps {
 	}
 }
 
+// env stands in for a host: in tests the current user plays both root
+// (owner of the jail tree, up to the trust anchor) and the runner.
 type env struct {
-	cfg  Config
-	base string
-	cg   string
-	rec  *recorder
-	me   int
+	cfg             Config
+	anchor          string
+	base, stage, cg string
+	rec             *recorder
+	me              int
+	start           []string
 }
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	// Resolve symlinks (macOS: /var -> /private/var) so the temp dir
-	// itself does not trip the symlink checks.
+	// itself does not trip the no-symlink rules.
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // stands in for a root-owned 0755 directory
+		t.Fatal(err)
+	}
 	me := os.Getuid()
-	e := &env{base: filepath.Join(dir, "jails"), cg: filepath.Join(dir, "cgroup"), rec: &recorder{}, me: me}
+	e := &env{
+		anchor: dir, base: filepath.Join(dir, "jails"), stage: filepath.Join(dir, "staging"),
+		cg: filepath.Join(dir, "cgroup"), rec: &recorder{}, me: me,
+		start: []string{"start", "--id", "job-1", "--slot", "1", "--cpus", "2", "--memory", "256"},
+	}
+	for _, d := range []string{e.base, e.stage} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	e.cfg = Config{
 		Jailer: firecracker.JailerConfig{
 			JailerPath: "/usr/local/lib/hcc/jailer", FirecrackerPath: "/usr/local/lib/hcc/firecracker",
 			ChrootBase: e.base, UID: 64000, GID: 64000, Identities: 2,
 			ForbiddenIDs: []int{0, me},
 		},
-		CgroupRoot: e.cg,
-		RunnerUID:  me,
+		StagingBase: e.stage,
+		CgroupRoot:  e.cg,
+		RunnerUID:   me,
+		RootUID:     me,
+		TrustAnchor: dir,
 	}
 	return e
 }
 
-// prepare creates the jail for job-1 like the provider does.
-func (e *env) prepare(t *testing.T) {
+// stageJob1 writes job-1's files like the provider does.
+func (e *env) stageJob1(t *testing.T) string {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(firecracker.JailDir(e.base, "job-1"), "root"), 0o700); err != nil {
+	dir := filepath.Join(e.stage, "job-1")
+	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range stagedFiles {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("content of "+name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
 }
 
 func (e *env) call(args ...string) (int, string) {
@@ -78,12 +104,27 @@ func (e *env) call(args ...string) (int, string) {
 	return code, stderr.String()
 }
 
-func TestStartExecsJailerFromConfig(t *testing.T) {
+func TestStartBuildsJailAndExecsJailer(t *testing.T) {
+	old := syscall.Umask(0o077) // the daemon's umask must not matter
+	defer syscall.Umask(old)
 	e := newEnv(t)
-	e.prepare(t)
-	code, stderr := e.call("start", "--id", "job-1", "--slot", "1", "--cpus", "2", "--memory", "256")
-	if code != 0 {
+	e.stageJob1(t)
+	if code, stderr := e.call(e.start...); code != 0 {
 		t.Fatalf("start failed: %s", stderr)
+	}
+	root := filepath.Join(firecracker.JailDir(e.base, "job-1"), "root")
+	if fi, err := os.Stat(root); err != nil || fi.Mode().Perm() != 0o711 {
+		t.Errorf("jail root = %v, %v; want mode 0711", fi, err)
+	}
+	for _, name := range stagedFiles {
+		p := filepath.Join(root, name)
+		data, err := os.ReadFile(p)
+		if err != nil || string(data) != "content of "+name {
+			t.Errorf("%s = %q, %v", name, data, err)
+		}
+		if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o444 {
+			t.Errorf("%s mode = %v, want 0444", name, fi.Mode().Perm())
+		}
 	}
 	if len(e.rec.execArgv) != 1 {
 		t.Fatalf("exec calls = %d", len(e.rec.execArgv))
@@ -98,13 +139,17 @@ func TestStartExecsJailerFromConfig(t *testing.T) {
 	if got := e.rec.execEnv[0]; len(got) != 1 || !strings.HasPrefix(got[0], "PATH=") {
 		t.Errorf("jailer environment = %v, want only PATH", got)
 	}
+	// A jail is never reused.
+	if code, _ := e.call(e.start...); code == 0 {
+		t.Error("second start reused the jail")
+	}
 }
 
 func TestRefusesOtherCallers(t *testing.T) {
 	e := newEnv(t)
-	e.prepare(t)
+	e.stageJob1(t)
 	var stderr bytes.Buffer
-	code := Main(e.cfg, []string{"start", "--id", "job-1", "--slot", "0", "--cpus", "1", "--memory", "128"}, e.me+1, e.rec.deps(), &stderr)
+	code := Main(e.cfg, e.start, e.me+1, e.rec.deps(), &stderr)
 	if code == 0 || !strings.Contains(stderr.String(), "not the runner") || len(e.rec.execArgv) != 0 {
 		t.Errorf("foreign caller: code %d, %q", code, stderr.String())
 	}
@@ -112,7 +157,7 @@ func TestRefusesOtherCallers(t *testing.T) {
 
 func TestRejectsBadArguments(t *testing.T) {
 	e := newEnv(t)
-	e.prepare(t)
+	e.stageJob1(t)
 	tests := map[string][]string{
 		"no operation":       {},
 		"unknown operation":  {"chown", "--id", "job-1"},
@@ -124,7 +169,7 @@ func TestRejectsBadArguments(t *testing.T) {
 		"too many cpus":      {"start", "--id", "job-1", "--slot", "0", "--cpus", "999", "--memory", "128"},
 		"caller chooses uid": {"start", "--id", "job-1", "--slot", "0", "--cpus", "1", "--memory", "128", "--uid", "0"},
 		"caller chooses bin": {"start", "--id", "job-1", "--slot", "0", "--cpus", "1", "--memory", "128", "--exec-file", "/bin/sh"},
-		"unprepared jail":    {"start", "--id", "job-2", "--slot", "0", "--cpus", "1", "--memory", "128"},
+		"nothing staged":     {"start", "--id", "job-2", "--slot", "0", "--cpus", "1", "--memory", "128"},
 	}
 	for name, args := range tests {
 		if code, _ := e.call(args...); code == 0 {
@@ -136,40 +181,94 @@ func TestRejectsBadArguments(t *testing.T) {
 	}
 }
 
-// A compromised runner owns the chroot base, so it could swap parts of a
-// jail for symlinks to make the jailer chroot into (or rm delete) some
-// other place on the host.
-func TestRefusesSymlinkedJails(t *testing.T) {
-	outside := t.TempDir()
-	cases := map[string]func(e *env){
-		"root is a symlink": func(e *env) {
-			jail := firecracker.JailDir(e.base, "job-1")
-			_ = os.MkdirAll(jail, 0o700)
-			_ = os.Symlink("/", filepath.Join(jail, "root"))
+// The runner owns its staging directory, so a compromised runner may try
+// to make root copy (and so expose to it) files it cannot read itself.
+func TestRefusesHostileStaging(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("root only"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(t *testing.T, e *env){
+		"staging dir is a symlink": func(t *testing.T, e *env) {
+			target := filepath.Join(e.anchor, "elsewhere")
+			_ = os.Mkdir(target, 0o700)
+			for _, n := range stagedFiles {
+				_ = os.WriteFile(filepath.Join(target, n), nil, 0o600)
+			}
+			if err := os.Symlink(target, filepath.Join(e.stage, "job-1")); err != nil {
+				t.Fatal(err)
+			}
 		},
-		"jail dir is a symlink": func(e *env) {
-			parent := filepath.Join(e.base, "firecracker")
-			_ = os.MkdirAll(filepath.Join(outside, "root"), 0o700)
-			_ = os.MkdirAll(parent, 0o700)
-			_ = os.Symlink(outside, filepath.Join(parent, "job-1"))
+		"staged file is a symlink": func(t *testing.T, e *env) {
+			dir := e.stageJob1(t)
+			_ = os.Remove(filepath.Join(dir, "rootfs.ext4"))
+			if err := os.Symlink(secret, filepath.Join(dir, "rootfs.ext4")); err != nil {
+				t.Fatal(err)
+			}
 		},
-		"chroot base is a symlink": func(e *env) {
-			_ = os.MkdirAll(filepath.Join(outside, "firecracker", "job-1", "root"), 0o700)
-			_ = os.Symlink(outside, e.base)
+		"staged file is a hard link": func(t *testing.T, e *env) {
+			dir := e.stageJob1(t)
+			if err := os.Link(filepath.Join(dir, "vmlinux"), filepath.Join(e.anchor, "second-link")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"staged file is a fifo": func(t *testing.T, e *env) {
+			dir := e.stageJob1(t)
+			_ = os.Remove(filepath.Join(dir, "config.json"))
+			if err := syscall.Mkfifo(filepath.Join(dir, "config.json"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"staging base is a symlink": func(t *testing.T, e *env) {
+			target := filepath.Join(e.anchor, "real-staging")
+			if err := os.Rename(e.stage, target); err != nil {
+				t.Fatal(err)
+			}
+			_ = os.Symlink(target, e.stage)
+			e.stageJob1(t)
 		},
 	}
 	for name, setup := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t)
+			setup(t, e)
+			code, stderr := e.call(e.start...)
+			if code == 0 {
+				t.Fatal("start accepted hostile staging")
+			}
+			t.Logf("refused: %s", strings.TrimSpace(stderr))
+			if len(e.rec.execArgv) != 0 {
+				t.Error("jailer was executed")
+			}
+			if data, err := os.ReadFile(filepath.Join(firecracker.JailDir(e.base, "job-1"), "root", "rootfs.ext4")); err == nil && string(data) == "root only" {
+				t.Error("secret was copied into the jail")
+			}
+		})
+	}
+}
+
+// The jail tree must be root's all the way up, or the runner could swap
+// parts of it between the helper's checks and the jailer's use.
+func TestRequiresRootOwnedJailTree(t *testing.T) {
+	cases := map[string]func(e *env){
+		"base owned by someone else": func(e *env) { e.cfg.RootUID = e.me + 1 },
+		"base group-writable":        func(e *env) { _ = os.Chmod(e.base, 0o775) }, //nolint:gosec // the unsafe mode is the point
+		"base is a symlink": func(e *env) {
+			target := filepath.Join(e.anchor, "real-jails")
+			_ = os.Rename(e.base, target)
+			_ = os.Symlink(target, e.base)
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			e.stageJob1(t)
 			setup(e)
-			if code, stderr := e.call("start", "--id", "job-1", "--slot", "0", "--cpus", "1", "--memory", "128"); code == 0 {
-				t.Error("start accepted a symlinked jail")
-			} else if !strings.Contains(stderr, "symlink") {
-				t.Errorf("unexpected refusal: %s", stderr)
+			code, stderr := e.call(e.start...)
+			if code == 0 {
+				t.Error("start accepted an unsafe jail tree")
 			}
-			if code, _ := e.call("remove", "--id", "job-1"); code == 0 && name != "root is a symlink" {
-				t.Error("remove followed a symlinked jail")
-			}
+			t.Logf("refused: %s", strings.TrimSpace(stderr))
 			if len(e.rec.execArgv) != 0 {
 				t.Error("jailer was executed")
 			}
@@ -177,23 +276,12 @@ func TestRefusesSymlinkedJails(t *testing.T) {
 	}
 }
 
-func TestRefusesJailNotOwnedByRunner(t *testing.T) {
-	e := newEnv(t)
-	e.prepare(t)
-	// Pretend the runner is someone else: the jail (owned by us) is then
-	// not the runner's.
-	e.cfg.RunnerUID = e.me + 1
-	e.cfg.Jailer.ForbiddenIDs = []int{0, e.me + 1}
-	var stderr bytes.Buffer
-	code := Main(e.cfg, []string{"start", "--id", "job-1", "--slot", "0", "--cpus", "1", "--memory", "128"}, e.me+1, e.rec.deps(), &stderr)
-	if code == 0 || !strings.Contains(stderr.String(), "owned by the runner") {
-		t.Errorf("code %d, %q", code, stderr.String())
-	}
-}
-
 func TestKillAndRemove(t *testing.T) {
 	e := newEnv(t)
-	e.prepare(t)
+	e.stageJob1(t)
+	if code, stderr := e.call(e.start...); code != 0 {
+		t.Fatalf("start: %s", stderr)
+	}
 	cg := firecracker.CgroupDir(e.cg, "job-1")
 	if err := os.MkdirAll(cg, 0o700); err != nil {
 		t.Fatal(err)
@@ -236,5 +324,10 @@ func TestKillAndRemove(t *testing.T) {
 	}
 	if code, _ := e.call("remove", "--id", "job-1"); code != 0 {
 		t.Error("remove of a missing jail failed")
+	}
+	// Refuses once the tree is no longer root's.
+	_ = os.Chmod(filepath.Join(e.base, "firecracker"), 0o777) //nolint:gosec // the unsafe mode is the point
+	if code, _ := e.call("remove", "--id", "job-1"); code == 0 {
+		t.Error("remove accepted a world-writable jail tree")
 	}
 }

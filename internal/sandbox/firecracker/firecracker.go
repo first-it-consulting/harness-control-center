@@ -3,15 +3,15 @@
 // needs root goes through Host.
 //
 // Per run, the provider:
-//  1. creates <ChrootBase>/firecracker/<id>/root (owned by the runner),
-//  2. copies the kernel and root filesystem into it read-only and writes
-//     the VM configuration,
-//  3. asks its Host to start the VM: the jailer applies cgroup v2 limits,
-//     pivot_roots into a private mount namespace, drops to the slot's
-//     UID/GID and execs Firecracker,
-//  4. stops the VM on timeout or cancellation (SIGTERM, then
+//  1. stages the kernel, root filesystem and VM configuration in
+//     <StagingBase>/<id> (its own directory),
+//  2. asks its Host to start the VM: root-side, hcc-helper builds a
+//     root-owned jail from the staged files, then the jailer applies
+//     cgroup v2 limits, pivot_roots into a private mount namespace, drops
+//     to the slot's UID/GID and execs Firecracker,
+//  3. stops the VM on timeout or cancellation (SIGTERM, then
 //     cgroup.kill), and
-//  5. always removes the chroot and cgroup.
+//  4. always removes the staging directory, jail and cgroup.
 package firecracker
 
 import (
@@ -52,10 +52,10 @@ var baseBootArgs = []string{"console=ttyS0", "quiet", "loglevel=1", "reboot=k", 
 // UIDs is decided root-side (JailerConfig); the provider only picks a
 // free identity slot per VM.
 type Config struct {
-	// ChrootBase holds the per-run chroots. It must be owned by the
-	// runner's user, must not be shared with anything else, and must match
-	// the Host's.
-	ChrootBase string
+	// StagingBase is the runner's own directory for preparing VM files;
+	// the Host copies them into a root-owned jail. It must match the
+	// Host's configuration.
+	StagingBase string
 	// ImageRoot bounds which files can become a guest's kernel or root
 	// filesystem: Spec.Kernel and Spec.RootFS must resolve (symlinks
 	// included) to regular files inside it.
@@ -82,7 +82,7 @@ var _ sandbox.Provider = (*Provider)(nil)
 // New validates cfg and returns a provider.
 func New(cfg Config) (*Provider, error) {
 	var errs []error
-	for name, p := range map[string]string{"ChrootBase": cfg.ChrootBase, "ImageRoot": cfg.ImageRoot} {
+	for name, p := range map[string]string{"StagingBase": cfg.StagingBase, "ImageRoot": cfg.ImageRoot} {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
 			errs = append(errs, fmt.Errorf("%s must be a clean absolute path, got %q", name, p))
 		}
@@ -159,15 +159,14 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 		}
 	}()
 
-	jail := jailDir(p.cfg.ChrootBase, spec.ID)
-	// Only the jailer (root) walks the directories above the jail root.
-	if err := os.MkdirAll(filepath.Dir(jail), 0o700); err != nil {
+	if err := os.MkdirAll(p.cfg.StagingBase, 0o700); err != nil {
 		return res, fmt.Errorf("firecracker: %w", err)
 	}
-	// Mkdir (not MkdirAll) fails if the jail exists, so two runs can never
-	// share one, and we never clean up a jail we did not create.
-	if err := os.Mkdir(jail, 0o700); err != nil {
-		return res, fmt.Errorf("firecracker: create jail: %w", err)
+	staging := filepath.Join(p.cfg.StagingBase, spec.ID)
+	// Mkdir (not MkdirAll) fails if it exists, so two runs can never
+	// share one, and we never clean up a run that is not ours.
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		return res, fmt.Errorf("firecracker: create staging: %w", err)
 	}
 	defer func() {
 		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -175,10 +174,13 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 		if cerr := p.cfg.Host.RemoveJail(cctx, spec.ID); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("firecracker: cleanup: %w", cerr))
 		}
+		if cerr := os.RemoveAll(staging); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("firecracker: cleanup: %w", cerr))
+		}
 		res.Duration = time.Since(start)
 	}()
 
-	if err := p.prepare(filepath.Join(jail, "root"), &spec, kernel, rootfs); err != nil {
+	if err := p.stage(staging, &spec, kernel, rootfs); err != nil {
 		return res, err
 	}
 
@@ -237,32 +239,21 @@ func (p *Provider) stop(id string, proc Process, done <-chan error) error {
 	}
 }
 
-// prepare fills the chroot. Files are copied, not linked, so the VM can
-// never affect the originals, and are made read-only.
-//
-// Modes are set with chmod after creation: the runner typically runs with
-// umask 077, which would otherwise silently make the files unreadable for
-// the jailed UID.
-func (p *Provider) prepare(root string, spec *sandbox.Spec, kernel, rootfs *os.File) error {
-	if err := os.Mkdir(root, 0o700); err != nil {
-		return fmt.Errorf("firecracker: %w", err)
-	}
-	// The jail root becomes the VMM's "/": its UID must traverse it (x)
-	// but needs no listing (r) or writing (w).
-	if err := os.Chmod(root, 0o711); err != nil { //nolint:gosec // traversal by the jailed UID is required
-		return fmt.Errorf("firecracker: %w", err)
-	}
-	if err := copyReadOnly(kernel, filepath.Join(root, "vmlinux")); err != nil {
+// stage writes the VM's files into the staging directory. They are
+// copies, so the VM can never affect the originals; the helper copies
+// them once more into the root-owned jail.
+func (p *Provider) stage(dir string, spec *sandbox.Spec, kernel, rootfs *os.File) error {
+	if err := writeStaged(kernel, "vmlinux", filepath.Join(dir, "vmlinux")); err != nil {
 		return err
 	}
-	if err := copyReadOnly(rootfs, filepath.Join(root, "rootfs.ext4")); err != nil {
+	if err := writeStaged(rootfs, "rootfs.ext4", filepath.Join(dir, "rootfs.ext4")); err != nil {
 		return err
 	}
 	cfg, err := json.MarshalIndent(vmConfig(spec), "", "  ")
 	if err != nil {
 		return fmt.Errorf("firecracker: %w", err)
 	}
-	return writeReadOnly(bytes.NewReader(cfg), "config.json", filepath.Join(root, "config.json"))
+	return writeStaged(bytes.NewReader(cfg), "config.json", filepath.Join(dir, "config.json"))
 }
 
 // vmConfig is Firecracker's configuration file. Built from structs, never
@@ -285,10 +276,6 @@ func vmConfig(spec *sandbox.Spec) map[string]any {
 			"mem_size_mib": spec.MemoryMiB,
 		},
 	}
-}
-
-func jailDir(base, id string) string {
-	return filepath.Join(base, "firecracker", id)
 }
 
 // openImage resolves path, checks that it lies inside ImageRoot, opens it
@@ -319,24 +306,15 @@ func (p *Provider) openImage(path string) (*os.File, error) {
 	return f, nil
 }
 
-func copyReadOnly(in *os.File, dst string) error {
-	return writeReadOnly(in, filepath.Base(in.Name()), dst)
-}
-
-// writeReadOnly creates dst exclusively, fills it from r and then makes it
-// world-readable and read-only (0444): the VMM runs as a different UID.
-func writeReadOnly(r io.Reader, name, dst string) error {
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // dst is inside our own jail
+// writeStaged creates dst exclusively (owner-only) and fills it from r.
+func writeStaged(r io.Reader, name, dst string) error {
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // dst is inside our own staging directory
 	if err != nil {
 		return fmt.Errorf("firecracker: %w", err)
 	}
 	if _, err := io.Copy(out, r); err != nil {
 		_ = out.Close() // the copy error is the one worth reporting
 		return fmt.Errorf("firecracker: write %s: %w", name, err)
-	}
-	if err := out.Chmod(0o444); err != nil {
-		_ = out.Close()
-		return fmt.Errorf("firecracker: %w", err)
 	}
 	return out.Close()
 }

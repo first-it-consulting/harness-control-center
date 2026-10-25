@@ -1,7 +1,7 @@
 GO       ?= go
 FUZZTIME ?= 30s
 
-.PHONY: all build test cover fuzz lint vuln snapshot check clean e2e-firecracker e2e-helper deploy-runner
+.PHONY: all build test cover fuzz lint vuln snapshot check clean e2e deploy-runner
 
 all: check build
 
@@ -25,21 +25,11 @@ lint:
 vuln:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
-# End-to-end tests against real Firecracker on a remote Linux/KVM host,
-# e.g. make e2e-firecracker E2E_HOST=hcc-dev. The host needs the assets
-# from hack/firecracker-poc/run.sh and non-interactive sudo.
-E2E_HOST   ?=
-E2E_ASSETS ?= ~/.cache/hcc-poc
-e2e-firecracker:
-	@test -n "$(E2E_HOST)" || { echo "set E2E_HOST"; exit 1; }
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) test -c -tags e2e -o bin/fc-e2e.test ./internal/sandbox/firecracker
-	scp -q bin/fc-e2e.test $(E2E_HOST):fc-e2e.test
-	ssh $(E2E_HOST) 'HCC_E2E_ASSETS=$(E2E_ASSETS) ./fc-e2e.test -test.run E2E -test.v -test.timeout 5m; rc=$$?; rm -f fc-e2e.test; exit $$rc'
-
-# End-to-end tests of the production path on a host installed with
-# deploy-runner: as hcc-runner, through hcc-helper, with the installed
-# image. The daemon is stopped meanwhile (it would share VM identities).
-e2e-helper:
+# End-to-end tests with real VMs on a host installed with deploy-runner,
+# e.g. make e2e E2E_HOST=hcc-dev: as hcc-runner, through hcc-helper, with
+# the installed image. The daemon is stopped meanwhile (it would share VM
+# identities).
+e2e:
 	@test -n "$(E2E_HOST)" || { echo "set E2E_HOST"; exit 1; }
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) test -c -tags e2e -o bin/fc-e2e.test ./internal/sandbox/firecracker
 	scp -q bin/fc-e2e.test $(E2E_HOST):fc-e2e.test
@@ -50,8 +40,12 @@ e2e-helper:
 
 # Install or upgrade the runner daemon on a Linux/KVM host, e.g.
 # make deploy-runner HOST=hcc-dev TARGET=server:hcc-dev-1
-HOST   ?= $(E2E_HOST)
-TARGET ?=
+# E2E_ASSETS: Firecracker, kernel and rootfs fetched on the host by
+# hack/firecracker-poc/run.sh.
+E2E_HOST   ?=
+E2E_ASSETS ?= ~/.cache/hcc-poc
+HOST       ?= $(E2E_HOST)
+TARGET     ?=
 VERSION_PKG = github.com/first-it-consulting/harness-control-center/internal/version
 deploy-runner:
 	@test -n "$(HOST)" -a -n "$(TARGET)" || { echo "set HOST and TARGET"; exit 1; }

@@ -26,13 +26,14 @@ hcc run --ssh <host> my-harness.yaml
 | `/usr/local/bin/hcc`, `/usr/local/lib/hcc/{jailer,firecracker}` | root, 0755 | Whoever can modify these is root. The daemon and helper refuse to start otherwise. |
 | `/usr/local/lib/hcc/images/` | root, read-only | The runner boots images but cannot change them. |
 | `/etc/hcc/runner.yaml` | root, 0644 | Neither the runner nor the caller can change what runs as root. |
-| `/var/lib/hcc/` (state, jails) | hcc-runner, 0700 | Only the runner. |
+| `/var/lib/hcc-jails/` | root, 0711 | The jail tree. hcc-helper builds every jail itself from the runner's staged files; the runner cannot list, add or swap anything there. |
+| `/var/lib/hcc/` (state, staging) | hcc-runner, 0700 | Only the runner. It prepares each VM's files in `staging/<job>`. |
 | `/run/hcc/runner.sock` | hcc-runner:hcc, 0660 in a 0750 dir | The runner and group `hcc`; nobody else. |
 
 ## Testing an installation
 
 ```sh
-make e2e-helper E2E_HOST=<host>   # real VMs, as hcc-runner, through hcc-helper
+make e2e E2E_HOST=<host>   # real VMs, as hcc-runner, through hcc-helper
 ```
 
 It stops the daemon while it runs (they would share VM identities) and

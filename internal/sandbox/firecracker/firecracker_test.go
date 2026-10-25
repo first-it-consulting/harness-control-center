@@ -35,13 +35,14 @@ type fakeHost struct {
 	behavior behavior
 	startErr error
 	onStart  func(jailRoot string)
-	// jailer turns requests into argv exactly like the real hosts do.
-	jailer JailerConfig
+	// jailer turns requests into argv exactly like the helper does.
+	jailer  JailerConfig
+	staging string
 
 	mu       sync.Mutex
 	argv     []string               // last jailer call
 	argvs    [][]string             // all jailer calls
-	jailSeen map[string]os.FileMode // files in the jail root at start
+	jailSeen map[string]os.FileMode // staged files at start
 	config   map[string]any
 	signals  []os.Signal
 	killed   []string
@@ -80,14 +81,14 @@ func (h *fakeHost) StartVM(req StartRequest, console io.Writer) (Process, error)
 	defer h.mu.Unlock()
 	h.argv = argv
 	h.argvs = append(h.argvs, argv)
-	root := filepath.Join(argValue(argv, "--chroot-base-dir"), "firecracker", argValue(argv, "--id"), "root")
+	root := filepath.Join(h.staging, req.ID) // what the helper copies into the jail
 	h.jailSeen = map[string]os.FileMode{}
 	if h.onStart != nil {
 		h.onStart(root)
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		h.t.Errorf("jail root missing at start: %v", err)
+		h.t.Errorf("staging missing at start: %v", err)
 	}
 	for _, e := range entries {
 		fi, _ := e.Info()
@@ -123,8 +124,7 @@ func (h *fakeHost) RemoveJail(_ context.Context, id string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.removed = append(h.removed, id)
-	// Mimic the real host so leftovers would be visible to the test.
-	return os.RemoveAll(JailDir(h.jailer.ChrootBase, id))
+	return nil
 }
 
 func argValue(argv []string, flag string) string {
@@ -144,7 +144,7 @@ type fixture struct {
 func newFixture(t *testing.T, b behavior) *fixture {
 	t.Helper()
 	dir := t.TempDir()
-	base := filepath.Join(dir, "jails")
+	base := filepath.Join(dir, "staging")
 	k, r := filepath.Join(dir, "vmlinux"), filepath.Join(dir, "rootfs.ext4")
 	if err := os.WriteFile(k, []byte("kernel"), 0o600); err != nil {
 		t.Fatal(err)
@@ -152,11 +152,11 @@ func newFixture(t *testing.T, b behavior) *fixture {
 	if err := os.WriteFile(r, []byte("rootfs"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	host := &fakeHost{t: t, behavior: b, jailer: JailerConfig{
+	host := &fakeHost{t: t, behavior: b, staging: base, jailer: JailerConfig{
 		JailerPath: filepath.Join(dir, "jailer"), FirecrackerPath: filepath.Join(dir, "firecracker"),
-		ChrootBase: base, UID: 64000, GID: 64000, Identities: 8,
+		ChrootBase: filepath.Join(dir, "jails"), UID: 64000, GID: 64000, Identities: 8,
 	}}
-	p, err := New(Config{ChrootBase: base, ImageRoot: dir, StopGrace: 20 * time.Millisecond, Host: host})
+	p, err := New(Config{StagingBase: base, ImageRoot: dir, StopGrace: 20 * time.Millisecond, Host: host})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,8 +178,8 @@ func (f *fixture) assertCleanedUp(t *testing.T) {
 	if !slices.Equal(f.host.removed, []string{f.spec.ID}) {
 		t.Errorf("RemoveJail calls = %v, want exactly [%s]", f.host.removed, f.spec.ID)
 	}
-	if _, err := os.Stat(jailDir(f.base, f.spec.ID)); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("jail still exists: %v", err)
+	if _, err := os.Stat(filepath.Join(f.base, f.spec.ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("staging still exists: %v", err)
 	}
 }
 
@@ -197,8 +197,9 @@ func TestRunExited(t *testing.T) {
 	}
 	f.assertCleanedUp(t)
 
-	// The jail held exactly the VM's files, all read-only.
-	want := map[string]os.FileMode{"vmlinux": 0o444, "rootfs.ext4": 0o444, "config.json": 0o444}
+	// Staging held exactly the VM's files, owner-only (the helper makes the
+	// jail copies readable for the VM).
+	want := map[string]os.FileMode{"vmlinux": 0o600, "rootfs.ext4": 0o600, "config.json": 0o600}
 	for name, mode := range want {
 		if got, ok := f.host.jailSeen[name]; !ok || got != mode {
 			t.Errorf("jail file %s: mode %v present=%v, want %v", name, got, ok, mode)
@@ -217,7 +218,7 @@ func TestJailerArgv(t *testing.T) {
 	argv := f.host.argv
 	checks := map[string]string{
 		"--id": "run-1", "--exec-file": f.host.jailer.FirecrackerPath, "--uid": "64000", "--gid": "64000",
-		"--chroot-base-dir": f.base, "--cgroup-version": "2", "--config-file": "config.json",
+		"--chroot-base-dir": f.host.jailer.ChrootBase, "--cgroup-version": "2", "--config-file": "config.json",
 	}
 	for flag, want := range checks {
 		if got := argValue(argv, flag); got != want {
@@ -333,7 +334,7 @@ func TestRunCancelIsKill(t *testing.T) {
 
 func TestRunRefusesExistingJail(t *testing.T) {
 	f := newFixture(t, exitsCleanly)
-	existing := jailDir(f.base, f.spec.ID)
+	existing := filepath.Join(f.base, f.spec.ID)
 	if err := os.MkdirAll(existing, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -364,9 +365,9 @@ func TestRunInvalidSpecTouchesNothing(t *testing.T) {
 
 func TestNewRejectsUnsafeConfig(t *testing.T) {
 	d := t.TempDir()
-	good := Config{ChrootBase: filepath.Join(d, "j"), ImageRoot: filepath.Join(d, "img"), Host: &fakeHost{}}
+	good := Config{StagingBase: filepath.Join(d, "s"), ImageRoot: filepath.Join(d, "img"), Host: &fakeHost{}}
 	tests := map[string]func(*Config){
-		"unclean base":  func(c *Config) { c.ChrootBase = c.ImageRoot + string(filepath.Separator) + ".." },
+		"unclean base":  func(c *Config) { c.StagingBase = c.ImageRoot + string(filepath.Separator) + ".." },
 		"no host":       func(c *Config) { c.Host = nil },
 		"no image root": func(c *Config) { c.ImageRoot = "" },
 		"too many ids":  func(c *Config) { c.Identities = MaxIdentities + 1 },

@@ -1,15 +1,13 @@
 //go:build e2e
 
-// End-to-end tests against real Firecracker, on Linux with /dev/kvm, in
-// one of two modes:
+// End-to-end tests against real Firecracker on the production path. Run
+// on a host installed with "make deploy-runner", as the runner user, with
+// the daemon stopped (the two would share VM identities):
 //
-//   - HCC_E2E_CONFIG=/etc/hcc/runner.yaml: the production path. Run as the
-//     configured runner user (with the daemon stopped, so the two do not
-//     share identities); VMs are started through the installed hcc-helper
-//     and boot the installed "base" image. See make e2e-helper.
-//   - HCC_E2E_ASSETS=<dir with firecracker, jailer, vmlinux,
-//     alpine-minirootfs.tar.gz>: development path through broad sudo
-//     (SudoHost), with images built in a temp dir. See make e2e-firecracker.
+//	HCC_E2E_CONFIG=/etc/hcc/runner.yaml ./fc-e2e.test -test.run E2E
+//
+// VMs are started through the installed hcc-helper and boot the
+// installed "base" image. See make e2e.
 package firecracker
 
 import (
@@ -28,21 +26,9 @@ import (
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 )
 
-// The guest init exits by default and hangs with hcc.mode=hang.
-const e2eInit = `#!/bin/sh
-mount -t proc proc /proc
-mount -t sysfs sys /sys
-echo "HCC-GUEST-UP"
-echo "HCC-GUEST-NET $(ls /sys/class/net | tr '\n' ' ')"
-case " $(cat /proc/cmdline) " in
-*" hcc.mode=hang "*) echo "HCC-GUEST-HANG"; while :; do sleep 1; done ;;
-esac
-reboot -f
-`
-
 type e2eEnv struct {
-	images, base, rootfs string
-	provider             *Provider
+	images, base, staging, rootfs string
+	provider                      *Provider
 }
 
 func setupE2E(t *testing.T) *e2eEnv {
@@ -50,36 +36,11 @@ func setupE2E(t *testing.T) *e2eEnv {
 	if _, err := os.Stat("/dev/kvm"); err != nil {
 		t.Skip("no /dev/kvm")
 	}
-	if cfgPath := os.Getenv("HCC_E2E_CONFIG"); cfgPath != "" {
-		return setupHelperE2E(t, cfgPath)
+	cfgPath := os.Getenv("HCC_E2E_CONFIG")
+	if cfgPath == "" {
+		t.Skip("HCC_E2E_CONFIG not set")
 	}
-	assets := os.Getenv("HCC_E2E_ASSETS")
-	if assets == "" {
-		t.Skip("neither HCC_E2E_CONFIG nor HCC_E2E_ASSETS is set")
-	}
-	dir := t.TempDir()
-	images := filepath.Join(dir, "images")
-	if err := os.Mkdir(images, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	mustRun(t, "cp", filepath.Join(assets, "vmlinux"), filepath.Join(images, "vmlinux"))
-	rootfs := buildRootFS(t, filepath.Join(assets, "alpine-minirootfs.tar.gz"), dir, images)
-	base := filepath.Join(dir, "jails")
-	jailer := JailerConfig{
-		JailerPath:      filepath.Join(assets, "jailer"),
-		FirecrackerPath: filepath.Join(assets, "firecracker"),
-		ChrootBase:      base,
-		UID:             64000, GID: 64000, Identities: 2,
-		ForbiddenIDs: []int{0, os.Getuid(), os.Getgid()},
-	}
-	if err := jailer.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	p, err := New(Config{ChrootBase: base, ImageRoot: images, Identities: 2, Host: NewSudoHost(jailer)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &e2eEnv{images: images, base: base, rootfs: rootfs, provider: p}
+	return setupHelperE2E(t, cfgPath)
 }
 
 // setupHelperE2E builds the provider exactly as the daemon does from an
@@ -101,10 +62,10 @@ func setupHelperE2E(t *testing.T, cfgPath string) *e2eEnv {
 		t.Fatalf("base kernel must be named vmlinux, got %s", img.Kernel)
 	}
 	p, err := New(Config{
-		ChrootBase: cfg.Firecracker.ChrootBase,
-		ImageRoot:  cfg.Firecracker.ImageRoot,
-		Identities: cfg.MaxConcurrent,
-		Host:       NewHelperHost(cfg.Firecracker.Helper),
+		StagingBase: cfg.Firecracker.StagingDir,
+		ImageRoot:   cfg.Firecracker.ImageRoot,
+		Identities:  cfg.MaxConcurrent,
+		Host:        NewHelperHost(cfg.Firecracker.Helper),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -112,29 +73,7 @@ func setupHelperE2E(t *testing.T, cfgPath string) *e2eEnv {
 	if cfg.MaxConcurrent < 2 {
 		t.Fatal("maxConcurrent must be at least 2 for the concurrency test")
 	}
-	return &e2eEnv{images: filepath.Dir(img.Kernel), base: cfg.Firecracker.ChrootBase, rootfs: img.RootFS, provider: p}
-}
-
-func buildRootFS(t *testing.T, tarball, dir, images string) string {
-	t.Helper()
-	tree := filepath.Join(dir, "tree")
-	img := filepath.Join(images, "rootfs.ext4")
-	if err := os.Mkdir(tree, 0o755); err != nil { //nolint:gosec // becomes the guest's "/" and must be world-traversable
-		t.Fatal(err)
-	}
-	mustRun(t, "tar", "-xzf", tarball, "-C", tree)
-	if err := os.WriteFile(filepath.Join(tree, "init"), []byte(e2eInit), 0o755); err != nil { //nolint:gosec // the guest's init must be executable
-		t.Fatal(err)
-	}
-	mustRun(t, "mkfs.ext4", "-q", "-F", "-d", tree, "-E", "root_owner=0:0", img, "64M")
-	return img
-}
-
-func mustRun(t *testing.T, name string, args ...string) {
-	t.Helper()
-	if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
-		t.Fatalf("%s %v: %v\n%s", name, args, err, out)
-	}
+	return &e2eEnv{images: filepath.Dir(img.Kernel), base: cfg.Firecracker.ChrootBase, staging: cfg.Firecracker.StagingDir, rootfs: img.RootFS, provider: p}
 }
 
 func (e *e2eEnv) spec(id string, timeout time.Duration, bootArgs ...string) sandbox.Spec {
@@ -147,8 +86,11 @@ func (e *e2eEnv) spec(id string, timeout time.Duration, bootArgs ...string) sand
 // assertNoTrace checks that a run left nothing behind on the host.
 func (e *e2eEnv) assertNoTrace(t *testing.T, id string) {
 	t.Helper()
-	if _, err := os.Stat(jailDir(e.base, id)); !os.IsNotExist(err) {
-		t.Errorf("jail %s left behind", id)
+	if _, err := os.Stat(JailDir(e.base, id)); !os.IsNotExist(err) {
+		t.Errorf("jail %s left behind (%v)", id, err)
+	}
+	if _, err := os.Stat(filepath.Join(e.staging, id)); !os.IsNotExist(err) {
+		t.Errorf("staging %s left behind (%v)", id, err)
 	}
 	if _, err := os.Stat(filepath.Join("/sys/fs/cgroup/firecracker", id)); !os.IsNotExist(err) {
 		t.Errorf("cgroup %s left behind", id)

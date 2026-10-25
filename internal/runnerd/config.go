@@ -40,13 +40,16 @@ type Config struct {
 // FirecrackerConfig configures the Firecracker sandbox provider.
 type FirecrackerConfig struct {
 	// Helper is the root-owned hcc-helper the runner calls through sudo.
-	// Without it, the runner falls back to running the jailer through
-	// sudo directly (development only: that needs broad sudo rights).
 	Helper      string `yaml:"helper"`
 	Jailer      string `yaml:"jailer"`
 	Firecracker string `yaml:"firecracker"`
-	ChrootBase  string `yaml:"chrootBase"`
-	ImageRoot   string `yaml:"imageRoot"`
+	// ChrootBase holds the jails. It must be owned by root and writable
+	// only by root, up to "/": hcc-helper creates every jail itself.
+	ChrootBase string `yaml:"chrootBase"`
+	// StagingDir is the runner's own directory where it prepares VM files
+	// for hcc-helper to copy into a jail.
+	StagingDir string `yaml:"stagingDir"`
+	ImageRoot  string `yaml:"imageRoot"`
 	// UID and GID are the first of maxConcurrent IDs; each running VM
 	// gets its own.
 	UID int `yaml:"uid"`
@@ -115,13 +118,14 @@ func (c *Config) Validate() error {
 	if c.SocketGroup != "" && (!unixNameRe.MatchString(c.SocketGroup) || c.SocketGroup == "root") {
 		add("socketGroup must name a non-root group, got %q", c.SocketGroup)
 	}
-	if c.Firecracker.Helper != "" && !cleanAbs(c.Firecracker.Helper) {
-		add("firecracker.helper must be a clean absolute path, got %q", c.Firecracker.Helper)
+	if within(c.Firecracker.StagingDir, c.Firecracker.ChrootBase) || within(c.StateDir, c.Firecracker.ChrootBase) {
+		add("firecracker.chrootBase must not be inside a runner-owned directory")
 	}
 	paths := map[string]string{
 		"socket": c.Socket, "stateDir": c.StateDir,
 		"firecracker.jailer": c.Firecracker.Jailer, "firecracker.firecracker": c.Firecracker.Firecracker,
 		"firecracker.chrootBase": c.Firecracker.ChrootBase, "firecracker.imageRoot": c.Firecracker.ImageRoot,
+		"firecracker.helper": c.Firecracker.Helper, "firecracker.stagingDir": c.Firecracker.StagingDir,
 	}
 	for name, p := range paths {
 		if !cleanAbs(p) {
@@ -155,11 +159,7 @@ func (c *Config) Validate() error {
 // and writable by nobody else.
 func (c *Config) CheckFiles() error {
 	var errs []error
-	bins := []string{c.Firecracker.Jailer, c.Firecracker.Firecracker}
-	if c.Firecracker.Helper != "" {
-		bins = append(bins, c.Firecracker.Helper)
-	}
-	for _, p := range bins {
+	for _, p := range []string{c.Firecracker.Helper, c.Firecracker.Jailer, c.Firecracker.Firecracker} {
 		if err := checkRootOwned(p); err != nil {
 			errs = append(errs, err)
 		}

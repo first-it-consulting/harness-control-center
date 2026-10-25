@@ -65,21 +65,18 @@ func serve(configPath string, log *slog.Logger) error {
 	if err := cfg.CheckFiles(); err != nil {
 		return err
 	}
-	for _, d := range []string{cfg.StateDir, cfg.Firecracker.ChrootBase} {
+	// The jail tree (chrootBase) is root's; only these are the runner's.
+	for _, d := range []string{cfg.StateDir, cfg.Firecracker.StagingDir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}
 	}
-	host, err := sandboxHost(cfg, log)
-	if err != nil {
-		return err
-	}
 	provider, err := firecracker.New(firecracker.Config{
-		ChrootBase: cfg.Firecracker.ChrootBase,
-		ImageRoot:  cfg.Firecracker.ImageRoot,
+		StagingBase: cfg.Firecracker.StagingDir,
+		ImageRoot:   cfg.Firecracker.ImageRoot,
 		// One UID/GID per concurrently running VM: uid..uid+maxConcurrent-1.
 		Identities: cfg.MaxConcurrent,
-		Host:       host,
+		Host:       firecracker.NewHelperHost(cfg.Firecracker.Helper),
 	})
 	if err != nil {
 		return err
@@ -118,25 +115,6 @@ func serve(configPath string, log *slog.Logger) error {
 	err = runnerd.NewServer(r, cfg.StateDir, log).Serve(ctx, l)
 	log.Info("runner stopped; all jobs were stopped")
 	return err
-}
-
-// sandboxHost returns the helper-based host, or (development only) one
-// that runs the jailer through broad sudo rights.
-func sandboxHost(cfg *runnerd.Config, log *slog.Logger) (firecracker.Host, error) {
-	fc := cfg.Firecracker
-	if fc.Helper != "" {
-		return firecracker.NewHelperHost(fc.Helper), nil
-	}
-	log.Warn("firecracker.helper not set: running the jailer through sudo directly; this needs broad sudo rights and is for development only")
-	jc := firecracker.JailerConfig{
-		JailerPath: fc.Jailer, FirecrackerPath: fc.Firecracker, ChrootBase: fc.ChrootBase,
-		UID: fc.UID, GID: fc.GID, Identities: cfg.MaxConcurrent,
-		ForbiddenIDs: []int{0, os.Getuid(), os.Getgid()},
-	}
-	if err := jc.Validate(); err != nil {
-		return nil, err
-	}
-	return firecracker.NewSudoHost(jc), nil
 }
 
 func cmdStdio(args []string, stdin io.Reader, stdout, stderr io.Writer) int {

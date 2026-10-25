@@ -43,6 +43,9 @@ sudo install -o root -g root -m 0755 "$HCC_BIN" /usr/local/bin/hcc
 sudo install -d -o root -g root -m 0755 "$LIB" "$IMAGES" "$IMAGES/base"
 sudo install -o root -g root -m 0755 "$ASSETS/firecracker" "$ASSETS/jailer" "$LIB/"
 sudo install -o root -g root -m 0755 "$HELPER_BIN" "$LIB/hcc-helper"
+# The jail tree is root's (hcc-helper builds every jail); 0711 lets the
+# runner check whether a jail still exists without listing or changing it.
+sudo install -d -o root -g root -m 0711 /var/lib/hcc-jails
 
 echo "== sudoers: $RUN_USER may run exactly $LIB/hcc-helper as root"
 rule=$(mktemp)
@@ -95,7 +98,8 @@ firecracker:
   helper: $LIB/hcc-helper
   jailer: $LIB/jailer
   firecracker: $LIB/firecracker
-  chrootBase: /var/lib/hcc/jails
+  chrootBase: /var/lib/hcc-jails
+  stagingDir: /var/lib/hcc/staging
   imageRoot: $IMAGES
   # Each running VM gets its own IDs: 64000..64000+maxConcurrent-1.
   uid: 64000

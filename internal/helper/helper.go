@@ -4,15 +4,22 @@
 // runner calls it through sudo with a single sudoers rule; it performs
 // exactly three operations and trusts nothing it is given:
 //
-//	start  --id ID --slot N --cpus C --memory M   exec the jailer for a prepared jail
+//	start  --id ID --slot N --cpus C --memory M   build the jail, exec the jailer
 //	kill   --id ID                                 kill everything in the jail's cgroup
 //	remove --id ID                                 delete the jail and its cgroup
 //
-// Binaries, the chroot base and the UID range come from the root-owned
-// configuration, never from the caller. Only the configured runner user
-// may call it, and it refuses jail trees containing symlinks or owned by
-// anyone else, so a compromised runner cannot redirect the chroot (or a
-// deletion) to another place on the host.
+// Binaries, directories and the UID range come from the root-owned
+// configuration, never from the caller, and only the configured runner
+// user may call it.
+//
+// The jail tree is root's: the chroot base and every directory above it
+// must be owned by root and writable by nobody else, and the helper
+// creates each jail itself. The runner only prepares the VM's files in
+// its own staging directory, which the helper reads without following
+// any symlink and copies only if they are regular files owned by the
+// runner. A compromised runner therefore cannot swap parts of a jail
+// between check and use, redirect a chroot or a deletion, or make root
+// copy files it could not read itself.
 package helper
 
 import (
@@ -24,8 +31,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox/firecracker"
@@ -33,10 +41,19 @@ import (
 
 // Config is the helper's root-owned configuration.
 type Config struct {
-	Jailer     firecracker.JailerConfig
-	CgroupRoot string
-	// RunnerUID is the only user allowed to call the helper.
+	Jailer firecracker.JailerConfig
+	// StagingBase is the runner's directory of prepared VM files:
+	// StagingBase/<id>/{vmlinux,rootfs.ext4,config.json}.
+	StagingBase string
+	CgroupRoot  string
+	// RunnerUID is the only user allowed to call the helper and the
+	// required owner of staged files.
 	RunnerUID int
+	// RootUID must own the jail tree: 0, except in tests.
+	RootUID int
+	// TrustAnchor is where ownership checks stop walking up: "/" (the
+	// default), except in tests.
+	TrustAnchor string
 }
 
 // Deps are the side effects, replaceable in tests.
@@ -68,6 +85,12 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 	if err := cfg.Jailer.Validate(); err != nil {
 		return err
 	}
+	if !cleanAbs(cfg.StagingBase) || !cleanAbs(cfg.CgroupRoot) {
+		return errors.New("staging base and cgroup root must be clean absolute paths")
+	}
+	if cfg.TrustAnchor == "" {
+		cfg.TrustAnchor = "/"
+	}
 	if len(args) == 0 {
 		return errors.New("expected start, kill or remove")
 	}
@@ -90,7 +113,8 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 	if err := sandbox.ValidateID(*id); err != nil {
 		return err
 	}
-	jail := firecracker.JailDir(cfg.Jailer.ChrootBase, *id)
+	base := cfg.Jailer.ChrootBase
+	jail := firecracker.JailDir(base, *id)
 	cgroup := firecracker.CgroupDir(cfg.CgroupRoot, *id)
 
 	switch op {
@@ -99,7 +123,7 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 		if err != nil {
 			return err
 		}
-		if err := checkJail(cfg.Jailer.ChrootBase, filepath.Join(jail, "root"), cfg.RunnerUID); err != nil {
+		if err := buildJail(cfg, base, *id); err != nil {
 			return err
 		}
 		return d.Exec(argv[0], argv, execEnv)
@@ -109,15 +133,14 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 		}
 		return writeCgroupKill(filepath.Join(cgroup, "cgroup.kill"))
 	case "remove":
+		// The whole tree is root's (checked), so nobody can redirect rm.
+		if err := checkRootOwnedDirs(filepath.Join(base, "firecracker"), cfg.RootUID, cfg.TrustAnchor); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		var errs []error
 		if _, err := os.Lstat(jail); err == nil {
-			if err := noSymlinks(jail); err != nil {
-				return err
-			}
-			// rm does not follow symlinks below jail; --one-file-system
-			// keeps it out of anything mounted there.
 			if err := d.Run(ctx, "rm", "-rf", "--one-file-system", "--", jail); err != nil {
 				errs = append(errs, err)
 			}
@@ -133,42 +156,147 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 	}
 }
 
-// checkJail verifies the prepared jail root before the jailer chroots
-// into it: no component of the path may be a symlink, and everything from
-// the chroot base down must be a directory owned by the runner.
-func checkJail(base, root string, runnerUID int) error {
-	if err := noSymlinks(root); err != nil {
+// stagedFiles are the only files copied into a jail.
+var stagedFiles = []string{"vmlinux", "rootfs.ext4", "config.json"}
+
+// buildJail creates base/firecracker/<id>/root as root and copies the
+// staged files into it, read-only for the VM.
+func buildJail(cfg Config, base, id string) error {
+	parent := filepath.Join(base, "firecracker")
+	// 0711: the runner may check whether its jail still exists, but can
+	// neither list nor change anything.
+	if err := os.Mkdir(parent, 0o711); err != nil && !errors.Is(err, os.ErrExist) { //nolint:gosec // traverse-only for the runner
 		return err
 	}
-	rel, err := filepath.Rel(base, root)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return fmt.Errorf("jail %s is outside the chroot base", root)
+	if err := checkRootOwnedDirs(parent, cfg.RootUID, cfg.TrustAnchor); err != nil {
+		return err
 	}
-	p := base
-	for _, part := range append([]string{""}, strings.Split(rel, string(filepath.Separator))...) {
-		p = filepath.Join(p, part)
-		fi, err := os.Lstat(p)
-		if err != nil {
+	jail := filepath.Join(parent, id)
+	// Exclusive: a jail is never reused.
+	if err := os.Mkdir(jail, 0o700); err != nil {
+		return fmt.Errorf("create jail: %w", err)
+	}
+	root := filepath.Join(jail, "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		return err
+	}
+	// The jail root becomes the VM's "/": its UID must traverse it.
+	if err := os.Chmod(root, 0o711); err != nil { //nolint:gosec // traversal by the jailed UID is required
+		return err
+	}
+	staging, err := openNoFollow(filepath.Join(cfg.StagingBase, id), true)
+	if err != nil {
+		return fmt.Errorf("staging: %w", err)
+	}
+	defer staging.Close()
+	if err := checkOwner(staging, cfg.RunnerUID); err != nil {
+		return err
+	}
+	for _, name := range stagedFiles {
+		if err := copyStaged(staging, name, filepath.Join(root, name), cfg.RunnerUID); err != nil {
 			return err
-		}
-		st, ok := fi.Sys().(*syscall.Stat_t)
-		if !fi.IsDir() || !ok || int(st.Uid) != runnerUID {
-			return fmt.Errorf("%s must be a directory owned by the runner", p)
 		}
 	}
 	return nil
 }
 
-// noSymlinks fails if any existing component of path is a symlink.
-func noSymlinks(path string) error {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return fmt.Errorf("path %q must be clean and absolute", path)
+// copyStaged copies one staged file, opened relative to the staging
+// directory without following symlinks, into the jail. Only regular,
+// singly linked files owned by the runner are accepted, so root never
+// copies something the runner could not read itself.
+func copyStaged(staging *os.File, name, dst string, runnerUID int) error {
+	fd, err := unix.Openat(int(staging.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return fmt.Errorf("staged %s: %w", name, err)
 	}
-	for p := path; ; p = filepath.Dir(p) {
-		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s is a symlink; refusing", p)
+	in := os.NewFile(uintptr(fd), name)
+	defer in.Close()
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || int(st.Uid) != runnerUID || st.Nlink != 1 {
+		return fmt.Errorf("staged %s must be a regular, singly linked file owned by the runner", name)
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o600) //nolint:gosec // dst is in the jail we just created
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("copy %s: %w", name, err)
+	}
+	// Read-only, and readable by the VMM, which runs as another UID.
+	if err := out.Chmod(0o444); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// openNoFollow opens path one component at a time from "/", refusing to
+// follow a symlink anywhere, and returns the final file.
+func openNoFollow(path string, dir bool) (*os.File, error) {
+	if !cleanAbs(path) {
+		return nil, fmt.Errorf("path %q must be clean and absolute", path)
+	}
+	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	for i, part := range parts {
+		flags := unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+		if i < len(parts)-1 || dir {
+			flags |= unix.O_DIRECTORY
 		}
-		if p == filepath.Dir(p) {
+		next, err := unix.Openat(fd, part, flags, 0)
+		_ = unix.Close(fd)
+		if err != nil {
+			if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
+				return nil, fmt.Errorf("%s: a component is a symlink or not a directory; refusing", path)
+			}
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		fd = next
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
+
+func checkOwner(f *os.File, uid int) error {
+	var st unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
+		return err
+	}
+	if int(st.Uid) != uid {
+		return fmt.Errorf("%s must be owned by uid %d", f.Name(), uid)
+	}
+	return nil
+}
+
+// checkRootOwnedDirs fails unless dir and every directory above it, up to
+// and including anchor, are real directories owned by rootUID and not
+// writable by group or others: then nobody but root can rename, replace
+// or add anything on that path.
+func checkRootOwnedDirs(dir string, rootUID int, anchor string) error {
+	if !cleanAbs(dir) || !cleanAbs(anchor) {
+		return fmt.Errorf("path %q must be clean and absolute", dir)
+	}
+	if rel, err := filepath.Rel(anchor, dir); err != nil || strings.HasPrefix(rel, "..") {
+		return fmt.Errorf("%s is outside %s", dir, anchor)
+	}
+	for p := dir; ; p = filepath.Dir(p) {
+		var st unix.Stat_t
+		if err := unix.Lstat(p, &st); err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+			return fmt.Errorf("%s must be a directory (not a symlink)", p)
+		}
+		if int(st.Uid) != rootUID || st.Mode&0o022 != 0 {
+			return fmt.Errorf("%s must be owned by root and writable only by root", p)
+		}
+		if p == anchor || p == filepath.Dir(p) {
 			return nil
 		}
 	}
@@ -178,7 +306,7 @@ func noSymlinks(path string) error {
 // the file: if it is missing, the directory is not a cgroup, and root has
 // no business writing there.
 func writeCgroupKill(path string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY, 0) //nolint:gosec // path built from the configured cgroup root and a validated id
+	f, err := os.OpenFile(path, os.O_WRONLY|unix.O_NOFOLLOW, 0) //nolint:gosec // path built from the configured cgroup root and a validated id
 	if err != nil {
 		return err
 	}
@@ -188,3 +316,5 @@ func writeCgroupKill(path string) error {
 	}
 	return f.Close()
 }
+
+func cleanAbs(p string) bool { return filepath.IsAbs(p) && filepath.Clean(p) == p }

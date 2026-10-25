@@ -75,7 +75,9 @@ func setup() (helper.Config, int, error) {
 			Identities:      c.MaxConcurrent,
 			ForbiddenIDs:    []int{0, uid, gid},
 		},
-		CgroupRoot: firecracker.DefaultCgroupRoot,
-		RunnerUID:  uid,
+		StagingBase: c.Firecracker.StagingDir,
+		CgroupRoot:  firecracker.DefaultCgroupRoot,
+		RunnerUID:   uid,
+		RootUID:     0,
 	}, caller, nil
 }

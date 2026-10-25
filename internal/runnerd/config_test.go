@@ -19,7 +19,8 @@ firecracker:
   helper: /usr/local/lib/hcc/hcc-helper
   jailer: /usr/local/lib/hcc/jailer
   firecracker: /usr/local/lib/hcc/firecracker
-  chrootBase: /var/lib/hcc/jails
+  chrootBase: /var/lib/hcc-jails
+  stagingDir: /var/lib/hcc/staging
   imageRoot: /var/lib/hcc/images
   uid: 64000
   gid: 64000
@@ -68,7 +69,9 @@ func TestLoadConfigRejects(t *testing.T) {
 	tests := map[string]struct{ old, new, want string }{
 		"unknown field":       {"maxConcurrent: 2", "maxConcurent: 2", "not found"},
 		"bad target":          {"server:hcc-dev", "cloud", "target"},
-		"relative path":       {"/var/lib/hcc/jails", "jails", "chrootBase"},
+		"relative path":       {"/var/lib/hcc-jails", "jails", "chrootBase"},
+		"jails in runner dir": {"/var/lib/hcc-jails", "/var/lib/hcc/staging/jails", "must not be inside a runner-owned"},
+		"no helper":           {"  helper: /usr/local/lib/hcc/hcc-helper\n", "", "firecracker.helper"},
 		"unclean path":        {"/var/lib/hcc/state", "/var/lib/hcc/../state", "stateDir"},
 		"image outside root":  {"/var/lib/hcc/images/base/rootfs.ext4", "/etc/shadow", "inside firecracker.imageRoot"},
 		"root uid":            {"uid: 64000", "uid: 0", "non-root"},
@@ -104,13 +107,13 @@ func TestCheckFilesRequiresRootOwnedBinaries(t *testing.T) {
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c := &Config{Firecracker: FirecrackerConfig{Jailer: bin, Firecracker: bin}}
+	c := &Config{Firecracker: FirecrackerConfig{Helper: bin, Jailer: bin, Firecracker: bin}}
 	if err := c.CheckFiles(); err == nil || !strings.Contains(err.Error(), "owned by root") {
 		t.Errorf("CheckFiles = %v, want owned-by-root error", err)
 	}
 	// /bin/sh's path is root-owned and not group/other-writable everywhere
 	// we run.
-	c = &Config{Firecracker: FirecrackerConfig{Jailer: "/bin/sh", Firecracker: "/bin/sh"}}
+	c = &Config{Firecracker: FirecrackerConfig{Helper: "/bin/sh", Jailer: "/bin/sh", Firecracker: "/bin/sh"}}
 	if err := c.CheckFiles(); err != nil {
 		t.Errorf("CheckFiles(/bin/sh) = %v", err)
 	}
