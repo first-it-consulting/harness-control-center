@@ -23,7 +23,7 @@ lint:
 	golangci-lint run
 
 vuln:
-	$(GO) run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
 snapshot:
 	goreleaser release --snapshot --clean
