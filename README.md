@@ -5,7 +5,8 @@
 > Claude Code runtime work: an agent runs in a confined microVM, reaches
 > exactly the hosts its harness allows, and uses credentials it never
 > sees, within a token budget enforced at the proxy. Its files come back
-> as a sanitized archive (`hcc results`); there is no UI yet.
+> as a sanitized archive. The web UI (`hcc control serve`) manages
+> harnesses, runners and jobs.
 > "Harness Control Center" is a working codename.
 
 Run AI agents on your own machines, safely, without being an expert.
@@ -63,6 +64,19 @@ hcc resume --ssh my-server
 
 The runner listens on no network port. `--ssh` uses your own ssh
 configuration and host keys.
+
+## Use the web UI
+
+```sh
+hcc control serve
+```
+
+It prints a link; open it in your browser. Add your runner under
+**Runners** (its ssh host), write or paste a harness under **Harnesses**,
+read what it may do, and start it. **Jobs** shows every run with its
+console, usage and results; **Stop everything** is the kill switch for all
+runners. The UI listens on this computer only; see
+[ADR-0007](docs/adr/0007-control-center-web-ui.md).
 
 ## Documentation
 

@@ -522,3 +522,17 @@ func TestHistorySurvivesRestart(t *testing.T) {
 		t.Errorf("Follow after restart = %v, %v", last, err)
 	}
 }
+
+func TestInfo(t *testing.T) {
+	d := startDaemon(t)
+	st, err := d.client.Info(context.Background())
+	if err != nil || st.Target != "local" || !slices.Equal(st.Images, []string{"base"}) || st.MaxConcurrent != 2 || st.Killed {
+		t.Fatalf("Info = %+v, %v", st, err)
+	}
+	if err := d.client.KillAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := d.client.Info(context.Background()); !st.Killed {
+		t.Error("kill switch not reported")
+	}
+}

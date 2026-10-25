@@ -111,6 +111,12 @@ func (c *Client) Submit(ctx context.Context, harnessYAML []byte) (string, error)
 	return out.ID, nil
 }
 
+// Info returns the runner's status.
+func (c *Client) Info(ctx context.Context) (runner.Status, error) {
+	var st runner.Status
+	return st, c.do(ctx, http.MethodGet, "/v1/info", nil, &st)
+}
+
 // List returns all jobs.
 func (c *Client) List(ctx context.Context) ([]runner.Job, error) {
 	var jobs []runner.Job

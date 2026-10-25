@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harness Control Center</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/jobs">
+    <img src="icon.svg" alt="" width="24" height="24">
+    <span>Harness Control Center</span>
+  </a>
+  <nav aria-label="Main">
+    <a href="#/jobs" data-nav="jobs">Jobs</a>
+    <a href="#/harnesses" data-nav="harnesses">Harnesses</a>
+    <a href="#/runners" data-nav="runners">Runners</a>
+  </nav>
+  <button type="button" id="stop-all" class="danger" title="Kill switch: stop every job on every runner and refuse new ones">Stop everything</button>
+</header>
+<div id="notice" role="status" aria-live="polite" hidden></div>
+<main id="view" tabindex="-1"></main>
+<dialog id="dialog"></dialog>
+</body>
+</html>

@@ -1,0 +1,573 @@
+// Harness Control Center UI.
+//
+// Everything shown here may come from an agent (job errors, console
+// output, file names), so the DOM is only ever built with textContent and
+// attributes, never by parsing HTML. A test enforces that.
+
+const view = document.getElementById("view");
+const dialog = document.getElementById("dialog");
+const notice = document.getElementById("notice");
+
+const TEMPLATE = `# A new harness. Everything not written here is denied:
+# no network, no credentials, no subagents, 30 minutes, $1.
+apiVersion: hcc/v1alpha1
+kind: Harness
+metadata:
+  name: my-harness
+  description: What this agent should do.
+spec:
+  runtime: claude-code
+  prompt: Write a haiku about sandboxes to haiku.txt.
+  sandbox:
+    image: claude-code
+`;
+
+const TERMINAL = new Set(["succeeded", "failed", "timed_out", "cancelled", "over_budget"]);
+
+// --- API ---
+
+let csrf = "";
+
+async function api(method, path, body) {
+  const opts = { method, headers: {}, credentials: "same-origin" };
+  if (method !== "GET") {
+    opts.headers["X-HCC-CSRF"] = csrf;
+  }
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const resp = await fetch(path, opts);
+  let data = null;
+  try {
+    data = await resp.json();
+  } catch {
+    data = null;
+  }
+  if (!resp.ok) {
+    const err = new Error((data && data.error) || resp.statusText);
+    err.status = resp.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+// --- DOM helpers (no HTML parsing anywhere) ---
+
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === "onclick" || k === "onsubmit" || k === "oninput" || k === "onchange") {
+      el.addEventListener(k.slice(2), v);
+    } else if (k === "class") {
+      el.className = v;
+    } else if (v === true) {
+      el.setAttribute(k, "");
+    } else {
+      el.setAttribute(k, String(v));
+    }
+  }
+  append(el, children);
+  return el;
+}
+
+function append(el, children) {
+  for (const c of children.flat()) {
+    if (c === undefined || c === null || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+}
+
+// set replaces el's children; false, null and undefined are skipped (for
+// optional parts written as "cond && node").
+function set(el, ...children) {
+  el.replaceChildren();
+  append(el, children);
+}
+
+function show(...children) {
+  set(view, ...children);
+}
+
+function badge(text, kind) {
+  return h("span", { class: "badge " + (kind || text) }, text.replace("_", " "));
+}
+
+function say(message, isError) {
+  notice.textContent = message;
+  notice.className = isError ? "error" : "";
+  notice.hidden = !message;
+  if (message && !isError) {
+    setTimeout(() => {
+      if (notice.textContent === message) notice.hidden = true;
+    }, 5000);
+  }
+}
+
+function fail(err) {
+  if (err && err.status === 401) {
+    show(h("div", { class: "empty" },
+      h("h1", {}, "Not signed in"),
+      h("p", {}, "Open the link that \"hcc control serve\" printed in your terminal.")));
+    return;
+  }
+  say(err && err.message ? err.message : String(err), true);
+}
+
+function fmtTime(s) {
+  if (!s) return "–";
+  const d = new Date(s);
+  return isNaN(d) ? "–" : d.toLocaleString();
+}
+
+function fmtDuration(from, to) {
+  if (!from) return "–";
+  const ms = (to ? new Date(to) : new Date()) - new Date(from);
+  if (!(ms >= 0)) return "–";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + " s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + " min " + (s % 60) + " s";
+  return Math.floor(m / 60) + " h " + (m % 60) + " min";
+}
+
+function fmtUsage(u) {
+  if (!u) return "–";
+  let out = (u.inputTokens + u.outputTokens).toLocaleString() + " tokens";
+  if (u.costKnown) out += " ($" + u.costUSD.toFixed(4) + ")";
+  return out;
+}
+
+function plural(n, word) {
+  return n.toLocaleString() + " " + word + (n === 1 ? "" : "s");
+}
+
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KiB";
+  return (n / 1024 / 1024).toFixed(1) + " MiB";
+}
+
+// --- routing ---
+
+let refresh = null; // the current view's timer
+
+function route() {
+  if (refresh) {
+    clearInterval(refresh);
+    refresh = null;
+  }
+  say("");
+  const parts = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+  for (const a of document.querySelectorAll("nav a")) {
+    a.classList.toggle("active", a.dataset.nav === (parts[0] || "jobs"));
+  }
+  const routes = {
+    jobs: () => jobsView(),
+    job: () => jobView(parts[1], parts[2]),
+    harnesses: () => harnessesView(),
+    harness: () => harnessView(parts[1]),
+    new: () => harnessView(""),
+    runners: () => runnersView(),
+  };
+  (routes[parts[0]] || routes.jobs)();
+  view.focus();
+}
+
+function every(ms, fn) {
+  refresh = setInterval(() => {
+    if (!document.hidden) fn();
+  }, ms);
+}
+
+// --- jobs ---
+
+async function jobsView() {
+  const body = h("tbody");
+  const errors = h("div");
+  show(
+    h("div", { class: "head" },
+      h("div", {}, h("h1", {}, "Jobs"), h("p", { class: "muted" }, "Every run on every runner, newest first.")),
+      h("div", { class: "actions" }, h("a", { class: "button primary", href: "#/harnesses" }, "Start a harness"))),
+    errors,
+    h("div", { class: "table-wrap" }, h("table", {},
+      h("thead", {}, h("tr", {}, ["State", "Harness", "Runner", "Started", "Duration", "Usage", "Results", "Detail"].map((t) => h("th", {}, t)))),
+      body)));
+  const load = async () => {
+    try {
+      const data = await api("GET", "/api/jobs");
+      set(errors, ...Object.entries(data.errors).map(([r, e]) =>
+        h("div", { class: "error-box" }, "Runner " + r + " is unreachable: " + e)));
+      if (data.jobs.length === 0) {
+        set(body, h("tr", {}, h("td", { colspan: 8, class: "muted" }, "No jobs yet.")));
+        return;
+      }
+      set(body, ...data.jobs.map((j) => {
+        const href = "#/job/" + encodeURIComponent(j.runner) + "/" + encodeURIComponent(j.id);
+        return h("tr", { class: "link", onclick: () => { location.hash = href; } },
+          h("td", {}, badge(j.state)),
+          h("td", {}, h("a", { href }, j.harness)),
+          h("td", {}, j.runner),
+          h("td", {}, fmtTime(j.started || j.created)),
+          h("td", {}, fmtDuration(j.started, j.finished)),
+          h("td", {}, fmtUsage(j.usage)),
+          h("td", {}, j.results && j.results.files > 0 ? plural(j.results.files, "file") : "–"),
+          h("td", { class: "detail" }, j.error || ""));
+      }));
+    } catch (err) {
+      fail(err);
+    }
+  };
+  await load();
+  every(3000, load);
+}
+
+async function jobView(runner, id) {
+  const head = h("div", { class: "head" });
+  const facts = h("dl", { class: "facts" });
+  const results = h("div");
+  const consoleText = h("pre", { class: "console" }, "Loading…");
+  show(head, h("div", { class: "card" }, facts), results, h("h2", {}, "Console"),
+    h("p", { class: "muted" }, "What the agent printed. Control characters are shown visibly."), consoleText);
+  const jobPath = "/api/runners/" + encodeURIComponent(runner) + "/jobs/" + encodeURIComponent(id);
+
+  const load = async () => {
+    let j;
+    try {
+      j = await api("GET", jobPath);
+    } catch (err) {
+      fail(err);
+      return;
+    }
+    const done = TERMINAL.has(j.state);
+    set(head,
+      h("div", {}, h("h1", {}, j.harness, " ", badge(j.state)), h("p", { class: "muted" }, "Job " + j.id + " on " + runner)),
+      h("div", { class: "actions" },
+        !done && h("button", { class: "danger", onclick: () => cancelJob(jobPath) }, "Stop this job"),
+        h("a", { class: "button", href: "#/jobs" }, "All jobs")));
+    set(facts,
+      h("dt", {}, "Created"), h("dd", {}, fmtTime(j.created)),
+      h("dt", {}, "Started"), h("dd", {}, fmtTime(j.started)),
+      h("dt", {}, "Finished"), h("dd", {}, fmtTime(j.finished)),
+      h("dt", {}, "Duration"), h("dd", {}, fmtDuration(j.started, j.finished)),
+      h("dt", {}, "Model usage"), h("dd", {}, j.usage
+        ? j.usage.inputTokens.toLocaleString() + " in / " + j.usage.outputTokens.toLocaleString() + " out" +
+          (j.usage.costKnown ? " ($" + j.usage.costUSD.toFixed(4) + ")" : "")
+        : "–"),
+      j.error && h("dt", {}, "Why it ended"), j.error && h("dd", {}, j.error));
+    set(results, ...resultsBlock(j, jobPath));
+    try {
+      const c = await api("GET", jobPath + "/console");
+      const atBottom = consoleText.scrollTop + consoleText.clientHeight >= consoleText.scrollHeight - 8;
+      consoleText.textContent = c.text || "(nothing yet)";
+      if (atBottom) consoleText.scrollTop = consoleText.scrollHeight;
+    } catch (err) {
+      consoleText.textContent = "Console unavailable: " + err.message;
+    }
+    if (done && refresh) {
+      clearInterval(refresh);
+      refresh = null;
+    }
+  };
+  await load();
+  every(2000, load);
+}
+
+function resultsBlock(j, jobPath) {
+  const r = j.results;
+  if (!r) {
+    return TERMINAL.has(j.state) ? [h("h2", {}, "Results"), h("p", { class: "muted" }, "This job handed nothing back.")] : [];
+  }
+  const out = [h("h2", {}, "Results")];
+  if (r.files > 0) {
+    out.push(h("p", {}, plural(r.files, "file") + ", " + fmtBytes(r.bytes) + ". ",
+      h("a", { class: "button", href: jobPath + "/results", download: j.id + "-results.tar" }, "Download (.tar)")),
+    h("p", { class: "muted" }, "Written by the agent: review it like any download before running anything in it."));
+  } else {
+    out.push(h("p", { class: "muted" }, "No files."));
+  }
+  if (r.error) out.push(h("div", { class: "error-box" }, "Problem: " + r.error));
+  if (r.skipped && r.skipped.length) {
+    out.push(h("p", { class: "muted" }, "Left out (only plain files and folders with safe names are kept):"),
+      h("ul", {}, r.skipped.map((s) => h("li", {}, h("code", {}, s)))));
+  }
+  return out;
+}
+
+async function cancelJob(jobPath) {
+  try {
+    await api("POST", jobPath + "/cancel");
+    say("Stopping the job…");
+  } catch (err) {
+    fail(err);
+  }
+}
+
+// --- harnesses ---
+
+async function harnessesView() {
+  const list = h("div", { class: "grid" });
+  show(
+    h("div", { class: "head" },
+      h("div", {}, h("h1", {}, "Harnesses"),
+        h("p", { class: "muted" }, "A harness is a task plus exactly what the agent may do. Saved on this computer.")),
+      h("div", { class: "actions" }, h("a", { class: "button primary", href: "#/new" }, "New harness"))),
+    list);
+  try {
+    const entries = await api("GET", "/api/harnesses");
+    if (entries.length === 0) {
+      list.replaceWith(h("div", { class: "empty" }, "No harnesses yet. ", h("a", { href: "#/new" }, "Create your first one.")));
+      return;
+    }
+    set(list, ...entries.map((e) =>
+      h("a", { class: "card", href: "#/harness/" + encodeURIComponent(e.name) },
+        h("h3", {}, e.name, " ", e.risk ? badge(e.risk + " risk", e.risk) : badge("invalid", "failed")),
+        h("p", { class: "muted" }, e.error || e.description || ""),
+        h("p", { class: "muted" }, [e.runtime, e.target].filter(Boolean).join(" · ")))));
+  } catch (err) {
+    fail(err);
+  }
+}
+
+async function harnessView(name) {
+  let doc = TEMPLATE;
+  if (name) {
+    try {
+      doc = (await api("GET", "/api/harnesses/" + encodeURIComponent(name))).yaml;
+    } catch (err) {
+      fail(err);
+      return;
+    }
+  }
+  const text = h("textarea", { class: "yaml", spellcheck: "false", "aria-label": "Harness (YAML)" });
+  text.value = doc;
+  const panel = h("div", { class: "card" });
+  const runBtn = h("button", { class: "primary", onclick: () => runDialog(text.value) }, "Run…");
+  const saveBtn = h("button", { onclick: () => save() }, "Save");
+  const del = name && h("button", { onclick: () => remove() }, "Delete");
+  show(
+    h("div", { class: "head" },
+      h("div", {}, h("h1", {}, name || "New harness"),
+        h("p", { class: "muted" }, "Edit the harness on the left; the right side says in plain words what it may do.")),
+      h("div", { class: "actions" }, saveBtn, runBtn, del, h("a", { class: "button", href: "#/harnesses" }, "Back"))),
+    h("div", { class: "editor" }, text, panel));
+
+  let timer = null;
+  let seq = 0;
+  const check = async () => {
+    const mine = ++seq;
+    try {
+      const c = await api("POST", "/api/check", { yaml: text.value });
+      if (mine !== seq) return;
+      set(panel, ...checkBlock(c));
+      runBtn.disabled = !c.valid;
+      saveBtn.disabled = !c.valid;
+    } catch (err) {
+      fail(err);
+    }
+  };
+  text.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(check, 300);
+  });
+  await check();
+
+  async function save() {
+    try {
+      const r = await api("PUT", "/api/harnesses", { yaml: text.value });
+      say("Saved " + r.name + ".");
+      if (r.name !== name) location.hash = "#/harness/" + encodeURIComponent(r.name);
+    } catch (err) {
+      fail(err);
+    }
+  }
+  async function remove() {
+    if (!confirm("Delete the harness " + name + "? Jobs that already ran are kept.")) return;
+    try {
+      await api("DELETE", "/api/harnesses/" + encodeURIComponent(name));
+      location.hash = "#/harnesses";
+    } catch (err) {
+      fail(err);
+    }
+  }
+}
+
+function checkBlock(c) {
+  if (!c.valid) {
+    return [h("h2", {}, "Not valid yet"), h("ul", { class: "explain errors" }, (c.errors || []).map((e) => h("li", {}, e)))];
+  }
+  return [
+    h("h2", {}, "What it may do"),
+    h("p", {}, "Risk: ", badge(c.risk, c.risk)),
+    (c.reasons || []).length > 0 && h("ul", { class: "explain" }, c.reasons.map((r) => h("li", {}, "Because it " + r))),
+    h("ul", { class: "explain" }, c.explain.map((l) => h("li", {}, l))),
+  ];
+}
+
+// runDialog shows exactly what will start and needs an explicit
+// confirmation; the server checks the same document again.
+async function runDialog(doc) {
+  let c;
+  let runners;
+  try {
+    [c, runners] = await Promise.all([api("POST", "/api/check", { yaml: doc }), api("GET", "/api/runners")]);
+  } catch (err) {
+    fail(err);
+    return;
+  }
+  if (!c.valid) {
+    say("Fix the harness first.", true);
+    return;
+  }
+  const usable = runners.filter((r) => r.status);
+  const select = h("select", { "aria-label": "Runner" }, usable.map((r) =>
+    h("option", { value: r.name, selected: r.status.target === c.target },
+      r.name + " (" + r.status.target + (r.status.killed ? ", stopped" : "") + ")")));
+  const ok = h("input", { type: "checkbox" });
+  const start = h("button", { class: "primary", disabled: true }, "Start");
+  const mismatch = h("div");
+  const updateMismatch = () => {
+    const r = usable.find((x) => x.name === select.value);
+    set(mismatch, r && r.status.target !== c.target
+      ? h("div", { class: "warn-box" }, "This harness is meant for \"" + c.target + "\", but this runner is \"" + r.status.target + "\". It will refuse it.")
+      : "");
+  };
+  select.addEventListener("change", updateMismatch);
+  ok.addEventListener("change", () => { start.disabled = !ok.checked || usable.length === 0; });
+  start.addEventListener("click", async () => {
+    start.disabled = true;
+    try {
+      const r = await api("POST", "/api/runs", { runner: select.value, yaml: doc, confirmed: true });
+      dialog.close();
+      location.hash = "#/job/" + encodeURIComponent(r.runner) + "/" + encodeURIComponent(r.id);
+    } catch (err) {
+      start.disabled = false;
+      set(mismatch, h("div", { class: "error-box" }, err.message));
+    }
+  });
+  set(dialog,
+    h("h1", {}, "Start " + c.name + "?"),
+    ...checkBlock(c),
+    usable.length === 0
+      ? h("div", { class: "error-box" }, "No runner is reachable. ", h("a", { href: "#/runners", onclick: () => dialog.close() }, "Check your runners."))
+      : h("label", {}, "Runner", select),
+    mismatch,
+    h("label", { class: "check" }, ok, "I have read what this harness may do, and I want to start it."),
+    h("div", { class: "actions" }, start, h("button", { onclick: () => dialog.close() }, "Cancel")));
+  updateMismatch();
+  dialog.showModal();
+}
+
+// --- runners ---
+
+async function runnersView() {
+  const list = h("div", { class: "grid" });
+  const name = h("input", { required: true, placeholder: "hcc-dev", pattern: "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?" });
+  const kind = h("select", {}, h("option", { value: "ssh" }, "over ssh"), h("option", { value: "socket" }, "on this computer"));
+  const where = h("input", { required: true, placeholder: "ssh host, e.g. hcc-dev" });
+  kind.addEventListener("change", () => {
+    where.placeholder = kind.value === "ssh" ? "ssh host, e.g. hcc-dev" : "/run/hcc/runner.sock";
+  });
+  const form = h("form", { class: "inline", onsubmit: async (ev) => {
+    ev.preventDefault();
+    const ref = { name: name.value };
+    ref[kind.value] = where.value;
+    try {
+      await api("POST", "/api/runners", ref);
+      say("Added runner " + ref.name + ".");
+      runnersView();
+    } catch (err) {
+      fail(err);
+    }
+  } }, h("label", {}, "Name", name), h("label", {}, "Reached", kind), h("label", {}, "Where", where), h("button", { class: "primary" }, "Add runner"));
+  show(
+    h("div", { class: "head" }, h("div", {}, h("h1", {}, "Runners"),
+      h("p", { class: "muted" }, "Machines that run harnesses. Runners enforce every limit themselves; this list only says how to reach them."))),
+    list,
+    h("h2", {}, "Add a runner"),
+    h("p", { class: "muted" }, "The runner must already be installed (see deploy/README.md). Over ssh, your own ssh configuration and keys are used."),
+    form);
+  const load = async () => {
+    try {
+      const runners = await api("GET", "/api/runners");
+      if (runners.length === 0) {
+        set(list, h("div", { class: "empty" }, "No runners yet. Add one below."));
+        return;
+      }
+      set(list, ...runners.map(runnerCard));
+    } catch (err) {
+      fail(err);
+    }
+  };
+  await load();
+  every(5000, load);
+}
+
+function runnerCard(r) {
+  const st = r.status;
+  const path = "/api/runners/" + encodeURIComponent(r.name);
+  const act = (what, msg) => async () => {
+    try {
+      await api("POST", path + "/" + what);
+      say(msg);
+      runnersView();
+    } catch (err) {
+      fail(err);
+    }
+  };
+  return h("div", { class: "card" },
+    h("h3", {}, r.name, " ", st ? (st.killed ? badge("stopped", "killed") : badge("ready", "succeeded")) : badge("unreachable", "failed")),
+    h("p", { class: "muted" }, r.ssh ? "ssh " + r.ssh : r.socket),
+    st && h("dl", { class: "facts" },
+      h("dt", {}, "Target"), h("dd", {}, st.target),
+      h("dt", {}, "Jobs"), h("dd", {}, st.running + " running, " + st.queued + " queued (at most " + st.maxConcurrent + " at once)"),
+      h("dt", {}, "Images"), h("dd", {}, st.images.join(", ")),
+      h("dt", {}, "Version"), h("dd", {}, st.version || "–")),
+    r.error && h("div", { class: "error-box" }, r.error),
+    h("div", { class: "actions" },
+      st && !st.killed && h("button", { class: "danger", onclick: act("kill", "Stopping every job on " + r.name + ".") }, "Stop all jobs"),
+      st && st.killed && h("button", { onclick: act("resume", r.name + " accepts jobs again.") }, "Accept jobs again"),
+      h("button", { onclick: async () => {
+        if (!confirm("Remove " + r.name + " from this list? The runner itself keeps running.")) return;
+        try {
+          await api("DELETE", path);
+          runnersView();
+        } catch (err) {
+          fail(err);
+        }
+      } }, "Remove")));
+}
+
+// --- kill switch ---
+
+document.getElementById("stop-all").addEventListener("click", async () => {
+  if (!confirm("Stop every job on every runner, and refuse new ones until you resume each runner?")) return;
+  try {
+    const res = await api("POST", "/api/kill");
+    const failed = res.filter((r) => r.error);
+    if (failed.length) {
+      say("Could NOT reach: " + failed.map((r) => r.name + " (" + r.error + ")").join(", ") + ". Jobs there may still run.", true);
+    } else {
+      say("Every runner is stopping its jobs and refusing new ones.");
+    }
+  } catch (err) {
+    fail(err);
+  }
+});
+
+// --- start ---
+
+async function start() {
+  try {
+    csrf = (await api("GET", "/api/session")).csrf;
+  } catch (err) {
+    fail(err);
+    return;
+  }
+  window.addEventListener("hashchange", route);
+  route();
+}
+
+start();

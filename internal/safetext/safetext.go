@@ -1,19 +1,24 @@
-package main
+// Package safetext shows text written by an agent (console output, file
+// names, messages that quote it) without letting it drive a terminal or
+// disguise itself: control characters, C1 controls, bidi overrides and
+// invalid UTF-8 are made visible.
+package safetext
 
 import (
 	"bufio"
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"unicode/utf8"
 )
 
-// writeSafe copies guest console output to a terminal. The output is
+// Write copies guest console output to a terminal. The output is
 // controlled by the agent, so control characters that a terminal would
 // act on (escape sequences can write the clipboard, retitle windows or
 // redraw lines to hide text) are shown visibly instead, like "cat -v".
 // Newlines and tabs pass through; "\r\n" becomes "\n".
-func writeSafe(dst io.Writer, src io.Reader) error {
+func Write(dst io.Writer, src io.Reader) error {
 	in := bufio.NewReader(src)
 	out := bufio.NewWriter(dst)
 	for {
@@ -56,4 +61,20 @@ func writeSafe(dst io.Writer, src io.Reader) error {
 
 func isBidiControl(r rune) bool {
 	return (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) || r == 0x200e || r == 0x200f || r == 0x061c
+}
+
+// Line neutralizes control characters in a one-line message (job errors
+// can quote what the agent sent). Newlines and tabs are shown too, so a
+// message cannot fake table rows or columns.
+func Line(s string) string {
+	var b strings.Builder
+	_ = Write(&b, strings.NewReader(s))
+	return strings.NewReplacer("\n", `\n`, "\t", `\t`).Replace(b.String())
+}
+
+// String is Write for a string (multi-line text such as a console log).
+func String(s string) string {
+	var b strings.Builder
+	_ = Write(&b, strings.NewReader(s))
+	return b.String()
 }

@@ -1,4 +1,4 @@
-package main
+package safetext
 
 import (
 	"strings"
@@ -24,7 +24,7 @@ func TestWriteSafe(t *testing.T) {
 	}
 	for name, tt := range tests {
 		var out strings.Builder
-		if err := writeSafe(&out, strings.NewReader(tt.in)); err != nil {
+		if err := Write(&out, strings.NewReader(tt.in)); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 		if out.String() != tt.want {
@@ -39,7 +39,7 @@ func TestWriteSafeLeavesNoRawEscapes(t *testing.T) {
 		b.WriteByte(byte(i))
 	}
 	var out strings.Builder
-	if err := writeSafe(&out, strings.NewReader(b.String())); err != nil {
+	if err := Write(&out, strings.NewReader(b.String())); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range out.String() {
@@ -49,9 +49,9 @@ func TestWriteSafeLeavesNoRawEscapes(t *testing.T) {
 	}
 }
 
-func TestSafeStringIsOneLine(t *testing.T) {
-	got := safeString("bad\njob-2  hello  succeeded\tx\x1b[2J")
+func TestLineIsOneLine(t *testing.T) {
+	got := Line("bad\njob-2  hello  succeeded\tx\x1b[2J")
 	if strings.ContainsAny(got, "\n\t\x1b") || got != `bad\njob-2  hello  succeeded\tx^[[2J` {
-		t.Errorf("safeString = %q", got)
+		t.Errorf("Line = %q", got)
 	}
 }

@@ -36,6 +36,9 @@ Jobs (on a local runner, or a remote one with --ssh HOST):
   kill                     kill switch: stop all jobs and refuse new ones
   resume                   accept jobs again after kill
 
+Control Center:
+  control serve [--listen 127.0.0.1:7878]   the web UI, on this computer only
+
 Runner:
   runner serve --config <file>   run the runner daemon
   runner stdio [--socket path]   relay stdin/stdout to the daemon (used over ssh)
@@ -66,6 +69,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdResults(rest, stdout, stderr)
 	case "runner":
 		return cmdRunner(rest, stdin, stdout, stderr)
+	case "control":
+		return cmdControl(rest, stdout, stderr)
 	case "version", "--version":
 		fmt.Fprintln(stdout, "hcc", version.String())
 		return exitOK

@@ -70,6 +70,8 @@ These are extension points (see [ADR-0002](adr/0002-plugin-system.md)):
 | `internal/results` | re-packs a guest's results archive into a safe one (ADR-0006) |
 | `internal/egress` | per-VM HTTPS (CONNECT) egress proxy enforcing the harness's network policy (ADR-0004); credential broker with a per-job CA (ADR-0005) |
 | `internal/credentials` | the broker's store: secrets bound to hosts and headers |
+| `internal/control` | Control Center: loopback web UI (embedded, no dependencies) and JSON API, runner list, harness library (ADR-0007) |
+| `internal/safetext` | shows agent-written text without letting it drive a terminal or disguise itself |
 | `internal/runnerd` | runner daemon: HTTP API on an owner-only Unix socket, client (Unix socket or ssh), size-capped console logs, job store and results |
 | `deploy/` | systemd unit and install script for runners |
 | `hack/firecracker-poc` | standalone proof of concept and e2e test assets |

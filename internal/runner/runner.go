@@ -483,6 +483,18 @@ func (r *Runner) Shutdown(ctx context.Context) error {
 	}
 }
 
+// Status reports the runner's configuration and load.
+func (r *Runner) Status() Status {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	images := slices.Clone(r.cfg.Images)
+	slices.Sort(images)
+	return Status{
+		Target: r.cfg.Target, Images: images, MaxConcurrent: r.cfg.MaxConcurrent, MaxDiskMiB: r.cfg.MaxDiskMiB,
+		Running: r.running, Queued: len(r.queue), Killed: r.killed,
+	}
+}
+
 // Get returns a snapshot of one job.
 func (r *Runner) Get(id string) (Job, bool) {
 	r.mu.Lock()

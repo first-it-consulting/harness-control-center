@@ -18,10 +18,12 @@ import (
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
+	"github.com/first-it-consulting/harness-control-center/internal/version"
 )
 
 // API routes (all under the Unix socket; there is no TCP listener).
 //
+//	GET  /v1/info               the runner's target, images, limits and load
 //	POST /v1/jobs               submit a harness (YAML body)
 //	GET  /v1/jobs               list jobs
 //	GET  /v1/jobs/{id}          one job
@@ -45,6 +47,7 @@ type Server struct {
 func NewServer(r *runner.Runner, stateDir string, log *slog.Logger) *Server {
 	s := &Server{r: r, stateDir: stateDir, log: log}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/info", s.info)
 	mux.HandleFunc("POST /v1/jobs", s.submit)
 	mux.HandleFunc("GET /v1/jobs", s.list)
 	mux.HandleFunc("GET /v1/jobs/{id}", s.get)
@@ -168,6 +171,12 @@ func (s *Server) submit(w http.ResponseWriter, req *http.Request) {
 		s.log.Info("job submitted", "job", id, "harness", h.Metadata.Name)
 		writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 	}
+}
+
+func (s *Server) info(w http.ResponseWriter, _ *http.Request) {
+	st := s.r.Status()
+	st.Version = version.Version
+	writeJSON(w, http.StatusOK, st)
 }
 
 func (s *Server) list(w http.ResponseWriter, _ *http.Request) {

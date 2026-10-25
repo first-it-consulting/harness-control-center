@@ -54,6 +54,19 @@ type Job struct {
 	Results *Results `json:"results,omitempty"`
 }
 
+// Status describes a runner.
+type Status struct {
+	Target        string   `json:"target"`
+	Images        []string `json:"images"`
+	MaxConcurrent int      `json:"maxConcurrent"`
+	MaxDiskMiB    int      `json:"maxDiskMiB"`
+	Running       int      `json:"running"`
+	Queued        int      `json:"queued"`
+	// Killed: the kill switch is engaged and new jobs are refused.
+	Killed  bool   `json:"killed"`
+	Version string `json:"version,omitempty"`
+}
+
 // Store persists jobs. Save is called with the runner's lock held, so it
 // must not call back into the runner.
 type Store interface {
