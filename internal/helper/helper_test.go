@@ -428,3 +428,39 @@ func TestRemoveFailsClosedOnUnsafeBase(t *testing.T) {
 		})
 	}
 }
+
+// Concurrent starts must not both pass the jail limit (one identity).
+func TestConcurrentStartsRespectTheJailLimit(t *testing.T) {
+	for range 20 {
+		e := newEnv(t)
+		e.cfg.Jailer.Identities = 1
+		for _, id := range []string{"job-1", "job-2"} {
+			dir := filepath.Join(e.stage, id)
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, n := range stagedFiles {
+				if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		codes := make(chan int, 2)
+		for _, id := range []string{"job-1", "job-2"} {
+			go func() {
+				var stderr bytes.Buffer
+				codes <- Main(e.cfg, []string{"start", "--id", id, "--slot", "0", "--cpus", "1", "--memory", "128"}, e.me, (&recorder{}).deps(), &stderr)
+			}()
+		}
+		ok := 0
+		for range 2 {
+			if <-codes == 0 {
+				ok++
+			}
+		}
+		entries, _ := os.ReadDir(filepath.Join(e.base, "firecracker"))
+		if ok != 1 || len(entries) != 1 {
+			t.Fatalf("%d starts succeeded and %d jails exist; want exactly 1 each", ok, len(entries))
+		}
+	}
+}

@@ -222,6 +222,18 @@ func buildJail(cfg Config, d Deps, base, id string) (err error) {
 	if err := checkRootOwnedDirs(parent, cfg.RootUID, cfg.TrustAnchor); err != nil {
 		return err
 	}
+	// Serialize jail building across helper processes, so the count and
+	// space checks below cannot be raced by concurrent starts. The lock is
+	// held until the copies are done (and dropped on exec at the latest:
+	// O_CLOEXEC).
+	lock, err := unix.Open(parent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(lock)
+	if err := unix.Flock(lock, unix.LOCK_EX); err != nil {
+		return fmt.Errorf("lock jails: %w", err)
+	}
 	// At most one jail per VM identity may exist; leftovers count, so a
 	// runner cannot pile up jails by starting many IDs.
 	entries, err := os.ReadDir(parent)
