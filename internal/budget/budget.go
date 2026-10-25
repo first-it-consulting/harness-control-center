@@ -1,0 +1,107 @@
+// Package budget meters a job's model usage against its harness's limits.
+// The egress proxy records the token counts it reads from model API
+// responses; once a limit is reached, further model requests are refused
+// and the job is stopped.
+package budget
+
+import (
+	"errors"
+	"fmt"
+	"sync"
+)
+
+// ErrExhausted is returned by Allow once a limit is reached.
+var ErrExhausted = errors.New("budget exhausted")
+
+// Limits are a job's budget. Zero means "no limit" for that dimension.
+type Limits struct {
+	MaxTokens  int64
+	MaxCostUSD float64
+}
+
+// Price is a model's price in USD per million tokens.
+type Price struct {
+	InputPerMTok  float64 `json:"input" yaml:"input"`
+	OutputPerMTok float64 `json:"output" yaml:"output"`
+}
+
+// Usage is what a job has used so far.
+type Usage struct {
+	InputTokens  int64   `json:"inputTokens"`
+	OutputTokens int64   `json:"outputTokens"`
+	CostUSD      float64 `json:"costUSD"`
+	// CostKnown is false when the model has no price: cost is then
+	// neither counted nor limited.
+	CostKnown bool `json:"costKnown"`
+}
+
+// Meter tracks one job. It is safe for concurrent use.
+type Meter struct {
+	limits     Limits
+	price      *Price
+	onExceeded func(reason string)
+
+	mu       sync.Mutex
+	usage    Usage
+	exceeded string
+}
+
+// New returns a meter. price may be nil (cost unknown). onExceeded is
+// called once, outside the meter's lock, when a limit is first reached.
+func New(limits Limits, price *Price, onExceeded func(reason string)) *Meter {
+	m := &Meter{limits: limits, price: price, onExceeded: onExceeded}
+	m.usage.CostKnown = price != nil
+	return m
+}
+
+// Allow reports whether another model request may be made.
+func (m *Meter) Allow() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.exceeded != "" {
+		return fmt.Errorf("%w: %s", ErrExhausted, m.exceeded)
+	}
+	return nil
+}
+
+// Record adds one response's token counts.
+func (m *Meter) Record(input, output int64) {
+	if input < 0 || output < 0 {
+		return
+	}
+	m.mu.Lock()
+	m.usage.InputTokens += input
+	m.usage.OutputTokens += output
+	if m.price != nil {
+		m.usage.CostUSD += float64(input)/1e6*m.price.InputPerMTok + float64(output)/1e6*m.price.OutputPerMTok
+	}
+	var reason string
+	if m.exceeded == "" {
+		total := m.usage.InputTokens + m.usage.OutputTokens
+		switch {
+		case m.limits.MaxTokens > 0 && total >= m.limits.MaxTokens:
+			reason = fmt.Sprintf("used %d of %d tokens", total, m.limits.MaxTokens)
+		case m.price != nil && m.limits.MaxCostUSD > 0 && m.usage.CostUSD >= m.limits.MaxCostUSD:
+			reason = fmt.Sprintf("spent $%.4f of $%.2f", m.usage.CostUSD, m.limits.MaxCostUSD)
+		}
+		m.exceeded = reason
+	}
+	m.mu.Unlock()
+	if reason != "" && m.onExceeded != nil {
+		m.onExceeded(reason)
+	}
+}
+
+// Usage returns a snapshot.
+func (m *Meter) Usage() Usage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.usage
+}
+
+// Exceeded returns why the budget is exhausted, or "".
+func (m *Meter) Exceeded() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.exceeded
+}

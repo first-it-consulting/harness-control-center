@@ -69,12 +69,16 @@ func (b *broker) serve(ctx context.Context, conn net.Conn) {
 			pr.Out.URL.Scheme = "https"
 			pr.Out.URL.Host = authority
 			pr.Out.Host = authority
-			// The guest cannot set, override or probe the credential.
-			pr.Out.Header.Del(b.cred.Header)
+			// The guest cannot set, override or probe the credential. (A
+			// brokered host without credential, e.g. a model endpoint that
+			// needs none, is brokered only to meter it.)
 			pr.Out.Header.Del("Proxy-Authorization")
-			pr.Out.Header.Set(b.cred.Header, b.cred.Value)
+			if b.cred.Header != "" {
+				pr.Out.Header.Del(b.cred.Header)
+				pr.Out.Header.Set(b.cred.Header, b.cred.Value)
+			}
 		},
-		Transport:     transport,
+		Transport:     &meteredTransport{base: transport, meter: b.p.Meter},
 		FlushInterval: -1, // stream (e.g. server-sent events) as it arrives
 		ErrorLog:      log.New(io.Discard, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -222,6 +226,7 @@ func (p *Proxy) forwardHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader
 		IdleConnTimeout:     90 * time.Second,
 	}
 	defer transport.CloseIdleConnections()
+	metered := &meteredTransport{base: transport, meter: p.Meter}
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 
@@ -235,10 +240,12 @@ func (p *Proxy) forwardHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader
 		for _, h := range hopHeaders {
 			out.Header.Del(h)
 		}
-		out.Header.Del(cred.Header)
-		out.Header.Set(cred.Header, cred.Value)
+		if cred.Header != "" {
+			out.Header.Del(cred.Header)
+			out.Header.Set(cred.Header, cred.Value)
+		}
 
-		resp, err := transport.RoundTrip(out)
+		resp, err := metered.RoundTrip(out)
 		if err != nil {
 			p.refuse(conn, http.StatusBadGateway, "upstream request failed", host, port, err)
 			return

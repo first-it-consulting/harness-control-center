@@ -228,9 +228,21 @@ func printJobs(w io.Writer, jobs []runner.Job) {
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "JOB\tHARNESS\tSTATE\tCREATED\tDETAIL")
+	fmt.Fprintln(tw, "JOB\tHARNESS\tSTATE\tCREATED\tTOKENS\tDETAIL")
 	for _, j := range jobs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", j.ID, j.Harness, j.State, j.Created.Local().Format("2006-01-02 15:04:05"), j.Error)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", j.ID, j.Harness, j.State, j.Created.Local().Format("2006-01-02 15:04:05"), formatUsage(j), j.Error)
 	}
 	_ = tw.Flush()
+}
+
+// formatUsage formats a job's metered model usage for the jobs table.
+func formatUsage(j runner.Job) string {
+	if j.Usage == nil {
+		return "-"
+	}
+	out := fmt.Sprintf("%d in / %d out", j.Usage.InputTokens, j.Usage.OutputTokens)
+	if j.Usage.CostKnown {
+		out += fmt.Sprintf(" ($%.4f)", j.Usage.CostUSD)
+	}
+	return out
 }

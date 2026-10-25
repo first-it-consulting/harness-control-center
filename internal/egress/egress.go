@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/budget"
 	"github.com/first-it-consulting/harness-control-center/internal/credentials"
 	"github.com/first-it-consulting/harness-control-center/internal/policy"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
@@ -65,6 +66,8 @@ type Proxy struct {
 	// UpstreamRoots verifies upstream servers when brokering (nil: the
 	// system roots).
 	UpstreamRoots *x509.CertPool
+	// Meter, if set, limits and records the job's brokered model usage.
+	Meter *budget.Meter
 	// Resolve, Dial and LocalAddrs are replaceable for tests.
 	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 	Dial    func(ctx context.Context, addr netip.AddrPort) (net.Conn, error)

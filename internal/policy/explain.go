@@ -88,8 +88,8 @@ func (e *Engine) Explain() []string {
 	p := s.Permissions
 	lines := []string{
 		fmt.Sprintf("Runs the %s agent on %s.", s.Runtime, describeTarget(s.Target)),
-		fmt.Sprintf("Stops after %s per run, or once it has spent $%.2f or %s tokens.",
-			s.Sandbox.Timeout, s.Budget.MaxCostUSD, groupDigits(s.Budget.MaxTokens)),
+		fmt.Sprintf("Stops after %s per run, or once its model has used %s tokens (or cost $%.2f, for models the runner has a price for).",
+			s.Sandbox.Timeout, groupDigits(s.Budget.MaxTokens), s.Budget.MaxCostUSD),
 	}
 
 	if m := s.Model; m != nil {

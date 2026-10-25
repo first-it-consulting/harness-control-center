@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/budget"
 	"github.com/first-it-consulting/harness-control-center/internal/credentials"
 	"github.com/first-it-consulting/harness-control-center/internal/policy"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
@@ -43,12 +44,18 @@ type seenRequest struct {
 
 func startHTTPBroker(t *testing.T) (proxy string, seen chan seenRequest, logs *lockedLog) {
 	t.Helper()
+	return startHTTPBrokerWith(t, nil)
+}
+
+func startHTTPBrokerWith(t *testing.T, meter *budget.Meter) (proxy string, seen chan seenRequest, logs *lockedLog) {
+	t.Helper()
 	seen = make(chan seenRequest, 8)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		seen <- seenRequest{host: r.Host, path: r.URL.Path, key: strings.Join(r.Header.Values("X-Api-Key"), ","), body: len(b)}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: hello\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":60,\"output_tokens\":50}}\n\n")
 	}))
 	t.Cleanup(upstream.Close)
 	h, err := spec.Parse([]byte(httpHarness))
@@ -73,6 +80,7 @@ func startHTTPBroker(t *testing.T) (proxy string, seen chan seenRequest, logs *l
 			return d.DialContext(ctx, "tcp", upstream.Listener.Addr().String())
 		},
 		LocalAddrs: func() ([]netip.Addr, error) { return nil, nil },
+		Meter:      meter,
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -112,7 +120,7 @@ func TestHTTPBrokerForwardsWithCredential(t *testing.T) {
 	resp := send(t, c, br, fmt.Sprintf("POST http://llm.example:4000/v1/messages HTTP/1.1\r\nHost: evil.example\r\nX-Api-Key: guessed\r\nContent-Length: %d\r\n\r\n%s", len(body), body))
 	got, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != 200 || string(got) != "data: hello\n\n" {
+	if resp.StatusCode != 200 || !strings.HasPrefix(string(got), "data: hello\n\n") {
 		t.Fatalf("response %d %q", resp.StatusCode, got)
 	}
 	r := <-seen
@@ -181,5 +189,44 @@ func TestSchemesDoNotMix(t *testing.T) {
 	case r := <-seen:
 		t.Errorf("brokered over CONNECT: %+v", r)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestBudgetStopsModelRequests(t *testing.T) {
+	var exceeded []string
+	meter := budget.New(budget.Limits{MaxTokens: 100}, nil, func(r string) { exceeded = append(exceeded, r) })
+	proxy, seen, _ := startHTTPBrokerWith(t, meter)
+	c, err := net.Dial("tcp", proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	br := bufio.NewReader(c)
+
+	resp := send(t, c, br, "POST http://llm.example:4000/v1/messages HTTP/1.1\r\nHost: llm.example:4000\r\nContent-Length: 2\r\n\r\n{}")
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	<-seen
+	if resp.StatusCode != 200 {
+		t.Fatalf("first request: %d", resp.StatusCode)
+	}
+	if u := meter.Usage(); u.InputTokens != 60 || u.OutputTokens != 50 {
+		t.Errorf("usage = %+v, want 60/50 from the stream", u)
+	}
+	if len(exceeded) != 1 || !strings.Contains(exceeded[0], "110 of 100 tokens") {
+		t.Errorf("onExceeded = %v", exceeded)
+	}
+
+	resp = send(t, c, br, "POST http://llm.example:4000/v1/messages HTTP/1.1\r\nHost: llm.example:4000\r\nContent-Length: 2\r\n\r\n{}")
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests || !strings.Contains(string(body), "budget exhausted") {
+		t.Errorf("second request: %d %q", resp.StatusCode, body)
+	}
+	select {
+	case r := <-seen:
+		t.Errorf("request beyond the budget reached upstream: %+v", r)
+	default:
 	}
 }

@@ -68,6 +68,21 @@ omlx:
   secretFile: /etc/hcc/secrets/omlx
 ```
 
+## Budgets and prices
+
+Every job's model traffic is metered at the egress proxy; `hcc jobs`
+shows the tokens used. `budget.maxTokens` always applies. `budget.maxCostUSD`
+applies only to models the runner has a price for (USD per million
+tokens) in `/etc/hcc/runner.yaml`:
+
+```yaml
+pricing:
+  claude-sonnet-5-5: {input: 3, output: 15}
+```
+
+A job that reaches its budget is stopped and ends `over_budget`; a limit
+can be overshot by at most one request.
+
 ## Images
 
 | Image | Contents | Use |

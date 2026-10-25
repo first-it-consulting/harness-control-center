@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/budget"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
@@ -528,7 +529,7 @@ func TestNetworkGetsPerJobProxy(t *testing.T) {
 	r, err := New(Config{
 		Provider: p,
 		Images:   []string{"base"},
-		Egress: func(h *spec.Harness, jobID string) (sandbox.Proxy, error) {
+		Egress: func(h *spec.Harness, jobID string, _ *budget.Meter) (sandbox.Proxy, error) {
 			asked = append(asked, h.Metadata.Name+"/"+jobID)
 			return nopProxy{job: jobID}, nil
 		},
@@ -565,7 +566,7 @@ func TestEgressFactoryErrorRejectsJob(t *testing.T) {
 	r, err := New(Config{
 		Provider: newFakeProvider(),
 		Images:   []string{"base"},
-		Egress:   func(*spec.Harness, string) (sandbox.Proxy, error) { return nil, errors.New("no subnet") },
+		Egress:   func(*spec.Harness, string, *budget.Meter) (sandbox.Proxy, error) { return nil, errors.New("no subnet") },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -591,7 +592,7 @@ func TestTaskReachesTheSandbox(t *testing.T) {
 	r, err := New(Config{
 		Provider: p,
 		Images:   []string{"base"},
-		Egress:   func(*spec.Harness, string) (sandbox.Proxy, error) { return nopProxy{}, nil },
+		Egress:   func(*spec.Harness, string, *budget.Meter) (sandbox.Proxy, error) { return nopProxy{}, nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -664,5 +665,63 @@ func TestResultWatcherAcrossWrites(t *testing.T) {
 	}
 	if w.exitCode() != 42 {
 		t.Errorf("exitCode = %d, want 42", w.exitCode())
+	}
+}
+
+// budgetProvider runs until cancelled; the test drives the job's meter
+// itself (standing in for the egress proxy).
+type budgetProvider struct{}
+
+func (budgetProvider) Name() string { return "budget" }
+func (p budgetProvider) Run(ctx context.Context, _ sandbox.Spec, _ io.Writer) (sandbox.Result, error) {
+	<-ctx.Done()
+	return sandbox.Result{Outcome: sandbox.OutcomeKilled}, nil
+}
+
+func TestBudgetStopsTheJob(t *testing.T) {
+	meters := make(chan *budget.Meter, 1)
+	r, err := New(Config{
+		Provider: budgetProvider{},
+		Images:   []string{"base"},
+		Egress: func(_ *spec.Harness, _ string, m *budget.Meter) (sandbox.Proxy, error) {
+			meters <- m
+			return nopProxy{}, nil
+		},
+		Pricing: map[string]budget.Price{"m1": {InputPerMTok: 3, OutputPerMTok: 15}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Shutdown(context.Background()) }()
+	id, err := r.Submit(harness(t, `  model: {name: m1, endpoint: 'https://api.example', credential: k}
+  budget: {maxTokens: 1000, maxCostUSD: 5}
+  permissions:
+    credentials: [k]
+    network: {egress: [{host: api.example}]}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, r, id, StateRunning)
+	m := <-meters
+	m.Record(600, 100)
+	if j, _ := r.Get(id); j.Usage == nil || j.Usage.InputTokens != 600 || !j.Usage.CostKnown {
+		t.Errorf("usage while running = %+v", j.Usage)
+	}
+	m.Record(200, 100) // 1000 tokens: the budget
+	j := waitState(t, r, id, StateOverBudget)
+	if !strings.Contains(j.Error, "budget exceeded: used 1000 of 1000 tokens") {
+		t.Errorf("error = %q", j.Error)
+	}
+	if j.Usage == nil || j.Usage.CostUSD <= 0 {
+		t.Errorf("final usage = %+v", j.Usage)
+	}
+}
+
+func TestOfflineJobsHaveNoMeter(t *testing.T) {
+	r := newRunner(t, newFakeProvider(), 1)
+	id, _ := r.Submit(harness(t, ""))
+	if j := waitState(t, r, id, StateSucceeded); j.Usage != nil {
+		t.Errorf("offline job has usage %+v", j.Usage)
 	}
 }

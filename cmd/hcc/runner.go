@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/budget"
 	"github.com/first-it-consulting/harness-control-center/internal/credentials"
 	"github.com/first-it-consulting/harness-control-center/internal/egress"
 	"github.com/first-it-consulting/harness-control-center/internal/policy"
@@ -101,6 +102,7 @@ func serve(configPath string, log *slog.Logger) error {
 		Images:        images,
 		MaxConcurrent: cfg.MaxConcurrent,
 		Console:       runnerd.ConsoleFunc(cfg.StateDir, log),
+		Pricing:       cfg.Pricing,
 	}
 	if netCfg != nil {
 		rcfg.Egress = egressFactory(netCfg, cfg.Credentials, log)
@@ -135,8 +137,10 @@ func serve(configPath string, log *slog.Logger) error {
 // egressFactory builds each networked job's proxy from that job's own
 // harness. The sandboxes' subnet is never a valid destination. Granted
 // credentials are loaded fresh for every job and get a CA of their own.
-func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slog.Logger) func(*spec.Harness, string) (sandbox.Proxy, error) {
-	return func(h *spec.Harness, jobID string) (sandbox.Proxy, error) {
+// The model endpoint is always brokered, so the job's budget can be
+// metered and enforced there.
+func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slog.Logger) func(*spec.Harness, string, *budget.Meter) (sandbox.Proxy, error) {
+	return func(h *spec.Harness, jobID string, meter *budget.Meter) (sandbox.Proxy, error) {
 		engine, err := policy.New(h)
 		if err != nil {
 			return nil, err
@@ -147,22 +151,27 @@ func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slo
 			Blocked:      []netip.Prefix{netCfg.Subnet},
 			JobID:        jobID,
 			Log:          log,
+			Meter:        meter,
 		}
-		if len(h.Spec.Permissions.Credentials) == 0 {
-			return p, nil
+		byHost := map[string]credentials.Credential{}
+		if len(h.Spec.Permissions.Credentials) > 0 {
+			if credsPath == "" {
+				return nil, errors.New("this runner has no credentials configured")
+			}
+			store, err := credentials.Load(credsPath)
+			if err != nil {
+				return nil, err
+			}
+			if byHost, err = credentials.ForHarness(store, h, func(host string, port int) bool {
+				return engine.CheckEgress(host, port).Allowed
+			}); err != nil {
+				return nil, err
+			}
 		}
-		if credsPath == "" {
-			return nil, errors.New("this runner has no credentials configured")
-		}
-		store, err := credentials.Load(credsPath)
-		if err != nil {
-			return nil, err
-		}
-		byHost, err := credentials.ForHarness(store, h, func(host string, port int) bool {
-			return engine.CheckEgress(host, port).Allowed
-		})
-		if err != nil {
-			return nil, err
+		if m := h.Spec.Model; m != nil {
+			if err := brokerModel(byHost, m); err != nil {
+				return nil, err
+			}
 		}
 		var hosts, tlsHosts []string
 		for host, c := range byHost {
@@ -171,15 +180,38 @@ func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slo
 				tlsHosts = append(tlsHosts, host)
 			}
 		}
-		if len(tlsHosts) > 0 { // plain-http credentials need no CA
+		if len(tlsHosts) > 0 { // plain-http hosts need no CA
 			if p.CA, err = egress.NewCA(tlsHosts, time.Now()); err != nil {
 				return nil, err
 			}
 		}
 		p.Credentials = byHost
-		log.Info("credentials granted", "job", jobID, "credentials", h.Spec.Permissions.Credentials, "hosts", hosts)
+		log.Info("egress prepared", "job", jobID, "credentials", h.Spec.Permissions.Credentials, "brokered", hosts)
 		return p, nil
 	}
+}
+
+// brokerModel makes sure the model endpoint is brokered: with its
+// credential if it names one (which must be for exactly that endpoint),
+// otherwise without any (metering only). A plain-http endpoint always
+// needs a credential: only the operator can allow plain HTTP.
+func brokerModel(byHost map[string]credentials.Credential, m *spec.Model) error {
+	scheme, host, port := m.EndpointHostPort()
+	c, ok := byHost[host]
+	switch {
+	case ok && (c.Scheme != scheme || c.Port != port):
+		return fmt.Errorf("model endpoint %s://%s:%d does not match its host's credential %q (%s://%s:%d)", scheme, host, port, c.Name, c.Scheme, host, c.Port)
+	case ok && m.Credential != "" && c.Name != m.Credential:
+		return fmt.Errorf("model endpoint %s is covered by credential %q, not %q", host, c.Name, m.Credential)
+	case ok:
+		return nil
+	case m.Credential != "":
+		return fmt.Errorf("credential %q is not for the model endpoint %s", m.Credential, host)
+	case scheme == "http":
+		return fmt.Errorf("plain-http model endpoint %s needs a credential configured with scheme http on the runner", host)
+	}
+	byHost[host] = credentials.Credential{Name: "model", Hosts: []string{host}, Scheme: scheme, Port: port}
+	return nil
 }
 
 func cmdStdio(args []string, stdin io.Reader, stdout, stderr io.Writer) int {

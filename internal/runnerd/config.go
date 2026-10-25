@@ -16,6 +16,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/first-it-consulting/harness-control-center/internal/budget"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox/firecracker"
 )
 
@@ -45,6 +46,9 @@ type Config struct {
 	// internal/credentials). Root-owned, readable by the runner's group
 	// only; re-read for every job.
 	Credentials string `yaml:"credentials"`
+	// Pricing gives models a price in USD per million tokens, so that
+	// budget.maxCostUSD can be enforced for them.
+	Pricing map[string]budget.Price `yaml:"pricing"`
 }
 
 // NetworkSection configures sandbox links and the egress proxy.
@@ -187,6 +191,11 @@ func (c *Config) Validate() error {
 	}
 	if _, err := c.NetworkConfig(); err != nil {
 		errs = append(errs, err)
+	}
+	for model, p := range c.Pricing {
+		if p.InputPerMTok < 0 || p.OutputPerMTok < 0 || p.InputPerMTok > 1e4 || p.OutputPerMTok > 1e4 {
+			add("pricing for %q must be between 0 and 10000 USD per million tokens", model)
+		}
 	}
 	if c.Credentials != "" {
 		if !cleanAbs(c.Credentials) {

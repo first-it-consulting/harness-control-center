@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"slices"
 	"time"
+
+	"github.com/first-it-consulting/harness-control-center/internal/budget"
 )
 
 // State is a job's lifecycle state.
@@ -18,12 +20,15 @@ const (
 	StateFailed       State = "failed"
 	StateTimedOut     State = "timed_out"
 	StateCancelled    State = "cancelled"
+	// StateOverBudget: stopped because its model usage reached the
+	// harness's budget.
+	StateOverBudget State = "over_budget"
 )
 
 var transitions = map[State][]State{
 	StateQueued:       {StateProvisioning, StateCancelled},
 	StateProvisioning: {StateRunning, StateFailed, StateCancelled},
-	StateRunning:      {StateSucceeded, StateFailed, StateTimedOut, StateCancelled},
+	StateRunning:      {StateSucceeded, StateFailed, StateTimedOut, StateCancelled, StateOverBudget},
 }
 
 // Terminal reports whether no further transition is possible.
@@ -42,6 +47,8 @@ type Job struct {
 	Created  time.Time `json:"created"`
 	Started  time.Time `json:"started,omitzero"`  // zero until running
 	Finished time.Time `json:"finished,omitzero"` // zero until terminal
+	// Usage is the job's metered model usage (jobs with network access).
+	Usage *budget.Usage `json:"usage,omitempty"`
 }
 
 // Event reports a state change. Events are the runner's observability

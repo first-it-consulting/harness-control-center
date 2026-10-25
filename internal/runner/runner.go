@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/budget"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
@@ -51,8 +52,13 @@ type Config struct {
 	// job ends.
 	Console func(jobID string) io.Writer
 	// Egress returns the egress proxy for a job whose harness grants
-	// network access. Without it, such harnesses are rejected.
-	Egress func(h *spec.Harness, jobID string) (sandbox.Proxy, error)
+	// network access; the proxy enforces meter (the job's budget) for the
+	// model traffic it brokers. Without it, such harnesses are rejected.
+	Egress func(h *spec.Harness, jobID string, meter *budget.Meter) (sandbox.Proxy, error)
+	// Pricing gives models a price (USD per million tokens), so that
+	// budget.maxCostUSD can be enforced for them; unpriced models are
+	// limited by tokens only.
+	Pricing map[string]budget.Price
 	// Now and NewID are injectable for tests.
 	Now   func() time.Time
 	NewID func() string
@@ -64,6 +70,9 @@ type job struct {
 	cancel  context.CancelFunc
 	spec    sandbox.Spec
 	history []Event // every event of this job, oldest first (at most one per state)
+	meter   *budget.Meter
+	// overBudget is why the meter stopped the job, if it did.
+	overBudget string
 }
 
 // Runner runs jobs. It is safe for concurrent use.
@@ -149,9 +158,15 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 		return "", ErrKilled
 	}
 	id := r.cfg.NewID()
-	var network *sandbox.Network
+	var (
+		network *sandbox.Network
+		meter   *budget.Meter
+		j       *job
+	)
 	if needsNet {
-		proxy, err := r.cfg.Egress(h, id)
+		meter = budget.New(budget.Limits{MaxTokens: h.Spec.Budget.MaxTokens, MaxCostUSD: h.Spec.Budget.MaxCostUSD},
+			r.price(h), func(reason string) { r.stopOverBudget(j, reason) })
+		proxy, err := r.cfg.Egress(h, id, meter)
 		if err != nil {
 			r.mu.Unlock()
 			return "", fmt.Errorf("runner: egress proxy: %w", err)
@@ -159,12 +174,10 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 		network = &sandbox.Network{Proxy: proxy}
 	}
 	ctx, cancel := context.WithCancel(r.root)
-	j := &job{
+	j = &job{
 		Job:    Job{ID: id, Harness: h.Metadata.Name, State: StateQueued, Created: r.cfg.Now()},
 		ctx:    ctx,
 		cancel: cancel,
-		// spec.sandbox.diskMiB needs no mapping: the sandbox has no
-		// writable disk, so it can never use more than allowed.
 		spec: sandbox.Spec{
 			ID:        id,
 			Image:     h.Spec.Sandbox.Image,
@@ -174,6 +187,7 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 			Timeout:   h.Spec.Sandbox.Timeout.Duration,
 			Network:   network,
 		},
+		meter: meter,
 	}
 	r.jobs[id] = j
 	r.queue = append(r.queue, j)
@@ -235,6 +249,8 @@ func (r *Runner) execute(j *job) {
 		r.transition(j, StateSucceeded, "")
 	case res.Outcome == sandbox.OutcomeTimedOut:
 		r.transition(j, StateTimedOut, fmt.Sprintf("stopped after %s", j.spec.Timeout))
+	case res.Outcome == sandbox.OutcomeKilled && r.overBudgetReason(j) != "":
+		r.transition(j, StateOverBudget, "budget exceeded: "+r.overBudgetReason(j))
 	case res.Outcome == sandbox.OutcomeKilled:
 		r.transition(j, StateCancelled, "stopped")
 	default:
@@ -346,7 +362,46 @@ func (r *Runner) Get(id string) (Job, bool) {
 	if !ok {
 		return Job{}, false
 	}
-	return j.Job, true
+	return j.snapshot(), true
+}
+
+func (j *job) snapshot() Job {
+	s := j.Job
+	if j.meter != nil {
+		u := j.meter.Usage()
+		s.Usage = &u
+	}
+	return s
+}
+
+// price is the price of h's model, if the runner knows it.
+func (r *Runner) price(h *spec.Harness) *budget.Price {
+	if h.Spec.Model == nil {
+		return nil
+	}
+	if p, ok := r.cfg.Pricing[h.Spec.Model.Name]; ok {
+		return &p
+	}
+	return nil
+}
+
+// stopOverBudget stops a job whose budget is exhausted.
+func (r *Runner) stopOverBudget(j *job, reason string) {
+	if j == nil {
+		return
+	}
+	r.mu.Lock()
+	if j.overBudget == "" {
+		j.overBudget = reason
+	}
+	r.mu.Unlock()
+	j.cancel()
+}
+
+func (r *Runner) overBudgetReason(j *job) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return j.overBudget
 }
 
 // List returns snapshots of all jobs, oldest first.
@@ -354,7 +409,7 @@ func (r *Runner) List() []Job {
 	r.mu.Lock()
 	out := make([]Job, 0, len(r.jobs))
 	for _, j := range r.jobs {
-		out = append(out, j.Job)
+		out = append(out, j.snapshot())
 	}
 	r.mu.Unlock()
 	slices.SortStableFunc(out, func(a, b Job) int { return a.Created.Compare(b.Created) })
