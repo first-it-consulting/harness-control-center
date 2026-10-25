@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -291,4 +292,40 @@ func mustParse(tb testing.TB, doc string) *spec.Harness {
 		tb.Fatal(err)
 	}
 	return h
+}
+
+const modelHarness = base + `
+  model:
+    name: Ornith-1.5-35B-A3B-MLX
+    endpoint: http://llm.example:4000
+    credential: llm
+  permissions:
+    credentials: [llm]
+    network:
+      allowPrivateNetworks: true
+      egress:
+        - host: llm.example
+          ports: [4000]
+`
+
+func TestModelEndpointMustBeAllowed(t *testing.T) {
+	e := mustEngine(t, modelHarness)
+	risk, why := e.Risk()
+	if risk != RiskHigh || !slices.Contains(why, "talks to its model unencrypted (http)") {
+		t.Errorf("risk %v %v", risk, why)
+	}
+	explained := strings.Join(e.Explain(), "\n")
+	for _, want := range []string{"Uses the model Ornith-1.5-35B-A3B-MLX at http://llm.example:4000, authenticated with llm.", "UNENCRYPTED"} {
+		if !strings.Contains(explained, want) {
+			t.Errorf("explanation missing %q:\n%s", want, explained)
+		}
+	}
+	notAllowed := strings.Replace(modelHarness, "ports: [4000]", "ports: [443]", 1)
+	h, err := spec.Parse([]byte(notAllowed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(h); err == nil || !strings.Contains(err.Error(), "not in the egress allowlist") {
+		t.Errorf("New with unreachable model endpoint = %v", err)
+	}
 }

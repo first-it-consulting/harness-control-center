@@ -67,6 +67,9 @@ gitlab-main:
 	if a.Value != testSecret || a.Hosts[0] != "api.anthropic.com" || a.Header != "x-api-key" {
 		t.Errorf("anthropic = %#v / %q", a, a.Hosts)
 	}
+	if a.Scheme != "https" || a.Port != 443 {
+		t.Errorf("anthropic defaults = %s:%d", a.Scheme, a.Port)
+	}
 	if g := creds["gitlab-main"]; g.Value != "Bearer glpat-xyz" {
 		t.Errorf("gitlab value not prefixed")
 	}
@@ -97,6 +100,8 @@ func TestLoadRejects(t *testing.T) {
 		"prefix injection":      {fmt.Sprintf("a: {hosts: [x.example], header: x-k, prefix: \"a\\r\\nb\", secretFile: %s}", good), "control characters"},
 		"relative secret file":  {"a: {hosts: [x.example], header: x-k, secretFile: secret}", "absolute"},
 		"unknown field":         {fmt.Sprintf("a: {hosts: [x.example], header: x-k, secretFile: %s, value: oops}", good), "not found"},
+		"bad scheme":            {fmt.Sprintf("a: {hosts: [x.example], scheme: ftp, header: x-k, secretFile: %s}", good), "scheme"},
+		"bad port":              {fmt.Sprintf("a: {hosts: [x.example], port: 70000, header: x-k, secretFile: %s}", good), "port"},
 		"bad name":              {fmt.Sprintf("A_B: {hosts: [x.example], header: x-k, secretFile: %s}", good), "invalid name"},
 	}
 	for name, tt := range tests {
@@ -121,9 +126,9 @@ func TestLoadRejects(t *testing.T) {
 
 func TestForHarness(t *testing.T) {
 	store := map[string]Credential{
-		"anthropic": {Name: "anthropic", Hosts: []string{"api.anthropic.com"}, Header: "x-api-key", Value: "s1"},
-		"gitlab":    {Name: "gitlab", Hosts: []string{"gitlab.com"}, Header: "Authorization", Value: "s2"},
-		"dup":       {Name: "dup", Hosts: []string{"api.anthropic.com"}, Header: "x-other", Value: "s3"},
+		"anthropic": {Name: "anthropic", Hosts: []string{"api.anthropic.com"}, Scheme: "https", Port: 443, Header: "x-api-key", Value: "s1"},
+		"gitlab":    {Name: "gitlab", Hosts: []string{"gitlab.com"}, Scheme: "https", Port: 443, Header: "Authorization", Value: "s2"},
+		"dup":       {Name: "dup", Hosts: []string{"api.anthropic.com"}, Scheme: "https", Port: 443, Header: "x-other", Value: "s3"},
 	}
 	harness := func(creds, egress string) *spec.Harness {
 		t.Helper()
@@ -165,5 +170,34 @@ spec:
 		if _, err := ForHarness(store, h, check(h)); err == nil || !strings.Contains(err.Error(), tt.want) {
 			t.Errorf("%s: %v, want %q", name, err, tt.want)
 		}
+	}
+}
+
+func TestPlainHTTPCredential(t *testing.T) {
+	s := newStore(t)
+	sec := s.secret(t, "omlx", testSecret, 0o640)
+	creds, err := Load(s.file(t, fmt.Sprintf("omlx: {hosts: [llm.example], scheme: http, port: 4000, header: x-api-key, secretFile: %s}", sec)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := creds["omlx"]; c.Scheme != "http" || c.Port != 4000 {
+		t.Errorf("credential = %v", c)
+	}
+	h, err := spec.Parse([]byte(`apiVersion: hcc/v1alpha1
+kind: Harness
+metadata: {name: t}
+spec:
+  runtime: claude-code
+  prompt: p
+  permissions:
+    credentials: [omlx]
+    network: {egress: [{host: llm.example, ports: [4000]}]}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ := policy.New(h)
+	if _, err := ForHarness(creds, h, func(host string, port int) bool { return e.CheckEgress(host, port).Allowed }); err != nil {
+		t.Errorf("ForHarness: %v", err)
 	}
 }

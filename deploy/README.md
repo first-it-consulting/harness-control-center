@@ -55,6 +55,30 @@ A harness then grants it with `permissions.credentials: [anthropic]` and
 must allow `api.anthropic.com` in its egress. Changes apply to the next
 job.
 
+A local inference server that speaks plain HTTP (e.g. oMLX, Ollama) needs
+`scheme: http` and its `port`; the key then crosses your network
+unencrypted:
+
+```yaml
+omlx:
+  hosts: [llm.fritz.box]
+  scheme: http
+  port: 4000
+  header: x-api-key
+  secretFile: /etc/hcc/secrets/omlx
+```
+
+## Images
+
+| Image | Contents | Use |
+|---|---|---|
+| `base` | Alpine minirootfs | tests (boot, stop, network guard) |
+| `claude-code` | Alpine, Claude Code (native musl build, pinned version and sha512), bash, git, jq, ripgrep | `runtime: claude-code` harnesses with `sandbox.image: claude-code` |
+
+Claude Code runs as the unprivileged user `agent` with its home and
+workspace in memory, and prints its result between `HCC-RESULT-BEGIN` and
+`HCC-RESULT-END exit=<status>` (a non-zero status fails the job).
+
 ## Testing an installation
 
 ```sh

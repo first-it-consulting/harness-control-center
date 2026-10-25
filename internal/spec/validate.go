@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"math"
 	"net/netip"
+	"net/url"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -16,7 +19,7 @@ var (
 	packageRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9._+-]{0,127}(@[A-Za-z0-9._-]{1,64})?$`)
 	actionRe     = regexp.MustCompile(`^[a-z0-9_-]+(\.[a-z0-9_-]+)*(\.\*)?$`)
 	cronFieldRe  = regexp.MustCompile(`^[0-9*/,-]+$`)
-	privateNames = []string{".localhost", ".local", ".internal", ".lan", ".home.arpa", ".corp"}
+	privateNames = []string{".localhost", ".local", ".internal", ".lan", ".home.arpa", ".corp", ".fritz.box"}
 )
 
 // FieldError reports a problem with one field, addressed by its YAML path.
@@ -58,6 +61,9 @@ func (h *Harness) Validate() error {
 	validateTrigger(&s.Trigger, add)
 	validateSandbox(&s.Sandbox, add)
 	validatePermissions(&s.Permissions, add)
+	if s.Model != nil {
+		validateModel(s.Model, &s.Permissions, add)
+	}
 	validateBudget(&s.Budget, add)
 	for i, a := range s.Approvals.RequireFor {
 		if !actionRe.MatchString(a) {
@@ -132,6 +138,40 @@ func validatePermissions(p *Permissions, add addFunc) {
 	checkUnique(add, "spec.permissions.credentials", p.Credentials, nameRe, "a credential name")
 	checkUnique(add, "spec.permissions.tools.install", p.Tools.Install, packageRe, "a package name, optionally with @version")
 	checkRange(add, "spec.permissions.subagents.max", p.Subagents.Max, 0, MaxSubagents)
+}
+
+var (
+	modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
+	urlPathRe   = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)*/?$`)
+)
+
+func validateModel(m *Model, p *Permissions, add addFunc) {
+	if !modelNameRe.MatchString(m.Name) {
+		add("spec.model.name", "invalid model name %q", m.Name)
+	}
+	u, err := url.Parse(m.Endpoint)
+	switch {
+	case err != nil:
+		add("spec.model.endpoint", "invalid URL: %v", err)
+		return
+	case u.Scheme != "https" && u.Scheme != "http":
+		add("spec.model.endpoint", "must be an http:// or https:// URL")
+	case u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "":
+		add("spec.model.endpoint", "must not contain credentials, a query or a fragment")
+	case !urlPathRe.MatchString(u.EscapedPath()):
+		add("spec.model.endpoint", "invalid path %q", u.Path)
+	}
+	if err := ValidateEgressHost(NormalizeHost(u.Hostname()), p.Network.AllowPrivateNetworks); err != nil {
+		add("spec.model.endpoint", "%v", err)
+	}
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			add("spec.model.endpoint", "invalid port %q", port)
+		}
+	}
+	if m.Credential != "" && !slices.Contains(p.Credentials, m.Credential) {
+		add("spec.model.credential", "%q is not in permissions.credentials", m.Credential)
+	}
 }
 
 func validateBudget(b *Budget, add addFunc) {

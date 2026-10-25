@@ -25,7 +25,7 @@ IMAGES=$LIB/images
 
 [[ $TARGET =~ ^server:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { echo "invalid target: $TARGET" >&2; exit 1; }
 [[ $(id -u) -ne 0 ]] || { echo "run as an admin user with sudo, not as root" >&2; exit 1; }
-for tool in /usr/sbin/ip /usr/sbin/nft; do
+for tool in /usr/sbin/ip /usr/sbin/nft /usr/bin/openssl; do
 	[[ -x $tool ]] || { echo "missing $tool (iproute2, nftables)" >&2; exit 1; }
 done
 for f in firecracker jailer vmlinux alpine-minirootfs.tar.gz; do
@@ -43,7 +43,7 @@ sudo usermod -aG "$GROUP" "$ADMIN_USER"
 
 echo "== binaries (root-owned: the helper and the jailer run as root)"
 sudo install -o root -g root -m 0755 "$HCC_BIN" /usr/local/bin/hcc
-sudo install -d -o root -g root -m 0755 "$LIB" "$IMAGES" "$IMAGES/base"
+sudo install -d -o root -g root -m 0755 "$LIB" "$IMAGES"
 sudo install -o root -g root -m 0755 "$ASSETS/firecracker" "$ASSETS/jailer" "$LIB/"
 sudo install -o root -g root -m 0755 "$HELPER_BIN" "$LIB/hcc-helper"
 # The jail tree is root's (hcc-helper builds every jail); 0711 lets the
@@ -63,60 +63,75 @@ sudo visudo -cf "$rule" >/dev/null
 sudo install -o root -g root -m 0440 "$rule" /etc/sudoers.d/hcc-runner
 rm -f "$rule"
 
-echo "== image 'base' (read-only for the runner)"
+# Claude Code's native musl build, from the npm registry, checked against
+# the registry's sha512 integrity value.
+CC_VERSION=2.1.310
+CC_INTEGRITY="sha512-NuXHtNyJMa59njKJBHSIY8oVxDYydVaWsa+Ij7VV0bLMSjWjK2L76WG6OhQmJjwGqjOVKd542DhPVDsrX+iB+g=="
+CC_URL="https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64-musl/-/claude-code-linux-x64-musl-${CC_VERSION}.tgz"
+
 build=$(mktemp -d)
-trap 'rm -rf "$build"' EXIT
-mkdir "$build/tree"
-tar -xzf "$ASSETS/alpine-minirootfs.tar.gz" -C "$build/tree"
-cat >"$build/tree/init" <<'INIT'
-#!/bin/sh
-mount -t proc proc /proc
-mount -t sysfs sys /sys
-arg() { for kv in $(cat /proc/cmdline); do case "$kv" in "$1="*) echo "${kv#*=}" ;; esac; done; }
-echo "HCC-GUEST-UP kernel=$(uname -r)"
-NET=$(arg hcc.ip)
-PROXY=$(arg hcc.proxy)
-if [ -n "$NET" ]; then
-	# Address only, no gateway: the proxy is on-link and nothing else is
-	# reachable. No DNS either: the proxy resolves names.
-	ip link set lo up
-	ip addr add "$NET" dev eth0
-	ip link set eth0 up
-	# Jobs with credentials: trust the job's CA (public; fetched directly
-	# from the proxy, before the proxy variables exist).
-	mount -t tmpfs -o mode=1777,size=16m tmpfs /tmp
-	if wget -q -T 5 -O /tmp/hcc-ca.pem "http://$PROXY/hcc/ca.pem" 2>/dev/null && grep -q "BEGIN CERTIFICATE" /tmp/hcc-ca.pem; then
-		cat /etc/ssl/certs/ca-certificates.crt /tmp/hcc-ca.pem >/tmp/hcc-bundle.pem 2>/dev/null || cp /tmp/hcc-ca.pem /tmp/hcc-bundle.pem
-		export SSL_CERT_FILE=/tmp/hcc-bundle.pem NODE_EXTRA_CA_CERTS=/tmp/hcc-ca.pem REQUESTS_CA_BUNDLE=/tmp/hcc-bundle.pem \
-			CURL_CA_BUNDLE=/tmp/hcc-bundle.pem GIT_SSL_CAINFO=/tmp/hcc-bundle.pem
-	else
-		rm -f /tmp/hcc-ca.pem
-	fi
-	export HTTPS_PROXY="http://$PROXY" https_proxy="http://$PROXY" HTTP_PROXY="http://$PROXY" http_proxy="http://$PROXY"
+cleanup() {
+	for m in proc dev; do sudo umount "$build/cc-tree/$m" 2>/dev/null || true; done
+	sudo rm -rf "$build"
+}
+trap cleanup EXIT
+
+# install_image NAME TREE ROOTFS: kernel and rootfs, root-owned, read-only
+# for the runner.
+install_image() {
+	sudo install -d -o root -g root -m 0755 "$IMAGES/$1"
+	sudo install -o root -g root -m 0644 "$ASSETS/vmlinux" "$IMAGES/$1/vmlinux"
+	sudo install -o root -g root -m 0644 "$3" "$IMAGES/$1/rootfs.ext4"
+}
+
+# Images are rebuilt only when their inputs change.
+stamp() { cat "$@" | sha256sum | cut -d' ' -f1; }
+uptodate() { sudo test -f "$IMAGES/$1/rootfs.ext4" && [ "$(sudo cat "$IMAGES/$1/.inputs" 2>/dev/null)" = "$2" ]; }
+record() { echo "$2" | sudo tee "$IMAGES/$1/.inputs" >/dev/null; }
+
+echo "== image 'base'"
+base_inputs=$(stamp "$HERE/images/common.sh" "$HERE/images/base/init" "$ASSETS/alpine-minirootfs.tar.gz" "$ASSETS/vmlinux")
+if uptodate base "$base_inputs"; then
+	echo "   up to date"
+else
+	mkdir "$build/tree"
+	tar -xzf "$ASSETS/alpine-minirootfs.tar.gz" -C "$build/tree"
+	install -D -m 0644 "$HERE/images/common.sh" "$build/tree/usr/lib/hcc/common.sh"
+	install -m 0755 "$HERE/images/base/init" "$build/tree/init"
+	mkfs.ext4 -q -F -d "$build/tree" -E root_owner=0:0 -L hcc-base "$build/base.ext4" 64M
+	install_image base "$build/tree" "$build/base.ext4"
+	record base "$base_inputs"
 fi
-echo "HCC-GUEST-NET interfaces: $(ls /sys/class/net | tr '\n' ' ')"
-# Test modes for stopping, the kill switch and the network guard only;
-# harnesses cannot set kernel arguments.
-case " $(cat /proc/cmdline) " in
-*" hcc.mode=hang "*) echo "HCC-GUEST-HANG"; while :; do sleep 1; done ;;
-*" hcc.mode=nettest "*)
-	H=${PROXY%:*}
-	P=${PROXY##*:}
-	probe() { printf 'CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n' "$1" "$1" | nc -w 3 "$H" "$P" 2>/dev/null | head -n 1 | tr -d '\r'; }
-	echo "HCC-NET-ALLOWED $(probe example.com:443)"
-	echo "HCC-NET-DENIED $(probe example.org:443)"
-	if nc -w 2 1.1.1.1 443 </dev/null 2>/dev/null; then echo "HCC-NET-DIRECT open"; else echo "HCC-NET-DIRECT blocked"; fi
-	if nc -w 2 "$H" 22 </dev/null 2>/dev/null; then echo "HCC-NET-HOSTPORT open"; else echo "HCC-NET-HOSTPORT blocked"; fi
-	if [ -s /tmp/hcc-ca.pem ]; then echo "HCC-NET-CA present"; else echo "HCC-NET-CA absent"; fi
-	;;
-esac
-echo "HCC-GUEST-DONE no agent runtime yet; shutting down"
-reboot -f
-INIT
-chmod 0755 "$build/tree/init"
-mkfs.ext4 -q -F -d "$build/tree" -E root_owner=0:0 -L hcc-base "$build/rootfs.ext4" 64M
-sudo install -o root -g root -m 0644 "$ASSETS/vmlinux" "$IMAGES/base/vmlinux"
-sudo install -o root -g root -m 0644 "$build/rootfs.ext4" "$IMAGES/base/rootfs.ext4"
+
+echo "== image 'claude-code' (Claude Code $CC_VERSION)"
+cc_inputs=$(echo "$CC_VERSION $CC_INTEGRITY" | cat - "$HERE/images/common.sh" "$HERE/images/claude-code/init" "$ASSETS/alpine-minirootfs.tar.gz" "$ASSETS/vmlinux" | sha256sum | cut -d' ' -f1)
+if uptodate claude-code "$cc_inputs"; then
+	echo "   up to date"
+else
+	curl -fsSL --proto '=https' --tlsv1.2 -o "$build/cc.tgz" "$CC_URL"
+	got="sha512-$(openssl dgst -sha512 -binary "$build/cc.tgz" | base64 -w0)"
+	[[ $got == "$CC_INTEGRITY" ]] || { echo "Claude Code integrity mismatch: $got" >&2; exit 1; }
+	tar -xzf "$build/cc.tgz" -C "$build" package/claude
+	tree=$build/cc-tree
+	sudo mkdir "$tree"
+	sudo tar -xzf "$ASSETS/alpine-minirootfs.tar.gz" -C "$tree"
+	sudo install -m 0755 "$build/package/claude" "$tree/usr/local/bin/claude"
+	sudo install -D -m 0644 "$HERE/images/common.sh" "$tree/usr/lib/hcc/common.sh"
+	sudo install -m 0755 "$HERE/images/claude-code/init" "$tree/init"
+	# Signed Alpine packages (apk verifies them against the keys in the
+	# minirootfs). The chroot gets /proc, /dev and DNS for the build only.
+	sudo cp -L /etc/resolv.conf "$tree/etc/resolv.conf"
+	sudo mount -t proc proc "$tree/proc"
+	sudo mount --bind /dev "$tree/dev"
+	sudo chroot "$tree" /sbin/apk add --no-cache bash git jq ripgrep libgcc libstdc++ ca-certificates >/dev/null
+	sudo chroot "$tree" /usr/sbin/adduser -D -u 1000 -s /bin/bash -h /home/agent agent
+	sudo chroot "$tree" /usr/local/bin/claude --version
+	sudo umount "$tree/proc" "$tree/dev"
+	sudo rm -f "$tree/etc/resolv.conf"
+	sudo mkfs.ext4 -q -F -d "$tree" -L hcc-claude "$build/cc.ext4" 1G
+	install_image claude-code "$tree" "$build/cc.ext4"
+	record claude-code "$cc_inputs"
+fi
 
 echo "== configuration"
 sudo install -d -o root -g root -m 0755 /etc/hcc
@@ -149,6 +164,9 @@ images:
   base:
     kernel: $IMAGES/base/vmlinux
     rootfs: $IMAGES/base/rootfs.ext4
+  claude-code:
+    kernel: $IMAGES/claude-code/vmlinux
+    rootfs: $IMAGES/claude-code/rootfs.ext4
 # Credential broker store (root:$RUN_USER 0640).
 credentials: /etc/hcc/credentials.yaml
 # Sandbox links: one /30 per VM; must not overlap any real network.

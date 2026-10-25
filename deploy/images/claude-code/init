@@ -1,0 +1,39 @@
+#!/bin/sh
+# Init of the "claude-code" image: runs Claude Code on the task's prompt
+# as the unprivileged user "agent", then shuts down. The VM is the
+# permission boundary, so Claude Code's own prompts are skipped; it holds
+# no credentials (the egress proxy adds them) and reaches only what the
+# harness allows.
+. /usr/lib/hcc/common.sh
+hcc_mounts
+echo "HCC-GUEST-UP kernel=$(uname -r) runtime=claude-code"
+hcc_network
+
+TASK=$(hcc_task)
+if [ -z "$TASK" ]; then
+	echo "HCC-RESULT-ERROR no task"
+	reboot -f
+fi
+echo "$TASK" | jq -r .prompt >/tmp/prompt.txt
+MODEL=$(echo "$TASK" | jq -r '.model.name // empty')
+ENDPOINT=$(echo "$TASK" | jq -r '.model.endpoint // empty')
+
+# Writable home and workspace in memory, owned by the agent.
+mount -t tmpfs -o size=512m,uid=1000,gid=1000,mode=0700 tmpfs /home/agent
+mkdir -p /tmp/workspace && chown agent:agent /tmp/workspace /tmp/prompt.txt
+
+export HOME=/home/agent USER=agent SHELL=/bin/bash TERM=dumb PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+# A placeholder: the egress proxy replaces it with the real credential.
+export ANTHROPIC_API_KEY=hcc-brokered
+[ -n "$ENDPOINT" ] && export ANTHROPIC_BASE_URL="$ENDPOINT"
+if [ -n "$MODEL" ]; then
+	export ANTHROPIC_MODEL="$MODEL" ANTHROPIC_SMALL_FAST_MODEL="$MODEL" ANTHROPIC_DEFAULT_HAIKU_MODEL="$MODEL"
+fi
+export DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 \
+	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 USE_BUILTIN_RIPGREP=0
+
+echo "HCC-RESULT-BEGIN"
+su -s /bin/sh agent -c 'cd /tmp/workspace && /usr/local/bin/claude -p --output-format text --dangerously-skip-permissions </tmp/prompt.txt' 2>&1
+rc=$?
+echo "HCC-RESULT-END exit=$rc"
+reboot -f

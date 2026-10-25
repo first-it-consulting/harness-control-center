@@ -13,10 +13,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -131,6 +134,11 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 		return "", fmt.Errorf("runner: unknown image %q", h.Spec.Sandbox.Image)
 	}
 
+	task, err := taskFor(h)
+	if err != nil {
+		return "", err
+	}
+
 	r.mu.Lock()
 	switch {
 	case r.closed:
@@ -160,6 +168,7 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 		spec: sandbox.Spec{
 			ID:        id,
 			Image:     h.Spec.Sandbox.Image,
+			Task:      task,
 			CPUs:      h.Spec.Sandbox.CPUs,
 			MemoryMiB: h.Spec.Sandbox.MemoryMiB,
 			Timeout:   h.Spec.Sandbox.Timeout.Duration,
@@ -209,8 +218,9 @@ func (r *Runner) execute(j *job) {
 	}
 	r.transition(j, StateRunning, "")
 
+	result := &resultWatcher{}
 	console := r.cfg.Console(j.ID)
-	res, err := r.cfg.Provider.Run(j.ctx, j.spec, console)
+	res, err := r.cfg.Provider.Run(j.ctx, j.spec, io.MultiWriter(console, result))
 	if c, ok := console.(io.Closer); ok {
 		if cerr := c.Close(); cerr != nil && err == nil {
 			err = fmt.Errorf("console: %w", cerr)
@@ -219,6 +229,8 @@ func (r *Runner) execute(j *job) {
 	switch {
 	case err != nil:
 		r.transition(j, StateFailed, err.Error())
+	case res.Outcome == sandbox.OutcomeExited && result.exitCode() > 0:
+		r.transition(j, StateFailed, fmt.Sprintf("agent exited with status %d", result.exitCode()))
 	case res.Outcome == sandbox.OutcomeExited:
 		r.transition(j, StateSucceeded, "")
 	case res.Outcome == sandbox.OutcomeTimedOut:
@@ -423,6 +435,80 @@ func checkSupported(h *spec.Harness) error {
 		return fmt.Errorf("runner: %w", errors.Join(errs...))
 	}
 	return nil
+}
+
+// resultMarker is printed by an image's init after its agent ends, e.g.
+// "HCC-RESULT-END exit=0". The last one counts: init prints it after the
+// agent (whose own output might contain the text) has exited.
+const resultMarker = "HCC-RESULT-END exit="
+
+// resultWatcher reads the agent's exit status from the console. It
+// keeps only the current line, so memory stays bounded.
+type resultWatcher struct {
+	mu   sync.Mutex
+	line []byte
+	code int // valid once seen
+	seen bool
+}
+
+func (w *resultWatcher) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, b := range p {
+		if b != '\n' {
+			if len(w.line) < 256 {
+				w.line = append(w.line, b)
+			}
+			continue
+		}
+		line := strings.TrimSpace(strings.TrimRight(string(w.line), "\r"))
+		w.line = w.line[:0]
+		if rest, ok := strings.CutPrefix(line, resultMarker); ok {
+			if n, err := strconv.Atoi(rest); err == nil {
+				w.code, w.seen = n, true
+			}
+		}
+	}
+	return len(p), nil
+}
+
+// exitCode is the agent's status, or 0 if the image reported none.
+func (w *resultWatcher) exitCode() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.seen {
+		return 0
+	}
+	return w.code
+}
+
+// Task is what the guest's runtime gets (as /dev/vdb). It never contains
+// credentials: those are added by the egress proxy.
+type Task struct {
+	Runtime string     `json:"runtime"`
+	Prompt  string     `json:"prompt"`
+	Model   *TaskModel `json:"model,omitempty"`
+}
+
+// TaskModel tells the runtime which model to ask, and where.
+type TaskModel struct {
+	Name     string `json:"name"`
+	Endpoint string `json:"endpoint"`
+}
+
+func taskFor(h *spec.Harness) ([]byte, error) {
+	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt}
+	if m := h.Spec.Model; m != nil {
+		t.Model = &TaskModel{Name: m.Name, Endpoint: m.Endpoint}
+	}
+	b, err := json.Marshal(t)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > sandbox.MaxTaskBytes {
+		return nil, fmt.Errorf("runner: task is %d bytes; the limit is %d", len(b), sandbox.MaxTaskBytes)
+	}
+	return b, nil
 }
 
 func randomID() string {

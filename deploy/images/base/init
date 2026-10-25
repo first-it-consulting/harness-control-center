@@ -1,0 +1,24 @@
+#!/bin/sh
+# Init of the "base" image: boots, reports, shuts down. Its test modes
+# (harnesses cannot set kernel arguments) exercise stopping, the kill
+# switch and the network guard.
+. /usr/lib/hcc/common.sh
+hcc_mounts
+echo "HCC-GUEST-UP kernel=$(uname -r)"
+hcc_network
+echo "HCC-GUEST-NET interfaces: $(ls /sys/class/net | tr '\n' ' ')"
+case " $(cat /proc/cmdline) " in
+*" hcc.mode=hang "*) echo "HCC-GUEST-HANG"; while :; do sleep 1; done ;;
+*" hcc.mode=nettest "*)
+	H=${HCC_PROXY%:*}
+	P=${HCC_PROXY##*:}
+	probe() { printf 'CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n' "$1" "$1" | nc -w 3 "$H" "$P" 2>/dev/null | head -n 1 | tr -d '\r'; }
+	echo "HCC-NET-ALLOWED $(probe example.com:443)"
+	echo "HCC-NET-DENIED $(probe example.org:443)"
+	if nc -w 2 1.1.1.1 443 </dev/null 2>/dev/null; then echo "HCC-NET-DIRECT open"; else echo "HCC-NET-DIRECT blocked"; fi
+	if nc -w 2 "$H" 22 </dev/null 2>/dev/null; then echo "HCC-NET-HOSTPORT open"; else echo "HCC-NET-HOSTPORT blocked"; fi
+	if [ -s /tmp/hcc-ca.pem ]; then echo "HCC-NET-CA present"; else echo "HCC-NET-CA absent"; fi
+	;;
+esac
+echo "HCC-GUEST-DONE no agent runtime in this image; shutting down"
+reboot -f

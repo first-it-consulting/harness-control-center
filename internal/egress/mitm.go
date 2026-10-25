@@ -1,21 +1,25 @@
 package egress
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/first-it-consulting/harness-control-center/internal/credentials"
+	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
 
 // broker terminates TLS for one credentialed host and forwards each
@@ -171,4 +175,97 @@ func (c *prefixConn) Read(p []byte) (int, error) {
 		return n, nil
 	}
 	return c.Conn.Read(p)
+}
+
+// maxRequestBody caps forwarded plain-HTTP request bodies.
+const maxRequestBody = 64 << 20
+
+// hopHeaders are connection-specific and never forwarded.
+var hopHeaders = []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate",
+	"Proxy-Authorization", "Te", "Trailer", "Upgrade"}
+
+// forwardHTTP brokers plain-HTTP requests for a host whose credential the
+// operator configured with scheme http (the secret crosses the network
+// unencrypted; see ADR-0005). Only that host and port are served on this
+// connection; everything else plain-HTTP is refused.
+func (p *Proxy) forwardHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader, limited *io.LimitedReader, req *http.Request) {
+	host := spec.NormalizeHost(req.URL.Hostname())
+	port := 80
+	if ps := req.URL.Port(); ps != "" {
+		n, err := strconv.Atoi(ps)
+		if err != nil || n < 1 || n > 65535 {
+			p.refuse(conn, http.StatusBadRequest, "invalid port", host, 0, nil)
+			return
+		}
+		port = n
+	}
+	cred, ok := p.Credentials[host]
+	if !ok || cred.Scheme != "http" || cred.Port != port {
+		p.refuse(conn, http.StatusMethodNotAllowed, "only HTTPS through CONNECT is supported", host, port, nil)
+		return
+	}
+	if d := p.Policy.CheckEgress(host, port); !d.Allowed {
+		p.refuse(conn, http.StatusForbidden, d.Reason, host, port, nil)
+		return
+	}
+	target, ok := p.resolveChecked(ctx, conn, host, port)
+	if !ok {
+		return
+	}
+	authority := net.JoinHostPort(host, strconv.Itoa(port))
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return p.Dial(ctx, netip.AddrPortFrom(target, uint16(port))) //nolint:gosec // port is within 1..65535
+		},
+		DisableCompression:  true, // pass encodings through untouched
+		MaxIdleConnsPerHost: 2,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	defer transport.CloseIdleConnections()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+
+	for {
+		_ = conn.SetReadDeadline(time.Time{})
+		out := req.Clone(ctx)
+		out.RequestURI = ""
+		out.URL = &url.URL{Scheme: "http", Host: authority, Path: req.URL.Path, RawPath: req.URL.RawPath, RawQuery: req.URL.RawQuery}
+		out.Host = authority
+		out.Body = http.MaxBytesReader(nil, req.Body, maxRequestBody)
+		for _, h := range hopHeaders {
+			out.Header.Del(h)
+		}
+		out.Header.Del(cred.Header)
+		out.Header.Set(cred.Header, cred.Value)
+
+		resp, err := transport.RoundTrip(out)
+		if err != nil {
+			p.refuse(conn, http.StatusBadGateway, "upstream request failed", host, port, err)
+			return
+		}
+		for _, h := range hopHeaders {
+			resp.Header.Del(h)
+		}
+		p.Log.Info("egress: brokered request", "job", p.JobID, "credential", cred.Name, "host", host, "port", port,
+			"scheme", "http", "method", req.Method, "path", req.URL.Path, "status", resp.StatusCode)
+		werr := resp.Write(conn)
+		_ = resp.Body.Close()
+		if werr != nil || resp.Close || req.Close {
+			return
+		}
+
+		// The next request on this connection: same limits, same host.
+		limited.N = maxHeaderBytes
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+		next, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		limited.N = math.MaxInt64
+		if !next.URL.IsAbs() || next.URL.Scheme != "http" || spec.NormalizeHost(next.URL.Hostname()) != host || next.URL.Port() != req.URL.Port() {
+			p.refuse(conn, http.StatusForbidden, "one host per connection", next.URL.Host, 0, nil)
+			return
+		}
+		req = next
+	}
 }

@@ -65,6 +65,11 @@ func (e *Engine) Risk() (Risk, []string) {
 	if p.Network.AllowPrivateNetworks {
 		bump(2, "can reach your private network")
 	}
+	if m := e.h.Spec.Model; m != nil {
+		if scheme, _, _ := m.EndpointHostPort(); scheme == "http" {
+			bump(1, "talks to its model unencrypted (http)")
+		}
+	}
 	switch {
 	case score == 0:
 		return RiskLow, why
@@ -85,6 +90,18 @@ func (e *Engine) Explain() []string {
 		fmt.Sprintf("Runs the %s agent on %s.", s.Runtime, describeTarget(s.Target)),
 		fmt.Sprintf("Stops after %s per run, or once it has spent $%.2f or %s tokens.",
 			s.Sandbox.Timeout, s.Budget.MaxCostUSD, groupDigits(s.Budget.MaxTokens)),
+	}
+
+	if m := s.Model; m != nil {
+		line := fmt.Sprintf("Uses the model %s at %s", m.Name, m.Endpoint)
+		if m.Credential != "" {
+			line += ", authenticated with " + m.Credential
+		}
+		line += "."
+		if scheme, _, _ := m.EndpointHostPort(); scheme == "http" {
+			line += " UNENCRYPTED: prompts, code and the credential cross the network in clear text."
+		}
+		lines = append(lines, line)
 	}
 
 	switch {

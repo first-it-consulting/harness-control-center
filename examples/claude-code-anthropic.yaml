@@ -1,0 +1,27 @@
+# Claude Code in a sandbox, using the Anthropic API through the credential
+# broker: the agent never sees the API key. The runner needs a credential
+# named "anthropic" for api.anthropic.com (see deploy/README.md).
+apiVersion: hcc/v1alpha1
+kind: Harness
+metadata:
+  name: claude-code-anthropic
+spec:
+  runtime: claude-code
+  prompt: |
+    Create a bash script fib.sh that prints the first 10 Fibonacci numbers,
+    run it, and reply with the script and its output.
+  model:
+    name: claude-sonnet-5-5
+    endpoint: https://api.anthropic.com
+    credential: anthropic
+  target: server:my-runner
+  sandbox:
+    image: claude-code
+    cpus: 2
+    memoryMiB: 2048
+    timeout: 15m
+  permissions:
+    credentials: [anthropic]
+    network:
+      egress:
+        - host: api.anthropic.com

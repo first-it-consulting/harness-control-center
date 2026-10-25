@@ -32,6 +32,13 @@ outside the sandbox and be usable only towards the hosts it is meant for.
   trust in it extends to nothing else. The guest's init fetches its
   public certificate from the proxy and sets `SSL_CERT_FILE`,
   `NODE_EXTRA_CA_CERTS` and friends.
+- **Plain HTTP only by explicit operator choice.** A credential may set
+  `scheme: http` and a port (e.g. a local inference server). The proxy
+  then forwards absolute-form HTTP requests for exactly that host and port,
+  one host per connection, with the header replaced; every other plain
+  HTTP request is still refused. The secret then crosses the network
+  unencrypted, and harnesses using such an endpoint are rated higher risk
+  and say "UNENCRYPTED" in `hcc explain`.
 - **No secret in logs, errors or `%v` output.**
 
 ## Consequences

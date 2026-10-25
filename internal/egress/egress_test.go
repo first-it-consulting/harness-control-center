@@ -376,3 +376,35 @@ func TestHostAddrsIncludesLoopback(t *testing.T) {
 		t.Errorf("host addresses %v lack 127.0.0.1", addrs)
 	}
 }
+
+func TestServeClosesListenerOnConfigError(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Proxy{}).Serve(context.Background(), l); err == nil {
+		t.Fatal("Serve without a policy succeeded")
+	}
+	if c, err := net.Dial("tcp", l.Addr().String()); err == nil {
+		_ = c.Close()
+		t.Error("listener still accepts connections after Serve failed")
+	}
+}
+
+func TestNoCAMeansQuiet404(t *testing.T) {
+	proxy, _, _ := startProxy(t, nil) // no credentials, no CA
+	c, err := net.Dial("tcp", proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprint(c, "GET /hcc/ca.pem HTTP/1.1\r\nHost: proxy\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status %d, want 404", resp.StatusCode)
+	}
+}

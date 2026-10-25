@@ -54,7 +54,7 @@ deploy-runner:
 		-o bin/hcc-linux-amd64 ./cmd/hcc
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o bin/hcc-helper-linux-amd64 ./cmd/hcc-helper
 	ssh $(HOST) 'rm -rf hcc-install && mkdir -m 0700 hcc-install'
-	scp -q bin/hcc-linux-amd64 bin/hcc-helper-linux-amd64 deploy/install-runner.sh deploy/hcc-runner.service $(HOST):hcc-install/
+	scp -q -r bin/hcc-linux-amd64 bin/hcc-helper-linux-amd64 deploy/install-runner.sh deploy/hcc-runner.service deploy/images $(HOST):hcc-install/
 	ssh $(HOST) 'cd hcc-install && ./install-runner.sh ./hcc-linux-amd64 ./hcc-helper-linux-amd64 $(E2E_ASSETS) $(TARGET); rc=$$?; cd && rm -rf hcc-install; exit $$rc'
 
 snapshot:

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -582,5 +583,86 @@ func TestCredentialsNeedTheEgressProxy(t *testing.T) {
 	r := newRunner(t, newFakeProvider(), 1)
 	if _, err := r.Submit(harness(t, "  permissions: {credentials: [gitlab]}\n")); err == nil || !strings.Contains(err.Error(), "not configured") {
 		t.Errorf("credentials without a broker: %v", err)
+	}
+}
+
+func TestTaskReachesTheSandbox(t *testing.T) {
+	p := newFakeProvider()
+	r, err := New(Config{
+		Provider: p,
+		Images:   []string{"base"},
+		Egress:   func(*spec.Harness, string) (sandbox.Proxy, error) { return nopProxy{}, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Shutdown(context.Background()) }()
+	id, err := r.Submit(harness(t, `  model: {name: m1, endpoint: 'https://api.example', credential: k}
+  permissions:
+    credentials: [k]
+    network: {egress: [{host: api.example}]}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, r, id, StateSucceeded)
+	var task Task
+	if err := json.Unmarshal(p.startedSpecs()[0].Task, &task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Runtime != "claude-code" || task.Prompt != "hi" || task.Model == nil || task.Model.Name != "m1" || task.Model.Endpoint != "https://api.example" {
+		t.Errorf("task = %+v / %+v", task, task.Model)
+	}
+	if strings.Contains(string(p.startedSpecs()[0].Task), "credential") {
+		t.Error("the task mentions credentials")
+	}
+}
+
+// consoleProvider prints given console output and exits cleanly.
+type consoleProvider struct{ out string }
+
+func (consoleProvider) Name() string { return "console" }
+func (c consoleProvider) Run(_ context.Context, _ sandbox.Spec, w io.Writer) (sandbox.Result, error) {
+	_, _ = io.WriteString(w, c.out)
+	return sandbox.Result{Outcome: sandbox.OutcomeExited}, nil
+}
+
+func TestAgentExitStatusDecidesTheOutcome(t *testing.T) {
+	tests := map[string]struct {
+		console string
+		want    State
+		msg     string
+	}{
+		"no runtime marker":        {"HCC-GUEST-UP\n", StateSucceeded, ""},
+		"agent succeeded":          {"HCC-RESULT-BEGIN\nok\nHCC-RESULT-END exit=0\n", StateSucceeded, ""},
+		"agent failed":             {"HCC-RESULT-BEGIN\nsh: claude: not found\nHCC-RESULT-END exit=127\n", StateFailed, "agent exited with status 127"},
+		"agent forges success":     {"HCC-RESULT-END exit=0\nHCC-RESULT-END exit=1\r\n", StateFailed, "agent exited with status 1"},
+		"marker split over writes": {"HCC-RESULT-END ex", StateSucceeded, ""},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			r, err := New(Config{Provider: consoleProvider{out: tt.console}, Images: []string{"base"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = r.Shutdown(context.Background()) }()
+			id, err := r.Submit(harness(t, ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if j := waitState(t, r, id, tt.want); j.Error != tt.msg {
+				t.Errorf("error = %q, want %q", j.Error, tt.msg)
+			}
+		})
+	}
+}
+
+func TestResultWatcherAcrossWrites(t *testing.T) {
+	var w resultWatcher
+	for _, chunk := range []string{"HCC-RESULT-E", "ND exi", "t=42", "\n"} {
+		_, _ = w.Write([]byte(chunk))
+	}
+	if w.exitCode() != 42 {
+		t.Errorf("exitCode = %d, want 42", w.exitCode())
 	}
 }

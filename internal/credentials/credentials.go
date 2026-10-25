@@ -24,6 +24,11 @@ type Credential struct {
 	Name string
 	// Hosts the secret may be sent to (exact names; no wildcards).
 	Hosts []string
+	// Scheme and Port say how the hosts are reached: "https" (default,
+	// port 443) or, only if the operator says so explicitly, "http" (the
+	// secret then crosses the network unencrypted).
+	Scheme string
+	Port   int
 	// Header carries the secret, e.g. "x-api-key" or "Authorization".
 	Header string
 	// Value is the full header value, e.g. "Bearer <secret>".
@@ -32,7 +37,7 @@ type Credential struct {
 
 // String never shows the secret.
 func (c Credential) String() string {
-	return fmt.Sprintf("credential %s (%s for %s)", c.Name, c.Header, strings.Join(c.Hosts, ", "))
+	return fmt.Sprintf("credential %s (%s for %s://%s:%d)", c.Name, c.Header, c.Scheme, strings.Join(c.Hosts, ", "), c.Port)
 }
 
 // GoString never shows the secret either (%#v).
@@ -40,6 +45,8 @@ func (c Credential) GoString() string { return c.String() }
 
 type fileEntry struct {
 	Hosts      []string `yaml:"hosts"`
+	Scheme     string   `yaml:"scheme"`
+	Port       int      `yaml:"port"`
 	Header     string   `yaml:"header"`
 	Prefix     string   `yaml:"prefix"`
 	SecretFile string   `yaml:"secretFile"`
@@ -106,6 +113,23 @@ func build(name string, e fileEntry) (Credential, error) {
 		}
 		hosts = append(hosts, n)
 	}
+	scheme, port := e.Scheme, e.Port
+	switch scheme {
+	case "", "https":
+		scheme = "https"
+		if port == 0 {
+			port = 443
+		}
+	case "http":
+		if port == 0 {
+			port = 80
+		}
+	default:
+		return fail("scheme must be https or http")
+	}
+	if port < 1 || port > 65535 {
+		return fail("invalid port %d", port)
+	}
 	if !headerRe.MatchString(e.Header) || reservedHeaders[strings.ToLower(e.Header)] {
 		return fail("header %q is not allowed", e.Header)
 	}
@@ -131,7 +155,7 @@ func build(name string, e fileEntry) (Credential, error) {
 	if strings.ContainsAny(secret, "\r\n\x00") {
 		return fail("secret contains control characters")
 	}
-	return Credential{Name: name, Hosts: hosts, Header: e.Header, Value: e.Prefix + secret}, nil
+	return Credential{Name: name, Hosts: hosts, Scheme: scheme, Port: port, Header: e.Header, Value: e.Prefix + secret}, nil
 }
 
 func readLimited(path string, limit int64) ([]byte, error) {
@@ -151,9 +175,9 @@ func readLimited(path string, limit int64) ([]byte, error) {
 }
 
 // ForHarness returns the credentials h is granted, checking that each
-// exists and that every host it would be sent to is in h's egress
-// allowlist (otherwise the grant is meaningless or wider than reviewed).
-// The result maps host name to credential.
+// exists and that every host (and port) it would be sent to is in h's
+// egress allowlist (otherwise the grant is meaningless or wider than
+// reviewed). The result maps host name to credential.
 func ForHarness(store map[string]Credential, h *spec.Harness, allowed func(host string, port int) bool) (map[string]Credential, error) {
 	byHost := map[string]Credential{}
 	var errs []error
@@ -164,8 +188,8 @@ func ForHarness(store map[string]Credential, h *spec.Harness, allowed func(host 
 			continue
 		}
 		for _, host := range c.Hosts {
-			if !allowed(host, 443) {
-				errs = append(errs, fmt.Errorf("credential %q is for %s, which the harness may not reach on port 443", name, host))
+			if !allowed(host, c.Port) {
+				errs = append(errs, fmt.Errorf("credential %q is for %s, which the harness may not reach on port %d", name, host, c.Port))
 				continue
 			}
 			if prev, dup := byHost[host]; dup {

@@ -108,7 +108,7 @@ func startBroker(t *testing.T, handler http.HandlerFunc, trustUpstream bool) *br
 		JobID:  "job-1",
 		Log:    slog.New(slog.NewTextHandler(env.log, nil)),
 		Credentials: map[string]credentials.Credential{
-			"example.com": {Name: "api", Hosts: []string{"example.com"}, Header: "x-api-key", Value: brokerSecret},
+			"example.com": {Name: "api", Hosts: []string{"example.com"}, Scheme: "https", Port: 443, Header: "x-api-key", Value: brokerSecret},
 		},
 		CA:            ca,
 		UpstreamRoots: roots,

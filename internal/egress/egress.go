@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -76,11 +77,15 @@ type Proxy struct {
 // Serve accepts connections on l until ctx ends; then it closes l and
 // every open tunnel and returns.
 func (p *Proxy) Serve(ctx context.Context, l net.Listener) error {
+	// Also on early errors: a guest gets "connection refused", not a hang.
+	defer l.Close()
 	if p.Policy == nil {
 		return errors.New("egress: no policy")
 	}
-	if len(p.Credentials) > 0 && p.CA == nil {
-		return errors.New("egress: credentials need a CA")
+	for _, c := range p.Credentials {
+		if c.Scheme == "https" && p.CA == nil {
+			return errors.New("egress: https credentials need a CA")
+		}
 	}
 	p.defaults()
 	ctx, cancel := context.WithCancel(ctx)
@@ -150,9 +155,16 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 		p.refuse(conn, http.StatusBadRequest, "malformed or oversized request", "", 0, err)
 		return
 	}
+	// The header limit must not cut off request bodies (forwarded plain
+	// HTTP requests have their own body cap).
+	limited.N = math.MaxInt64
 	if req.Method != http.MethodConnect {
-		if req.Method == http.MethodGet && req.URL.Path == caPath && p.CA != nil {
-			p.serveCA(conn)
+		if req.Method == http.MethodGet && req.URL.Path == caPath && !req.URL.IsAbs() {
+			p.serveCA(conn) // 404 when the job has no CA: the guest's init asks anyway
+			return
+		}
+		if req.URL.IsAbs() && req.URL.Scheme == "http" {
+			p.forwardHTTP(ctx, conn, br, limited, req)
 			return
 		}
 		p.refuse(conn, http.StatusMethodNotAllowed, "only HTTPS through CONNECT is supported", req.Host, 0, nil)
@@ -169,29 +181,12 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	addrs, err := p.Resolve(ctx, host)
-	if err != nil {
-		p.refuse(conn, http.StatusBadGateway, "cannot resolve host", host, port, err)
-		return
-	}
-	local, err := p.LocalAddrs()
-	if err != nil { // fail closed: without the host's addresses, nothing is safe
-		p.refuse(conn, http.StatusBadGateway, "cannot determine the host's own addresses", host, port, err)
-		return
-	}
-	var target netip.Addr
-	for _, a := range addrs {
-		if a = a.Unmap(); !p.blocked(a) && !slices.Contains(local, a) {
-			target = a
-			break
-		}
-	}
-	if !target.IsValid() {
-		p.refuse(conn, http.StatusForbidden, "host resolves only to internal or blocked addresses", host, port, nil)
+	target, ok := p.resolveChecked(ctx, conn, host, port)
+	if !ok {
 		return
 	}
 	buffered, _ := br.Peek(br.Buffered())
-	if cred, ok := p.Credentials[spec.NormalizeHost(host)]; ok && port == 443 {
+	if cred, ok := p.Credentials[spec.NormalizeHost(host)]; ok && cred.Scheme == "https" && port == cred.Port {
 		_ = conn.SetReadDeadline(time.Time{})
 		if _, err := io.WriteString(conn, connectedResponse); err != nil {
 			return
@@ -237,11 +232,38 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 		"bytesUp", up, "bytesDown", down, "duration", time.Since(start).Round(time.Millisecond).String())
 }
 
+// resolveChecked resolves host and returns the first address the guest
+// may reach; otherwise it refuses on conn.
+func (p *Proxy) resolveChecked(ctx context.Context, conn net.Conn, host string, port int) (netip.Addr, bool) {
+	addrs, err := p.Resolve(ctx, host)
+	if err != nil {
+		p.refuse(conn, http.StatusBadGateway, "cannot resolve host", host, port, err)
+		return netip.Addr{}, false
+	}
+	local, err := p.LocalAddrs()
+	if err != nil { // fail closed: without the host's addresses, nothing is safe
+		p.refuse(conn, http.StatusBadGateway, "cannot determine the host's own addresses", host, port, err)
+		return netip.Addr{}, false
+	}
+	for _, a := range addrs {
+		if a = a.Unmap(); !p.blocked(a) && !slices.Contains(local, a) {
+			return a, true
+		}
+	}
+	p.refuse(conn, http.StatusForbidden, "host resolves only to internal or blocked addresses", host, port, nil)
+	return netip.Addr{}, false
+}
+
 // caPath is where a guest fetches the job CA to trust (plain HTTP from
 // the proxy itself; the certificate is public).
 const caPath = "/hcc/ca.pem"
 
 func (p *Proxy) serveCA(conn net.Conn) {
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if p.CA == nil {
+		_, _ = io.WriteString(conn, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+		return
+	}
 	pemBytes := p.CA.PEM()
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_, _ = fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/x-pem-file\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(pemBytes), pemBytes)

@@ -45,7 +45,13 @@ func New(h *spec.Harness) (*Engine, error) {
 	if err := h.Validate(); err != nil {
 		return nil, fmt.Errorf("policy: invalid harness: %w", err)
 	}
-	return &Engine{h: h}, nil
+	e := &Engine{h: h}
+	if m := h.Spec.Model; m != nil {
+		if _, host, port := m.EndpointHostPort(); !e.CheckEgress(host, port).Allowed {
+			return nil, fmt.Errorf("policy: model endpoint %s:%d is not in the egress allowlist", host, port)
+		}
+	}
+	return e, nil
 }
 
 // CheckEgress decides whether the sandbox may open a connection to

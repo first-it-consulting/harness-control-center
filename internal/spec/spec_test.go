@@ -179,6 +179,8 @@ func TestValidateEgressHost(t *testing.T) {
 		{"nas.home.arpa", false, false},
 		{"svc.cluster.internal", false, false},
 		{"printer.local", true, true},
+		{"nas.fritz.box", false, false},
+		{"nas.fritz.box", true, true},
 		{"", false, false},
 		{strings.Repeat("a.", 130) + "com", false, false},
 	}
@@ -238,5 +240,49 @@ func TestValidateHostNameRejectsIPs(t *testing.T) {
 		if err := ValidateHostName(h); err != nil {
 			t.Errorf("ValidateHostName(%q) = %v", h, err)
 		}
+	}
+}
+
+func TestModel(t *testing.T) {
+	const with = minimal + `  model:
+    name: Ornith-1.5-35B-A3B-MLX
+    endpoint: http://LLM.example:4000
+    credential: llm
+  permissions:
+    credentials: [llm]
+`
+	h, err := Parse([]byte(with))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheme, host, port := h.Spec.Model.EndpointHostPort()
+	if scheme != "http" || host != "llm.example" || port != 4000 {
+		t.Errorf("EndpointHostPort = %s %s %d", scheme, host, port)
+	}
+	for endpoint, want := range map[string]int{"https://api.anthropic.com": 443, "http://a.example": 80, "https://a.example:8443/v1": 8443} {
+		m := Model{Endpoint: endpoint}
+		if _, _, port := m.EndpointHostPort(); port != want {
+			t.Errorf("%s: port %d, want %d", endpoint, port, want)
+		}
+	}
+
+	bad := map[string]struct{ model, want string }{
+		"ftp":              {"{name: m, endpoint: 'ftp://a.example'}", "http:// or https://"},
+		"ip literal":       {"{name: m, endpoint: 'http://10.10.20.140:4000'}", "IP addresses"},
+		"userinfo":         {"{name: m, endpoint: 'https://u:p@a.example'}", "credentials, a query"},
+		"query":            {"{name: m, endpoint: 'https://a.example/?k=1'}", "credentials, a query"},
+		"bad path":         {"{name: m, endpoint: 'https://a.example/%0d%0a'}", "invalid path"},
+		"internal name":    {"{name: m, endpoint: 'http://llm.lan:4000'}", "looks internal"},
+		"bad port":         {"{name: m, endpoint: 'http://a.example:99999'}", "port"},
+		"bad name":         {"{name: 'a b', endpoint: 'https://a.example'}", "model name"},
+		"credential grant": {"{name: m, endpoint: 'https://a.example', credential: llm}", "not in permissions.credentials"},
+	}
+	for name, tt := range bad {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(minimal + "  model: " + tt.model + "\n"))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Parse = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }

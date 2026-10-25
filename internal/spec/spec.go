@@ -11,7 +11,11 @@
 //     permission can never be silently ignored.
 package spec
 
-import "time"
+import (
+	"net/url"
+	"strconv"
+	"time"
+)
 
 // APIVersion is the only spec version this build understands.
 const APIVersion = "hcc/v1alpha1"
@@ -39,6 +43,9 @@ type Spec struct {
 	Runtime string `yaml:"runtime"`
 	// Prompt is the task given to the agent.
 	Prompt string `yaml:"prompt"`
+	// Model selects the model and the endpoint the runtime talks to; nil
+	// means the runtime's default.
+	Model *Model `yaml:"model,omitempty"`
 	// Target is "local" or "server:<name>".
 	Target      string      `yaml:"target,omitempty"`
 	Trigger     Trigger     `yaml:"trigger,omitempty"`
@@ -46,6 +53,35 @@ type Spec struct {
 	Permissions Permissions `yaml:"permissions,omitempty"`
 	Budget      Budget      `yaml:"budget,omitempty"`
 	Approvals   Approvals   `yaml:"approvals,omitempty"`
+}
+
+// Model is the model an agent runtime uses.
+type Model struct {
+	// Name is the model's identifier at the endpoint.
+	Name string `yaml:"name"`
+	// Endpoint is the API base URL, e.g. https://api.anthropic.com. Its
+	// host and port must be in the egress allowlist.
+	Endpoint string `yaml:"endpoint"`
+	// Credential names the granted credential that authenticates to the
+	// endpoint (added by the egress proxy; the agent never sees it).
+	Credential string `yaml:"credential,omitempty"`
+}
+
+// EndpointHostPort returns the endpoint's host and port (default 443 for
+// https, 80 for http). The endpoint must have been validated.
+func (m *Model) EndpointHostPort() (scheme, host string, port int) {
+	u, err := url.Parse(m.Endpoint)
+	if err != nil {
+		return "", "", 0
+	}
+	port = 443
+	if u.Scheme == "http" {
+		port = 80
+	}
+	if p := u.Port(); p != "" {
+		port, _ = strconv.Atoi(p)
+	}
+	return u.Scheme, NormalizeHost(u.Hostname()), port
 }
 
 // Trigger decides when a harness runs. With neither field set, it runs

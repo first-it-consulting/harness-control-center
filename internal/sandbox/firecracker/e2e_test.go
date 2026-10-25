@@ -300,7 +300,7 @@ func TestE2ENetwork(t *testing.T) {
 		Log:     slog.New(slog.NewTextHandler(&proxyLog, nil)),
 		CA:      ca,
 		Credentials: map[string]credentials.Credential{
-			"example.com": {Name: "e2e", Hosts: []string{"example.com"}, Header: "x-e2e", Value: "e2e-secret"},
+			"example.com": {Name: "e2e", Hosts: []string{"example.com"}, Scheme: "https", Port: 443, Header: "x-e2e", Value: "e2e-secret"},
 		},
 	}}
 	var c console

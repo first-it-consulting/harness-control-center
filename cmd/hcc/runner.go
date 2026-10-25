@@ -164,12 +164,17 @@ func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slo
 		if err != nil {
 			return nil, err
 		}
-		hosts := make([]string, 0, len(byHost))
-		for host := range byHost {
+		var hosts, tlsHosts []string
+		for host, c := range byHost {
 			hosts = append(hosts, host)
+			if c.Scheme == "https" {
+				tlsHosts = append(tlsHosts, host)
+			}
 		}
-		if p.CA, err = egress.NewCA(hosts, time.Now()); err != nil {
-			return nil, err
+		if len(tlsHosts) > 0 { // plain-http credentials need no CA
+			if p.CA, err = egress.NewCA(tlsHosts, time.Now()); err != nil {
+				return nil, err
+			}
 		}
 		p.Credentials = byHost
 		log.Info("credentials granted", "job", jobID, "credentials", h.Spec.Permissions.Credentials, "hosts", hosts)

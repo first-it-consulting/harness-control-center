@@ -56,7 +56,7 @@ spec:
 		Policy: engine, JobID: "internet", CA: ca,
 		Log: slog.New(slog.NewTextHandler(&logs, nil)),
 		Credentials: map[string]credentials.Credential{
-			"httpbin.org": {Name: "echo", Hosts: []string{"httpbin.org"}, Header: "X-Hcc-Test", Value: marker},
+			"httpbin.org": {Name: "echo", Hosts: []string{"httpbin.org"}, Scheme: "https", Port: 443, Header: "X-Hcc-Test", Value: marker},
 		},
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
