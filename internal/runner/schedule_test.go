@@ -328,3 +328,31 @@ func TestStatusCountsSchedules(t *testing.T) {
 	}
 	_ = sandbox.OutcomeExited
 }
+
+// A schedule is checked against the runner's current configuration for
+// every run and on load: one that no longer fits is paused, not run.
+func TestSchedulesAreRecheckedAgainstTheCurrentConfig(t *testing.T) {
+	e := defaultSchedEnv(t)
+	s, err := e.r.AddSchedule(scheduleDoc("{schedule: '0 * * * *'}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.r.cfg.Images = []string{"other"} // the image was removed
+	e.at("2026-10-25 11:00")
+	got := e.sched(s.ID)
+	if got.State != SchedulePaused || !strings.Contains(got.Message, "can no longer run it") || len(e.r.List()) != 0 {
+		t.Fatalf("after the image was removed: %+v (%d jobs)", got, len(e.r.List()))
+	}
+
+	// On load, too: a runner restarted without networking pauses the
+	// schedules that need it.
+	clock := &fakeClock{}
+	clock.set("2026-10-25 10:30")
+	scheds := &memSchedules{m: map[string]Schedule{}}
+	netDoc := scheduleDoc("{schedule: '0 * * * *'}\n  permissions: {network: {egress: [{host: example.com}]}}")
+	scheds.m["sch-1"] = Schedule{ID: "sch-1", Harness: "hello", Cron: "0 * * * *", State: ScheduleActive, Document: netDoc}
+	e2 := newSchedEnv(t, newFakeProvider(), newMemStore(), scheds, clock)
+	if got := e2.sched("sch-1"); got.State != SchedulePaused || !strings.Contains(got.Message, "network access is not configured") {
+		t.Errorf("loaded schedule = %+v", got)
+	}
+}

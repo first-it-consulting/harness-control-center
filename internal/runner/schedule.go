@@ -336,6 +336,19 @@ func (r *Runner) fire(s *schedule, now time.Time) {
 	h := s.h
 	r.mu.Unlock()
 
+	// Checked again for every run: the runner's configuration may have
+	// changed since the schedule was added.
+	err := r.check(h)
+	if err != nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.schedules[s.ID] == s {
+			s.State, s.Message = SchedulePaused, "paused: this runner can no longer run it: "+err.Error()
+			r.planLocked(s, now)
+			r.saveScheduleLocked(s)
+		}
+		return
+	}
 	id, err := r.enqueue(h, s.ID, loop)
 
 	r.mu.Lock()
@@ -397,6 +410,11 @@ func (r *Runner) loadSchedules() error {
 		if s.loop() && s.State == ScheduleActive {
 			if j := r.jobs[s.LastJob]; j != nil && j.State != StateSucceeded {
 				s.State, s.Message = ScheduleFinished, fmt.Sprintf("stopped: run %d ended %s", s.Runs, j.State)
+			}
+		}
+		if s.State == ScheduleActive {
+			if err := r.check(h); err != nil {
+				s.State, s.Message = SchedulePaused, "paused: this runner can no longer run it: "+err.Error()
 			}
 		}
 		r.planLocked(s, now)

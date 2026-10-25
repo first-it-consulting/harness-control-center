@@ -275,6 +275,9 @@ func needsNetwork(h *spec.Harness) bool {
 // for runs started by a schedule.
 func (r *Runner) enqueue(h *spec.Harness, scheduleID string, loop *TaskLoop) (string, error) {
 	needsNet := needsNetwork(h)
+	if needsNet && r.cfg.Egress == nil { // check does this too; never call a missing factory
+		return "", errors.New("runner: network access is not configured on this runner")
+	}
 	diskMiB := 0
 	if r.cfg.Results != nil {
 		diskMiB = h.Spec.Sandbox.DiskMiB
