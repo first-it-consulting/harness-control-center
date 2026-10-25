@@ -13,7 +13,7 @@ func tapAll(contentType string, chunks ...string) (int64, int64) {
 	for _, c := range chunks {
 		_, _ = t.Write([]byte(c))
 	}
-	in, out, _ := t.finish()
+	in, out, _, _ := t.finish()
 	if in != recIn || out != recOut {
 		panic(fmt.Sprintf("recorded %d/%d but counted %d/%d", recIn, recOut, in, out))
 	}
@@ -83,18 +83,18 @@ func TestUsageBounded(t *testing.T) {
 func TestMeteredBodyEndsOnce(t *testing.T) {
 	var calls int
 	var gotIn, gotOut int64
-	var seen bool
+	var final bool
 	b := &meteredBody{
 		ReadCloser: io.NopCloser(strings.NewReader(`{"usage":{"input_tokens":5,"output_tokens":6}}`)),
 		tap:        newUsageTap("application/json", func(in, out int64) { gotIn += in; gotOut += out }),
-		onEnd:      func(s bool) { calls++; seen = s },
+		onEnd:      func(_, _ int64, _, f bool) { calls++; final = f },
 	}
 	if _, err := io.ReadAll(b); err != nil {
 		t.Fatal(err)
 	}
 	_ = b.Close()
-	if calls != 1 || !seen || gotIn != 5 || gotOut != 6 {
-		t.Errorf("calls %d seen %v usage %d/%d", calls, seen, gotIn, gotOut)
+	if calls != 1 || !final || gotIn != 5 || gotOut != 6 {
+		t.Errorf("calls %d final %v usage %d/%d", calls, final, gotIn, gotOut)
 	}
 }
 

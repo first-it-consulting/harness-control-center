@@ -145,3 +145,79 @@ func (b blockingReader) Read([]byte) (int, error) {
 	<-b
 	return 0, io.EOF
 }
+
+const messageStart = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":1}}}\n\n"
+
+// A stream that ends before its final usage is charged its max_tokens.
+func TestMeteredCutStreamChargedMaxTokens(t *testing.T) {
+	m := budget.New(budget.Limits{MaxTokens: 1_000_000}, nil, nil)
+	tr := &meteredTransport{meter: m, base: rtFunc(func(*http.Request) (*http.Response, error) {
+		return respond(200, "text/event-stream", "", messageStart), nil
+	})}
+	post(t, tr, "/v1/messages", `{"max_tokens":5000,"stream":true}`)
+	if u := m.Usage(); u.InputTokens != 100 || u.OutputTokens != 5000 || m.Exceeded() != "" {
+		t.Errorf("usage %+v exceeded %q, want 100/5000 charged", u, m.Exceeded())
+	}
+	// Without max_tokens there is no bound: the budget stops.
+	post(t, tr, "/v1/messages", `{"stream":true}`)
+	if m.Exceeded() == "" {
+		t.Error("cut stream without max_tokens did not stop the budget")
+	}
+}
+
+func TestMeteredDenyByDefault(t *testing.T) {
+	m := budget.New(budget.Limits{}, nil, nil)
+	tr := &meteredTransport{meter: m, base: rtFunc(func(*http.Request) (*http.Response, error) {
+		return respond(200, "application/json", "", `{"input_tokens":12}`), nil
+	})}
+	post(t, tr, "/v1/messages/count_tokens", `{}`)
+	if m.Exceeded() != "" {
+		t.Fatalf("count_tokens stopped the budget: %s", m.Exceeded())
+	}
+	post(t, tr, "/v1/some/new/endpoint", `{}`)
+	if m.Exceeded() == "" {
+		t.Error("an unknown POST without usage did not stop the budget")
+	}
+}
+
+func TestMeteredRejectsNonCanonicalPaths(t *testing.T) {
+	m := budget.New(budget.Limits{}, nil, nil)
+	called := false
+	tr := &meteredTransport{meter: m, base: rtFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return respond(200, "application/json", "", `{}`), nil
+	})}
+	for _, p := range []string{"/v1/messages/count_tokens/../../messages", "/v1//messages", "/v1/./messages", "/v1/messages%2Fcount_tokens"} {
+		req, err := http.NewRequest(http.MethodPost, "https://model.example"+p, strings.NewReader(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", p, resp.StatusCode)
+		}
+	}
+	if called {
+		t.Error("a non-canonical path reached the upstream")
+	}
+}
+
+// Large bodies are forwarded intact without being parsed.
+func TestMeteredLargeBodyPassesThrough(t *testing.T) {
+	m := budget.New(budget.Limits{}, nil, nil)
+	body := `{"stream":true,"pad":"` + strings.Repeat("x", maxParsedRequest) + `"}`
+	var got int
+	tr := &meteredTransport{meter: m, base: rtFunc(func(r *http.Request) (*http.Response, error) {
+		raw, _ := io.ReadAll(r.Body)
+		got = len(raw)
+		return respond(200, "application/json", "", `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`), nil
+	})}
+	post(t, tr, "/v1/chat/completions", body)
+	if got != len(body) {
+		t.Errorf("upstream got %d bytes, want %d", got, len(body))
+	}
+}

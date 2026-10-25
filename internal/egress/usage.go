@@ -3,10 +3,10 @@ package egress
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +28,9 @@ const (
 // Anthropic Messages API ("input_tokens", "output_tokens", cache tokens)
 // and the OpenAI API ("prompt_tokens", "completion_tokens"). Counts are
 // cumulative within a response, so the largest seen wins; record gets the
-// increments.
+// increments. A response's usage is final once a complete JSON body or a
+// stream's closing usage (Anthropic's message_delta, OpenAI's usage
+// chunk) was read; message_start only carries a first estimate.
 type usageTap struct {
 	sse    bool
 	record func(in, out int64)
@@ -36,7 +38,7 @@ type usageTap struct {
 	mu           sync.Mutex
 	buf          bytes.Buffer // whole JSON body, or the current SSE line
 	tooBig       bool
-	seen         bool
+	seen, final  bool
 	in, out      int64
 	recIn, recOt int64
 }
@@ -99,8 +101,9 @@ func (t *usageTap) flush() {
 	}
 }
 
-// finish records what remains and reports whether any usage was seen.
-func (t *usageTap) finish() (in, out int64, seen bool) {
+// finish records what remains and returns the counts and whether usage
+// was seen at all, and in final form.
+func (t *usageTap) finish() (in, out int64, seen, final bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.sse {
@@ -112,7 +115,7 @@ func (t *usageTap) finish() (in, out int64, seen bool) {
 		t.observe(t.buf.Bytes())
 	}
 	t.flush()
-	return t.in, t.out, t.seen
+	return t.in, t.out, t.seen, t.final
 }
 
 type usageFields struct {
@@ -126,6 +129,7 @@ type usageFields struct {
 
 func (t *usageTap) observe(doc []byte) {
 	var v struct {
+		Type    string       `json:"type"`
 		Usage   *usageFields `json:"usage"`
 		Message *struct {
 			Usage *usageFields `json:"usage"`
@@ -143,20 +147,22 @@ func (t *usageTap) observe(doc []byte) {
 			continue
 		}
 		t.seen = true
+		if !t.sse || v.Type != "message_start" {
+			t.final = true
+		}
 		in := u.InputTokens + u.CacheCreationTokens + u.CacheReadTokens + u.PromptTokens
 		out := u.OutputTokens + u.CompletionTokens
 		t.in, t.out = max(t.in, in), max(t.out, out)
 	}
 }
 
-// meteredBody records a response's usage as it is read and, at the end,
-// fails the budget if a generation response reported none.
+// meteredBody records a response's usage as it is read and calls onEnd
+// once, when the body is done (read to the end, or closed early).
 type meteredBody struct {
 	io.ReadCloser
-	tap  *usageTap
-	once sync.Once
-	// onEnd gets whether usage was seen.
-	onEnd func(seen bool)
+	tap   *usageTap
+	once  sync.Once
+	onEnd func(in, out int64, seen, final bool)
 }
 
 func (b *meteredBody) Read(p []byte) (int, error) {
@@ -177,39 +183,55 @@ func (b *meteredBody) Close() error {
 
 func (b *meteredBody) done() {
 	b.once.Do(func() {
-		_, _, seen := b.tap.finish()
+		in, out, seen, final := b.tap.finish()
 		if b.onEnd != nil {
-			b.onEnd(seen)
+			b.onEnd(in, out, seen, final)
 		}
 	})
 }
 
-// generationPaths are the API calls that consume tokens; their successful
-// responses must report usage.
-var generationPaths = []string{"/messages", "/chat/completions", "/completions", "/responses"}
+// freePaths are the POST calls on a model endpoint that use no tokens.
+// Every other POST is metered and must report usage (deny by default).
+var freePaths = []string{"/messages/count_tokens"}
 
-func isGeneration(req *http.Request) bool {
-	if req.Method != http.MethodPost {
+// Bounds on what the proxy parses in a model request. Larger bodies pass
+// through unparsed: their response must then report usage by itself.
+const (
+	maxParsedRequest  = 8 << 20
+	maxRequestOptions = 64 << 10
+)
+
+// cleanPath reports whether p is in canonical form, so that the path
+// classified here is the path the upstream serves.
+func cleanPath(u *http.Request) bool {
+	p := u.URL.Path
+	if u.URL.RawPath != "" || !strings.HasPrefix(p, "/") {
 		return false
 	}
+	c := path.Clean(p)
+	return c == p || c+"/" == p
+}
+
+func isFree(req *http.Request) bool {
+	if req.Method == http.MethodGet || req.Method == http.MethodHead {
+		return true
+	}
 	p := strings.TrimSuffix(req.URL.Path, "/")
-	for _, g := range generationPaths {
-		if strings.HasSuffix(p, g) {
+	for _, f := range freePaths {
+		if strings.HasSuffix(p, f) {
 			return true
 		}
 	}
 	return false
 }
 
-// maxModelRequestBody bounds the request bodies the proxy rewrites.
-const maxModelRequestBody = 64 << 20
-
 // meteredTransport enforces and records a job's budget for brokered
-// requests. Fail closed: responses are requested uncompressed (a
-// compressed response could not be counted), at most budget.MaxInFlight
-// requests run at once, OpenAI-style streams are asked to report usage,
-// and a successful generation response without readable usage stops the
-// budget.
+// requests. Fail closed: only canonical paths are forwarded, responses are
+// requested uncompressed (a compressed response could not be counted), at
+// most budget.MaxInFlight requests run at once, OpenAI-style streams are
+// asked to report usage, and every metered response must report its
+// final usage. One that ends without it (e.g. a stream closed early) is
+// charged its request's max_tokens; without that bound, the budget stops.
 type meteredTransport struct {
 	base  http.RoundTripper
 	meter *budget.Meter
@@ -219,15 +241,19 @@ func (t *meteredTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if t.meter == nil {
 		return t.base.RoundTrip(req)
 	}
+	if !cleanPath(req) {
+		return plainResponse(req, http.StatusBadRequest, "model request path must be canonical"), nil
+	}
 	release, err := t.meter.Begin()
 	if err != nil {
 		return plainResponse(req, http.StatusTooManyRequests, err.Error()), nil
 	}
 	req = req.Clone(req.Context())
 	req.Header.Set("Accept-Encoding", "identity")
-	gen := isGeneration(req)
-	if gen {
-		if err := requestUsage(req); err != nil {
+	metered := !isFree(req)
+	maxOut := int64(-1)
+	if metered {
+		if maxOut, err = prepareRequest(req); err != nil {
 			release()
 			return plainResponse(req, http.StatusBadRequest, err.Error()), nil
 		}
@@ -240,7 +266,7 @@ func (t *meteredTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if ce := resp.Header.Get("Content-Encoding"); ce != "" && !strings.EqualFold(ce, "identity") {
 		_ = resp.Body.Close()
 		release()
-		if gen {
+		if metered {
 			t.meter.Fail("model sent a compressed response that cannot be metered")
 		}
 		return plainResponse(req, http.StatusBadGateway, "compressed responses cannot be metered"), nil
@@ -249,9 +275,14 @@ func (t *meteredTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	resp.Body = &meteredBody{
 		ReadCloser: resp.Body,
 		tap:        newUsageTap(resp.Header.Get("Content-Type"), t.meter.Record),
-		onEnd: func(seen bool) {
+		onEnd: func(_, out int64, seen, final bool) {
 			release()
-			if gen && ok && !seen {
+			switch {
+			case !metered || !ok || final:
+			case seen && maxOut > 0:
+				// Cut short: the model may have generated up to max_tokens.
+				t.meter.Record(0, max(0, maxOut-out))
+			default:
 				t.meter.Fail("model reported no usage for " + req.URL.Path)
 			}
 		},
@@ -259,39 +290,61 @@ func (t *meteredTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
-// requestUsage makes an OpenAI-style streaming request report usage
-// ("stream_options": {"include_usage": true}); Anthropic streams always
-// do. Non-JSON bodies are left alone (the response is then checked).
-func requestUsage(req *http.Request) error {
-	if req.Body == nil || !strings.Contains(req.URL.Path, "completions") {
-		return nil
+// prepareRequest reads a metered request's max_tokens and makes an
+// OpenAI-style streaming request report usage ("stream_options":
+// {"include_usage": true}); Anthropic streams always do. Only the top
+// level of the JSON body is decoded (values stay raw bytes), and bodies
+// over maxParsedRequest are passed through unparsed (max_tokens -1).
+func prepareRequest(req *http.Request) (maxTokens int64, err error) {
+	if req.Body == nil || req.Body == http.NoBody {
+		return -1, nil
 	}
-	raw, err := io.ReadAll(io.LimitReader(req.Body, maxModelRequestBody+1))
-	_ = req.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(req.Body, maxParsedRequest+1))
 	if err != nil {
-		return err
+		_ = req.Body.Close()
+		return -1, err
 	}
-	if len(raw) > maxModelRequestBody {
-		return errors.New("model request too large")
+	if len(raw) > maxParsedRequest {
+		req.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(raw), req.Body), req.Body}
+		return -1, nil
 	}
-	var body map[string]any
-	if json.Unmarshal(raw, &body) == nil {
-		if stream, _ := body["stream"].(bool); stream {
-			opts, _ := body["stream_options"].(map[string]any)
-			if opts == nil {
-				opts = map[string]any{}
+	_ = req.Body.Close()
+	maxTokens = -1
+	var top map[string]json.RawMessage
+	if json.Unmarshal(raw, &top) == nil {
+		for _, k := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+			var n int64
+			if v, ok := top[k]; ok && json.Unmarshal(v, &n) == nil && n > 0 {
+				maxTokens = n
+				break
 			}
-			opts["include_usage"] = true
-			body["stream_options"] = opts
-			if rewritten, err := json.Marshal(body); err == nil {
-				raw = rewritten
+		}
+		if openAIStyle(req.URL.Path) && string(bytes.TrimSpace(top["stream"])) == "true" {
+			opts := map[string]json.RawMessage{}
+			if v, ok := top["stream_options"]; ok && len(v) <= maxRequestOptions {
+				_ = json.Unmarshal(v, &opts)
+			}
+			opts["include_usage"] = json.RawMessage("true")
+			if o, err := json.Marshal(opts); err == nil {
+				top["stream_options"] = o
+				if rewritten, err := json.Marshal(top); err == nil {
+					raw = rewritten
+				}
 			}
 		}
 	}
 	req.Body = io.NopCloser(bytes.NewReader(raw))
 	req.ContentLength = int64(len(raw))
 	req.Header.Set("Content-Length", strconv.Itoa(len(raw)))
-	return nil
+	return maxTokens, nil
+}
+
+func openAIStyle(p string) bool {
+	p = strings.TrimSuffix(p, "/")
+	return strings.HasSuffix(p, "/chat/completions") || strings.HasSuffix(p, "/completions")
 }
 
 func plainResponse(req *http.Request, code int, msg string) *http.Response {
