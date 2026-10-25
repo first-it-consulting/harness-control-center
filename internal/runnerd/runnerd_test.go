@@ -431,7 +431,8 @@ func TestFileStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := filepath.Join(dir, "jobs", "job-1", "job.json")
-	if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+	// Windows has no Unix modes; presence is still checked there.
+	if fi, err := os.Stat(p); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Errorf("record = %v, %v", fi, err)
 	}
 	// Damaged, foreign and misnamed records are skipped.
