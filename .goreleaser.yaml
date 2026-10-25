@@ -39,6 +39,8 @@ builds:
 
 archives:
   - formats: [tar.gz]
+    # hcc-helper exists only for Linux, so archives differ in content.
+    allow_different_binary_count: true
     format_overrides:
       - goos: windows
         formats: [zip]
