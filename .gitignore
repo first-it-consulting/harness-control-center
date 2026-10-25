@@ -9,3 +9,5 @@ coverage.out
 .env
 *.pem
 *.key
+/hcc
+/hcc-helper
