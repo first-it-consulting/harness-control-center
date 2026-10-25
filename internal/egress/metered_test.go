@@ -1,0 +1,147 @@
+package egress
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/first-it-consulting/harness-control-center/internal/budget"
+)
+
+type rtFunc func(*http.Request) (*http.Response, error)
+
+func (f rtFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func respond(code int, ct, ce, body string) *http.Response {
+	h := http.Header{"Content-Type": {ct}}
+	if ce != "" {
+		h.Set("Content-Encoding", ce)
+	}
+	return &http.Response{StatusCode: code, Header: h, Body: io.NopCloser(strings.NewReader(body))}
+}
+
+// post sends a request and drains the response, returning its status.
+func post(t *testing.T, tr http.RoundTripper, path, body string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "https://model.example"+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept-Encoding", "gzip, br")
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestMeteredForcesIdentityAndRejectsCompressed(t *testing.T) {
+	m := budget.New(budget.Limits{MaxTokens: 1000}, nil, nil)
+	var sawEncoding string
+	tr := &meteredTransport{meter: m, base: rtFunc(func(r *http.Request) (*http.Response, error) {
+		sawEncoding = r.Header.Get("Accept-Encoding")
+		return respond(200, "application/json", "gzip", "\x1f\x8b..."), nil
+	})}
+	code := post(t, tr, "/v1/messages", `{}`)
+	if sawEncoding != "identity" {
+		t.Errorf("upstream saw Accept-Encoding %q", sawEncoding)
+	}
+	if code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", code)
+	}
+	if m.Exceeded() == "" {
+		t.Error("compressed generation response did not stop the budget")
+	}
+}
+
+func TestMeteredNoUsageFailsClosed(t *testing.T) {
+	m := budget.New(budget.Limits{MaxTokens: 1000}, nil, nil)
+	tr := &meteredTransport{meter: m, base: rtFunc(func(*http.Request) (*http.Response, error) {
+		return respond(200, "text/event-stream", "", "data: {\"choices\":[]}\n\ndata: [DONE]\n\n"), nil
+	})}
+	post(t, tr, "/v1/chat/completions", `{"stream":true}`)
+	if m.Exceeded() == "" {
+		t.Fatal("response without usage did not stop the budget")
+	}
+	if code := post(t, tr, "/v1/chat/completions", `{}`); code != http.StatusTooManyRequests {
+		t.Errorf("next request status = %d, want 429", code)
+	}
+}
+
+func TestMeteredNonGenerationAndErrorsNeedNoUsage(t *testing.T) {
+	m := budget.New(budget.Limits{MaxTokens: 1000}, nil, nil)
+	code := 200
+	tr := &meteredTransport{meter: m, base: rtFunc(func(*http.Request) (*http.Response, error) {
+		return respond(code, "application/json", "", `{"data":[]}`), nil
+	})}
+	req, _ := http.NewRequest(http.MethodGet, "https://model.example/v1/models", nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	code = 500
+	post(t, tr, "/v1/messages", `{}`)
+	if m.Exceeded() != "" {
+		t.Errorf("budget stopped: %s", m.Exceeded())
+	}
+}
+
+func TestMeteredInjectsIncludeUsage(t *testing.T) {
+	m := budget.New(budget.Limits{}, nil, nil)
+	var got map[string]any
+	tr := &meteredTransport{meter: m, base: rtFunc(func(r *http.Request) (*http.Response, error) {
+		raw, _ := io.ReadAll(r.Body)
+		if int64(len(raw)) != r.ContentLength {
+			t.Errorf("content length %d for %d bytes", r.ContentLength, len(raw))
+		}
+		_ = json.Unmarshal(raw, &got)
+		return respond(200, "application/json", "", `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`), nil
+	})}
+	post(t, tr, "/v1/chat/completions", `{"model":"x","stream":true,"stream_options":{"foo":1}}`)
+	opts, _ := got["stream_options"].(map[string]any)
+	if opts["include_usage"] != true || opts["foo"] == nil || got["model"] != "x" {
+		t.Errorf("rewritten body = %v", got)
+	}
+}
+
+func TestMeteredInFlightCap(t *testing.T) {
+	m := budget.New(budget.Limits{}, nil, nil)
+	block := make(chan struct{})
+	tr := &meteredTransport{meter: m, base: rtFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(io.MultiReader(blockingReader(block), strings.NewReader(`{"usage":{"input_tokens":1,"output_tokens":1}}`)))}, nil
+	})}
+	var open []io.ReadCloser
+	for range budget.MaxInFlight {
+		req, _ := http.NewRequest(http.MethodPost, "https://model.example/v1/messages", strings.NewReader(`{}`))
+		resp, err := tr.RoundTrip(req) //nolint:bodyclose // the bodies are closed after the cap is checked
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatalf("request: %v %v", resp, err)
+		}
+		open = append(open, resp.Body)
+	}
+	if code := post(t, tr, "/v1/messages", `{}`); code != http.StatusTooManyRequests {
+		t.Errorf("request over the cap: status %d, want 429", code)
+	}
+	close(block)
+	for _, r := range open {
+		_, _ = io.ReadAll(r)
+		_ = r.Close()
+	}
+	if code := post(t, tr, "/v1/messages", `{}`); code == http.StatusTooManyRequests {
+		t.Error("slots not released")
+	}
+}
+
+type blockingReader chan struct{}
+
+func (b blockingReader) Read([]byte) (int, error) {
+	<-b
+	return 0, io.EOF
+}

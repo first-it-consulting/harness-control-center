@@ -1,17 +1,23 @@
 package egress
 
 import (
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 )
 
 func tapAll(contentType string, chunks ...string) (int64, int64) {
-	t := newUsageTap(contentType)
+	var recIn, recOut int64
+	t := newUsageTap(contentType, func(in, out int64) { recIn += in; recOut += out })
 	for _, c := range chunks {
 		_, _ = t.Write([]byte(c))
 	}
-	return t.finish()
+	in, out, _ := t.finish()
+	if in != recIn || out != recOut {
+		panic(fmt.Sprintf("recorded %d/%d but counted %d/%d", recIn, recOut, in, out))
+	}
+	return in, out
 }
 
 func TestUsageJSON(t *testing.T) {
@@ -62,31 +68,47 @@ func TestUsageOpenAIStreamWithoutTrailingNewline(t *testing.T) {
 
 func TestUsageBounded(t *testing.T) {
 	huge := strings.Repeat("x", maxUsageJSON+1)
-	tap := newUsageTap("application/json")
+	tap := newUsageTap("application/json", nil)
 	_, _ = tap.Write([]byte(huge))
 	if tap.buf.Len() != 0 {
 		t.Error("oversized JSON kept in memory")
 	}
-	sse := newUsageTap("text/event-stream")
+	sse := newUsageTap("text/event-stream", nil)
 	_, _ = sse.Write([]byte("data: " + strings.Repeat("y", 2*maxSSELine)))
 	if sse.buf.Len() > maxSSELine {
 		t.Errorf("SSE line buffer grew to %d", sse.buf.Len())
 	}
 }
 
-func TestMeteredBodyRecordsOnce(t *testing.T) {
+func TestMeteredBodyEndsOnce(t *testing.T) {
 	var calls int
 	var gotIn, gotOut int64
+	var seen bool
 	b := &meteredBody{
 		ReadCloser: io.NopCloser(strings.NewReader(`{"usage":{"input_tokens":5,"output_tokens":6}}`)),
-		tap:        newUsageTap("application/json"),
-		record:     func(in, out int64) { calls++; gotIn, gotOut = in, out },
+		tap:        newUsageTap("application/json", func(in, out int64) { gotIn += in; gotOut += out }),
+		onEnd:      func(s bool) { calls++; seen = s },
 	}
 	if _, err := io.ReadAll(b); err != nil {
 		t.Fatal(err)
 	}
 	_ = b.Close()
-	if calls != 1 || gotIn != 5 || gotOut != 6 {
-		t.Errorf("calls %d, usage %d/%d", calls, gotIn, gotOut)
+	if calls != 1 || !seen || gotIn != 5 || gotOut != 6 {
+		t.Errorf("calls %d seen %v usage %d/%d", calls, seen, gotIn, gotOut)
+	}
+}
+
+// Streamed usage is recorded as it arrives, so the budget can stop a long
+// stream before it ends.
+func TestStreamRecordedIncrementally(t *testing.T) {
+	var events [][2]int64
+	tap := newUsageTap("text/event-stream", func(in, out int64) { events = append(events, [2]int64{in, out}) })
+	_, _ = tap.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":1}}}\n\n"))
+	if len(events) != 1 || events[0] != [2]int64{100, 1} {
+		t.Fatalf("after message_start: %v", events)
+	}
+	_, _ = tap.Write([]byte("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":40}}\n\n"))
+	if len(events) != 2 || events[1] != [2]int64{0, 39} {
+		t.Errorf("after message_delta: %v (want the increment)", events)
 	}
 }

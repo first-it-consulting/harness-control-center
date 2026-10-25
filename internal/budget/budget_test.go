@@ -78,3 +78,40 @@ func TestConcurrentRecord(t *testing.T) {
 		t.Errorf("usage %+v, callbacks %d", u, calls)
 	}
 }
+
+func TestBeginCapsInFlight(t *testing.T) {
+	m := New(Limits{}, nil, nil)
+	var releases []func()
+	for range MaxInFlight {
+		r, err := m.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, r)
+	}
+	if _, err := m.Begin(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("over the cap: %v", err)
+	}
+	releases[0]()
+	releases[0]() // idempotent
+	if _, err := m.Begin(); err != nil {
+		t.Errorf("after release: %v", err)
+	}
+	if _, err := m.Begin(); !errors.Is(err, ErrBusy) {
+		t.Errorf("double release freed two slots: %v", err)
+	}
+}
+
+func TestFailStopsOnce(t *testing.T) {
+	var calls []string
+	m := New(Limits{}, nil, func(r string) { calls = append(calls, r) })
+	m.Fail("no usage")
+	m.Fail("again")
+	m.Record(1, 1)
+	if len(calls) != 1 || calls[0] != "no usage" || m.Exceeded() != "no usage" {
+		t.Errorf("calls %v exceeded %q", calls, m.Exceeded())
+	}
+	if _, err := m.Begin(); !errors.Is(err, ErrExhausted) {
+		t.Errorf("Begin after Fail: %v", err)
+	}
+}

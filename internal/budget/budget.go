@@ -13,6 +13,14 @@ import (
 // ErrExhausted is returned by Allow once a limit is reached.
 var ErrExhausted = errors.New("budget exhausted")
 
+// ErrBusy is returned by Begin when MaxInFlight requests are running.
+var ErrBusy = errors.New("too many concurrent model requests")
+
+// MaxInFlight bounds a job's concurrent metered requests. Every in-flight
+// request passed the budget check before any of them was counted, so this
+// also bounds how far a budget can be overshot.
+const MaxInFlight = 4
+
 // Limits are a job's budget. Zero means "no limit" for that dimension.
 type Limits struct {
 	MaxTokens  int64
@@ -44,6 +52,7 @@ type Meter struct {
 	mu       sync.Mutex
 	usage    Usage
 	exceeded string
+	inFlight int
 }
 
 // New returns a meter. price may be nil (cost unknown). onExceeded is
@@ -64,7 +73,44 @@ func (m *Meter) Allow() error {
 	return nil
 }
 
-// Record adds one response's token counts.
+// Begin admits one metered request: the budget must not be exhausted and
+// fewer than MaxInFlight requests may be running. Call release when the
+// request (including its response body) is done.
+func (m *Meter) Begin() (release func(), err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.exceeded != "" {
+		return nil, fmt.Errorf("%w: %s", ErrExhausted, m.exceeded)
+	}
+	if m.inFlight >= MaxInFlight {
+		return nil, ErrBusy
+	}
+	m.inFlight++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			m.inFlight--
+			m.mu.Unlock()
+		})
+	}, nil
+}
+
+// Fail stops the budget for a reason other than a limit, e.g. a model
+// response whose usage cannot be read: without a count, nothing is safe.
+func (m *Meter) Fail(reason string) {
+	m.mu.Lock()
+	first := m.exceeded == ""
+	if first {
+		m.exceeded = reason
+	}
+	m.mu.Unlock()
+	if first && m.onExceeded != nil {
+		m.onExceeded(reason)
+	}
+}
+
+// Record adds token counts (a whole response's, or a streamed increment).
 func (m *Meter) Record(input, output int64) {
 	if input < 0 || output < 0 {
 		return
