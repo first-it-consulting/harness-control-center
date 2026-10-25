@@ -49,6 +49,13 @@ func startHTTPBroker(t *testing.T) (proxy string, seen chan seenRequest, logs *l
 
 func startHTTPBrokerWith(t *testing.T, meter *budget.Meter) (proxy string, seen chan seenRequest, logs *lockedLog) {
 	t.Helper()
+	return startHTTPBrokerModel(t, meter, "llm.example")
+}
+
+// startHTTPBrokerModel brokers llm.example:4000, treating modelHost:4000
+// as the model endpoint.
+func startHTTPBrokerModel(t *testing.T, meter *budget.Meter, modelHost string) (proxy string, seen chan seenRequest, logs *lockedLog) {
+	t.Helper()
 	seen = make(chan seenRequest, 8)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -81,6 +88,8 @@ func startHTTPBrokerWith(t *testing.T, meter *budget.Meter) (proxy string, seen 
 		},
 		LocalAddrs: func() ([]netip.Addr, error) { return nil, nil },
 		Meter:      meter,
+		ModelHost:  modelHost,
+		ModelPort:  4000,
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -228,5 +237,29 @@ func TestBudgetStopsModelRequests(t *testing.T) {
 	case r := <-seen:
 		t.Errorf("request beyond the budget reached upstream: %+v", r)
 	default:
+	}
+}
+
+// Only the model endpoint is metered: a brokered API that reports no
+// token usage (here: any credentialed host that is not the model) must
+// not stop the budget.
+func TestOnlyTheModelIsMetered(t *testing.T) {
+	meter := budget.New(budget.Limits{MaxTokens: 100}, nil, nil)
+	proxy, seen, _ := startHTTPBrokerModel(t, meter, "model.example")
+	c, err := net.Dial("tcp", proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	br := bufio.NewReader(c)
+	for range 3 {
+		resp := send(t, c, br, "POST http://llm.example:4000/api/things HTTP/1.1\r\nHost: llm.example:4000\r\nContent-Length: 2\r\n\r\n{}")
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		<-seen
+	}
+	if u := meter.Usage(); u.InputTokens != 0 || meter.Exceeded() != "" {
+		t.Errorf("a non-model host was metered: %+v %q", u, meter.Exceeded())
 	}
 }

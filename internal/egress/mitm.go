@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/budget"
 	"github.com/first-it-consulting/harness-control-center/internal/credentials"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
@@ -78,7 +79,7 @@ func (b *broker) serve(ctx context.Context, conn net.Conn) {
 				pr.Out.Header.Set(b.cred.Header, b.cred.Value)
 			}
 		},
-		Transport:     &meteredTransport{base: transport, meter: b.p.Meter},
+		Transport:     &meteredTransport{base: transport, meter: b.p.meterFor(b.host, b.port)},
 		FlushInterval: -1, // stream (e.g. server-sent events) as it arrives
 		ErrorLog:      log.New(io.Discard, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -135,6 +136,15 @@ func (b *broker) transport() *http.Transport {
 		MaxIdleConnsPerHost: 2,
 		IdleConnTimeout:     90 * time.Second,
 	}
+}
+
+// meterFor returns the meter for requests to host:port: the job's meter
+// for the model endpoint, nil (no metering) for everything else.
+func (p *Proxy) meterFor(host string, port int) *budget.Meter {
+	if p.Meter != nil && host == p.ModelHost && port == p.ModelPort {
+		return p.Meter
+	}
+	return nil
 }
 
 // oneConnListener hands out a single connection, then reports closed
@@ -226,7 +236,7 @@ func (p *Proxy) forwardHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader
 		IdleConnTimeout:     90 * time.Second,
 	}
 	defer transport.CloseIdleConnections()
-	metered := &meteredTransport{base: transport, meter: p.Meter}
+	metered := &meteredTransport{base: transport, meter: p.meterFor(host, port)}
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 

@@ -201,6 +201,7 @@ func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slo
 			if err := brokerModel(byHost, m); err != nil {
 				return nil, err
 			}
+			_, p.ModelHost, p.ModelPort = m.EndpointHostPort()
 		}
 		var hosts, tlsHosts []string
 		for host, c := range byHost {

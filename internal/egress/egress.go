@@ -66,8 +66,12 @@ type Proxy struct {
 	// UpstreamRoots verifies upstream servers when brokering (nil: the
 	// system roots).
 	UpstreamRoots *x509.CertPool
-	// Meter, if set, limits and records the job's brokered model usage.
-	Meter *budget.Meter
+	// Meter, if set, limits and records the job's model usage: requests to
+	// ModelHost:ModelPort (which must be brokered). Other hosts are never
+	// metered: they report no token usage.
+	Meter     *budget.Meter
+	ModelHost string
+	ModelPort int
 	// Resolve, Dial and LocalAddrs are replaceable for tests.
 	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 	Dial    func(ctx context.Context, addr netip.AddrPort) (net.Conn, error)
