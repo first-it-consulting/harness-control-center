@@ -656,3 +656,41 @@ func TestUnstoppableVMKeepsItsLink(t *testing.T) {
 		}
 	}
 }
+
+func TestPeerListenerAcceptsOnlyItsGuest(t *testing.T) {
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inner.Close()
+	for _, tc := range []struct {
+		peer string
+		want bool
+	}{{"127.0.0.1", true}, {"127.0.0.2", false}} {
+		l := &peerListener{Listener: inner, peer: netip.MustParseAddr(tc.peer)}
+		accepted := make(chan bool, 1)
+		go func() {
+			c, err := l.Accept()
+			if err == nil {
+				_ = c.Close()
+			}
+			accepted <- err == nil
+		}()
+		c, err := net.Dial("tcp", inner.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-accepted:
+			if got != tc.want {
+				t.Errorf("peer %s: accepted=%v, want %v", tc.peer, got, tc.want)
+			}
+		case <-time.After(500 * time.Millisecond):
+			if tc.want {
+				t.Errorf("peer %s: not accepted", tc.peer)
+			}
+			_ = inner.Close() // unblock the pending Accept
+		}
+		_ = c.Close()
+	}
+}

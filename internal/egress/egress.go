@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -48,9 +49,13 @@ type Proxy struct {
 	Log     *slog.Logger
 	// MaxConns bounds concurrent tunnels (default DefaultMaxConns).
 	MaxConns int
-	// Resolve and Dial are replaceable for tests.
+	// Resolve, Dial and LocalAddrs are replaceable for tests.
 	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 	Dial    func(ctx context.Context, addr netip.AddrPort) (net.Conn, error)
+	// LocalAddrs lists the host's own addresses, which are never
+	// reachable (the guest must not reach host services through the
+	// proxy). It is called for every connection, so new interfaces count.
+	LocalAddrs func() ([]netip.Addr, error)
 }
 
 // Serve accepts connections on l until ctx ends; then it closes l and
@@ -105,6 +110,9 @@ func (p *Proxy) defaults() {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		}
 	}
+	if p.LocalAddrs == nil {
+		p.LocalAddrs = hostAddrs
+	}
 	if p.Dial == nil {
 		p.Dial = func(ctx context.Context, addr netip.AddrPort) (net.Conn, error) {
 			var d net.Dialer
@@ -144,9 +152,14 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 		p.refuse(conn, http.StatusBadGateway, "cannot resolve host", host, port, err)
 		return
 	}
+	local, err := p.LocalAddrs()
+	if err != nil { // fail closed: without the host's addresses, nothing is safe
+		p.refuse(conn, http.StatusBadGateway, "cannot determine the host's own addresses", host, port, err)
+		return
+	}
 	var target netip.Addr
 	for _, a := range addrs {
-		if a = a.Unmap(); !p.blocked(a) {
+		if a = a.Unmap(); !p.blocked(a) && !slices.Contains(local, a) {
 			target = a
 			break
 		}
@@ -246,6 +259,21 @@ func (p *Proxy) blocked(a netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// hostAddrs returns every address configured on the host.
+func hostAddrs() ([]netip.Addr, error) {
+	ifAddrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]netip.Addr, 0, len(ifAddrs))
+	for _, a := range ifAddrs {
+		if pfx, err := netip.ParsePrefix(a.String()); err == nil {
+			out = append(out, pfx.Addr().Unmap())
+		}
+	}
+	return out, nil
 }
 
 func mustPrefixes(ss ...string) []netip.Prefix {

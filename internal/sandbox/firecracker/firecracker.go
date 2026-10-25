@@ -338,6 +338,9 @@ func (p *Provider) startNetwork(ctx context.Context, slot int, proxy sandbox.Pro
 	if err != nil {
 		return info, nil, errors.Join(fmt.Errorf("firecracker: proxy listener: %w", err), down())
 	}
+	// Only this link's guest may use its proxy (the firewall also keeps
+	// other machines out).
+	l = &peerListener{Listener: l, peer: info.Guest.Addr()}
 	pctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
 	go func() { served <- proxy.Serve(pctx, l) }()
@@ -398,4 +401,24 @@ func writeStaged(r io.Reader, name, dst string) error {
 		return fmt.Errorf("firecracker: write %s: %w", name, err)
 	}
 	return out.Close()
+}
+
+// peerListener accepts connections only from one address; others are
+// closed immediately.
+type peerListener struct {
+	net.Listener
+	peer netip.Addr
+}
+
+func (l *peerListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if ap, err := netip.ParseAddrPort(c.RemoteAddr().String()); err == nil && ap.Addr().Unmap() == l.peer {
+			return c, nil
+		}
+		_ = c.Close()
+	}
 }

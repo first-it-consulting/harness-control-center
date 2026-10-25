@@ -71,6 +71,7 @@ func TestRuleset(t *testing.T) {
 	r := c.Ruleset()
 	for _, want := range []string{
 		"delete table inet hcc_guard",
+		`iifname != "hcc*" ip daddr 172.31.0.0/16 counter drop`,
 		`iifname "hcc*" tcp dport 3128 fib daddr . iif type local ct state new accept`,
 		`iifname "hcc*" counter drop`,
 		`oifname "hcc*" counter drop`,

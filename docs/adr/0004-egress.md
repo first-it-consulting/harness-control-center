@@ -26,11 +26,14 @@ the agent's reach, by name, without trusting the guest's DNS or routing.
   first resolved address that is not loopback, link-local (cloud
   metadata), multicast, reserved, the sandbox subnet, or private (unless
   the harness grants `allowPrivateNetworks`). It dials exactly the address
-  it checked, which defeats DNS rebinding. Every decision is logged.
+  it checked, which defeats DNS rebinding. The host's own addresses are
+  never destinations. Each proxy accepts connections only from its link's
+  guest address. Every decision is logged.
 - **The host enforces it too.** nftables table `inet hcc_guard` (applied
   atomically by `hcc-helper net-up`): from `hcc*` interfaces only new TCP
   connections to the proxy port *on the link's own address* are accepted;
-  nothing is forwarded to or from sandbox links.
+  nothing is forwarded to or from sandbox links, and nothing arriving on
+  another interface may reach the sandbox subnet.
 - **Root work stays in hcc-helper** (`net-up`, `net-down`): tap devices
   owned by the slot's VM UID, addresses and the ruleset all derive from the
   root-owned configuration and the slot number.

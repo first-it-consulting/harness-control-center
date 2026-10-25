@@ -72,7 +72,9 @@ func (n NetInfo) Valid() error {
 
 // Ruleset is the nftables table guarding sandbox links: a guest may open
 // new connections only to the proxy port on its own link's host address,
-// and nothing is forwarded to or from any sandbox link. It is applied
+// nothing is forwarded to or from any sandbox link, and nothing arriving
+// through any other interface may reach the sandbox subnet (so no other
+// machine can use a sandbox's proxy). It is applied
 // atomically, replacing any previous version.
 func (c *NetworkConfig) Ruleset() string {
 	return fmt.Sprintf(`table inet hcc_guard
@@ -80,6 +82,7 @@ delete table inet hcc_guard
 table inet hcc_guard {
 	chain input {
 		type filter hook input priority filter; policy accept;
+		iifname != "hcc*" ip daddr %s counter drop
 		iifname "hcc*" ct state established,related accept
 		iifname "hcc*" tcp dport %d fib daddr . iif type local ct state new accept
 		iifname "hcc*" counter drop
@@ -90,5 +93,5 @@ table inet hcc_guard {
 		oifname "hcc*" counter drop
 	}
 }
-`, c.ProxyPort)
+`, c.Subnet, c.ProxyPort)
 }

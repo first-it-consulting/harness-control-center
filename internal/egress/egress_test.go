@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -81,15 +82,17 @@ func startProxy(t *testing.T, mutate func(*Proxy)) (string, *world, context.Canc
 		t.Fatal(err)
 	}
 	w := &world{dns: map[string][]string{
-		"allowed.example":    {"93.184.216.34"},
-		"a.cdn.example":      {"93.184.216.35"},
-		"rebind.cdn.example": {"127.0.0.1"},
-		"meta.cdn.example":   {"169.254.169.254"},
-		"lan.cdn.example":    {"10.10.20.10"},
-		"mixed.cdn.example":  {"10.0.0.1", "93.184.216.36"},
-		"vmnet.cdn.example":  {"172.31.0.1"},
-		"v6.cdn.example":     {"::1", "2606:2800:220:1:248:1893:25c8:1946"},
-		"mapped.cdn.example": {"::ffff:127.0.0.1"},
+		"allowed.example":     {"93.184.216.34"},
+		"a.cdn.example":       {"93.184.216.35"},
+		"rebind.cdn.example":  {"127.0.0.1"},
+		"meta.cdn.example":    {"169.254.169.254"},
+		"lan.cdn.example":     {"10.10.20.10"},
+		"mixed.cdn.example":   {"10.0.0.1", "93.184.216.36"},
+		"vmnet.cdn.example":   {"172.31.0.1"},
+		"v6.cdn.example":      {"::1", "2606:2800:220:1:248:1893:25c8:1946"},
+		"mapped.cdn.example":  {"::ffff:127.0.0.1"},
+		"host.cdn.example":    {"10.10.20.151"}, // the host's LAN address
+		"pubhost.cdn.example": {"203.1.113.7"},  // the host's public address
 	}}
 	p := &Proxy{
 		Policy:  engine,
@@ -97,6 +100,9 @@ func startProxy(t *testing.T, mutate func(*Proxy)) (string, *world, context.Canc
 		Blocked: []netip.Prefix{netip.MustParsePrefix("172.31.0.0/16")},
 		Resolve: w.resolve,
 		Dial:    w.dial,
+		LocalAddrs: func() ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("10.10.20.151"), netip.MustParseAddr("203.1.113.7"), netip.MustParseAddr("172.31.0.1")}, nil
+		},
 	}
 	if mutate != nil {
 		mutate(p)
@@ -329,5 +335,44 @@ func TestJobEndClosesTunnels(t *testing.T) {
 	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := br.ReadByte(); err == nil || errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("tunnel still open after the job ended: %v", err)
+	}
+}
+
+// The guest must never reach the host's own services through the proxy,
+// whatever the harness grants.
+func TestHostAddressesNeverReachable(t *testing.T) {
+	for _, allowPrivate := range []bool{false, true} {
+		proxy, w, _ := startProxy(t, func(p *Proxy) { p.AllowPrivate = allowPrivate })
+		for _, target := range []string{"host.cdn.example:8443", "pubhost.cdn.example:8443"} {
+			code, c, _ := connect(t, proxy, target)
+			_ = c.Close()
+			if code != http.StatusForbidden {
+				t.Errorf("allowPrivate=%v %s: status %d, want 403", allowPrivate, target, code)
+			}
+		}
+		if got := w.dialedAddrs(); len(got) != 0 {
+			t.Errorf("dialed the host itself: %v", got)
+		}
+	}
+}
+
+func TestLocalAddrsErrorFailsClosed(t *testing.T) {
+	proxy, w, _ := startProxy(t, func(p *Proxy) {
+		p.LocalAddrs = func() ([]netip.Addr, error) { return nil, errors.New("netlink unavailable") }
+	})
+	code, c, _ := connect(t, proxy, "allowed.example:443")
+	_ = c.Close()
+	if code != http.StatusBadGateway || len(w.dialedAddrs()) != 0 {
+		t.Errorf("status %d, dialed %v; want refusal without dialing", code, w.dialedAddrs())
+	}
+}
+
+func TestHostAddrsIncludesLoopback(t *testing.T) {
+	addrs, err := hostAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(addrs, netip.MustParseAddr("127.0.0.1")) {
+		t.Errorf("host addresses %v lack 127.0.0.1", addrs)
 	}
 }
