@@ -2,6 +2,7 @@ package firecracker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -24,6 +25,10 @@ type Host interface {
 	// RemoveJail deletes the sandbox's chroot and cgroup. Missing ones
 	// are not an error.
 	RemoveJail(ctx context.Context, id string) error
+	// SetupNetwork creates slot's link (tap device, addresses, firewall).
+	SetupNetwork(ctx context.Context, slot int) (NetInfo, error)
+	// TeardownNetwork deletes slot's link; a missing one is not an error.
+	TeardownNetwork(ctx context.Context, slot int) error
 }
 
 // Process is a started VM.
@@ -69,6 +74,27 @@ func (h *HelperHost) KillJail(ctx context.Context, id string) error {
 // RemoveJail implements Host.
 func (h *HelperHost) RemoveJail(ctx context.Context, id string) error {
 	return h.call(ctx, "remove", id)
+}
+
+// SetupNetwork implements Host.
+func (h *HelperHost) SetupNetwork(ctx context.Context, slot int) (NetInfo, error) {
+	var info NetInfo
+	cmd := command(ctx, h.Prefix, h.HelperPath, "net-up", "--slot", strconv.Itoa(slot))
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return info, fmt.Errorf("firecracker: net-up: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		return info, fmt.Errorf("firecracker: net-up output: %w", err)
+	}
+	return info, info.Valid()
+}
+
+// TeardownNetwork implements Host.
+func (h *HelperHost) TeardownNetwork(ctx context.Context, slot int) error {
+	return runQuiet(ctx, h.Prefix, h.HelperPath, "net-down", "--slot", strconv.Itoa(slot))
 }
 
 func (h *HelperHost) call(ctx context.Context, op, id string) error {

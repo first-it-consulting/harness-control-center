@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -41,8 +42,24 @@ type Spec struct {
 	// Timeout bounds the run; it is mandatory.
 	Timeout time.Duration
 	// BootArgs are extra kernel parameters ("key" or "key=value"). Keys
-	// the provider controls (init, console, root ...) are rejected.
+	// the provider controls (init, console, root, the network ...) are
+	// rejected.
 	BootArgs []string
+	// Network, if set, gives the sandbox one network interface whose only
+	// reachable peer is an egress proxy served by Network.Proxy. Without
+	// it the sandbox has no network at all.
+	Network *Network
+}
+
+// Network is a sandbox's network access.
+type Network struct {
+	Proxy Proxy
+}
+
+// Proxy serves a sandbox's egress proxy on a listener the provider binds
+// to the host side of the sandbox's link, until ctx ends.
+type Proxy interface {
+	Serve(ctx context.Context, l net.Listener) error
 }
 
 // Limits for Spec fields.
@@ -61,6 +78,7 @@ var (
 	reservedBootArgs = map[string]bool{
 		"init": true, "rdinit": true, "console": true, "root": true, "rootfstype": true,
 		"rw": true, "ro": true, "reboot": true, "panic": true, "pci": true,
+		"ip": true, "hcc.ip": true, "hcc.proxy": true,
 	}
 )
 
@@ -91,6 +109,9 @@ func (s *Spec) Validate() error {
 	}
 	if s.Timeout <= 0 || s.Timeout > MaxTimeout {
 		errs = append(errs, fmt.Errorf("sandbox: timeout must be greater than 0 and at most %s", MaxTimeout))
+	}
+	if s.Network != nil && s.Network.Proxy == nil {
+		errs = append(errs, errors.New("sandbox: network without a proxy"))
 	}
 	for _, a := range s.BootArgs {
 		key, _, _ := strings.Cut(a, "=")

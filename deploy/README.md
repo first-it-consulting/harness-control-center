@@ -28,6 +28,7 @@ hcc run --ssh <host> my-harness.yaml
 | `/etc/hcc/runner.yaml` | root, 0644 | Neither the runner nor the caller can change what runs as root. |
 | `/var/lib/hcc-jails/` | root, 0711 | The jail tree. hcc-helper builds every jail itself from the runner's staged files; the runner cannot list, add or swap anything there. |
 | `/var/lib/hcc/` (state, staging) | hcc-runner, 0700 | Only the runner. It prepares each VM's files in `staging/<job>`. |
+| `inet hcc_guard` (nftables), `hcc*` interfaces, 172.31.0.0/16 | root | Sandbox links and their guard (ADR-0004). The names and the subnet are reserved; change `network.subnet` in `/etc/hcc/runner.yaml` if it overlaps a real network. |
 | `/run/hcc/runner.sock` | hcc-runner:hcc, 0660 in a 0750 dir | The runner and group `hcc`; nobody else. |
 
 ## Testing an installation
@@ -45,5 +46,9 @@ starts it again afterwards.
   because sudo needs setuid. Replacing sudo with a socket-activated root
   service would allow that.
 - The `base` image boots and shuts down; no agent runtime runs in it yet.
+  It does set up its network (eth0, `HTTPS_PROXY`) when the harness grants
+  egress.
+- Only HTTPS (CONNECT) leaves a sandbox; credentials cannot be injected
+  yet, so harnesses that need them are still rejected.
 - Job history lives in memory and is lost on restart; console logs stay in
   `/var/lib/hcc/state` and are not rotated yet.

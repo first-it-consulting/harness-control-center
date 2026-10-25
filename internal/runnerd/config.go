@@ -8,12 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/first-it-consulting/harness-control-center/internal/sandbox/firecracker"
 )
 
 // DefaultSocket is where the daemon listens unless configured otherwise.
@@ -35,6 +38,36 @@ type Config struct {
 	StateDir    string                 `yaml:"stateDir"`
 	Firecracker FirecrackerConfig      `yaml:"firecracker"`
 	Images      map[string]ImageConfig `yaml:"images"`
+	// Network enables network access for harnesses that are granted it;
+	// without it, such harnesses are rejected.
+	Network *NetworkSection `yaml:"network"`
+}
+
+// NetworkSection configures sandbox links and the egress proxy.
+type NetworkSection struct {
+	// Subnet is an IPv4 range reserved for sandbox links (one /30 each).
+	Subnet    string `yaml:"subnet"`
+	ProxyPort int    `yaml:"proxyPort"`
+}
+
+// NetworkConfig returns the sandbox network configuration, or nil when
+// networking is not configured.
+func (c *Config) NetworkConfig() (*firecracker.NetworkConfig, error) {
+	if c.Network == nil {
+		return nil, nil
+	}
+	subnet, err := netip.ParsePrefix(c.Network.Subnet)
+	if err != nil {
+		return nil, fmt.Errorf("runnerd: network.subnet: %w", err)
+	}
+	nc := &firecracker.NetworkConfig{Subnet: subnet, ProxyPort: c.Network.ProxyPort}
+	if nc.ProxyPort == 0 {
+		nc.ProxyPort = 3128
+	}
+	if err := nc.Validate(c.MaxConcurrent); err != nil {
+		return nil, fmt.Errorf("runnerd: %w", err)
+	}
+	return nc, nil
 }
 
 // FirecrackerConfig configures the Firecracker sandbox provider.
@@ -153,6 +186,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Firecracker.UID <= 0 || c.Firecracker.GID <= 0 {
 		add("firecracker.uid and firecracker.gid must be non-root")
+	}
+	if _, err := c.NetworkConfig(); err != nil {
+		errs = append(errs, err)
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("runnerd: invalid config: %w", err)

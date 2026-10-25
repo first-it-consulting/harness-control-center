@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +69,9 @@ type Config struct {
 	// cgroup.kill, before giving up.
 	StopGrace time.Duration
 	Host      Host
+	// Listen binds the egress proxy's listener (default net.Listen);
+	// replaceable for tests.
+	Listen func(network, address string) (net.Listener, error)
 }
 
 // Provider implements sandbox.Provider with Firecracker.
@@ -101,6 +106,9 @@ func New(cfg Config) (*Provider, error) {
 	}
 	if cfg.StopGrace <= 0 {
 		cfg.StopGrace = DefaultStopGrace
+	}
+	if cfg.Listen == nil {
+		cfg.Listen = net.Listen
 	}
 	return &Provider{cfg: cfg, inUse: make([]bool, cfg.Identities)}, nil
 }
@@ -159,6 +167,22 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 		}
 	}()
 
+	var link *NetInfo
+	if spec.Network != nil {
+		info, stopNet, err := p.startNetwork(ctx, slot, spec.Network.Proxy)
+		if err != nil {
+			return res, err
+		}
+		// After the jail is gone (defers run last-in, first-out); kept if
+		// the VM could not be stopped, like its identity.
+		defer func() {
+			if nerr := stopNet(!stuck); nerr != nil {
+				err = errors.Join(err, nerr)
+			}
+		}()
+		link = &info
+	}
+
 	if err := os.MkdirAll(p.cfg.StagingBase, 0o700); err != nil {
 		return res, fmt.Errorf("firecracker: %w", err)
 	}
@@ -180,7 +204,7 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 		res.Duration = time.Since(start)
 	}()
 
-	if err := p.stage(staging, &spec, kernel, rootfs); err != nil {
+	if err := p.stage(staging, &spec, link, kernel, rootfs); err != nil {
 		return res, err
 	}
 
@@ -242,14 +266,14 @@ func (p *Provider) stop(id string, proc Process, done <-chan error) error {
 // stage writes the VM's files into the staging directory. They are
 // copies, so the VM can never affect the originals; the helper copies
 // them once more into the root-owned jail.
-func (p *Provider) stage(dir string, spec *sandbox.Spec, kernel, rootfs *os.File) error {
+func (p *Provider) stage(dir string, spec *sandbox.Spec, link *NetInfo, kernel, rootfs *os.File) error {
 	if err := writeStaged(kernel, "vmlinux", filepath.Join(dir, "vmlinux")); err != nil {
 		return err
 	}
 	if err := writeStaged(rootfs, "rootfs.ext4", filepath.Join(dir, "rootfs.ext4")); err != nil {
 		return err
 	}
-	cfg, err := json.MarshalIndent(vmConfig(spec), "", "  ")
+	cfg, err := json.MarshalIndent(vmConfig(spec, link), "", "  ")
 	if err != nil {
 		return fmt.Errorf("firecracker: %w", err)
 	}
@@ -258,9 +282,16 @@ func (p *Provider) stage(dir string, spec *sandbox.Spec, kernel, rootfs *os.File
 
 // vmConfig is Firecracker's configuration file. Built from structs, never
 // from string templates, so no field can inject JSON.
-func vmConfig(spec *sandbox.Spec) map[string]any {
+func vmConfig(spec *sandbox.Spec, link *NetInfo) map[string]any {
 	args := append(append([]string{}, baseBootArgs...), spec.BootArgs...)
-	return map[string]any{
+	if link != nil {
+		// The guest's init configures eth0 and points HTTPS_PROXY at the
+		// proxy. There is no gateway: the proxy is on-link, nothing else
+		// is reachable.
+		args = append(args, "hcc.ip="+link.Guest.String(),
+			"hcc.proxy="+netip.AddrPortFrom(link.Host, uint16(link.ProxyPort)).String()) //nolint:gosec // port validated by NetInfo.Valid
+	}
+	cfg := map[string]any{
 		"boot-source": map[string]any{
 			"kernel_image_path": "vmlinux",
 			"boot_args":         strings.Join(args, " "),
@@ -276,6 +307,56 @@ func vmConfig(spec *sandbox.Spec) map[string]any {
 			"mem_size_mib": spec.MemoryMiB,
 		},
 	}
+	if link != nil {
+		g := link.Guest.Addr().As4()
+		cfg["network-interfaces"] = []map[string]any{{
+			"iface_id":      "eth0",
+			"host_dev_name": link.Tap,
+			"guest_mac":     fmt.Sprintf("06:00:%02x:%02x:%02x:%02x", g[0], g[1], g[2], g[3]),
+		}}
+	}
+	return cfg
+}
+
+// startNetwork creates slot's link and serves the egress proxy on its host
+// address. The returned stop ends the proxy and, if teardown, deletes the
+// link.
+func (p *Provider) startNetwork(ctx context.Context, slot int, proxy sandbox.Proxy) (NetInfo, func(teardown bool) error, error) {
+	info, err := p.cfg.Host.SetupNetwork(ctx, slot)
+	if err != nil {
+		return info, nil, err
+	}
+	down := func() error {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := p.cfg.Host.TeardownNetwork(cctx, slot); err != nil {
+			return fmt.Errorf("firecracker: network cleanup: %w", err)
+		}
+		return nil
+	}
+	l, err := p.cfg.Listen("tcp", netip.AddrPortFrom(info.Host, uint16(info.ProxyPort)).String()) //nolint:gosec // port validated by NetInfo.Valid
+	if err != nil {
+		return info, nil, errors.Join(fmt.Errorf("firecracker: proxy listener: %w", err), down())
+	}
+	pctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- proxy.Serve(pctx, l) }()
+	return info, func(teardown bool) error {
+		cancel()
+		var err error
+		select {
+		case serr := <-served:
+			if serr != nil {
+				err = fmt.Errorf("firecracker: proxy: %w", serr)
+			}
+		case <-time.After(10 * time.Second):
+			err = errors.New("firecracker: proxy did not stop")
+		}
+		if teardown {
+			err = errors.Join(err, down())
+		}
+		return err
+	}, nil
 }
 
 // openImage resolves path, checks that it lies inside ImageRoot, opens it

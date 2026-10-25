@@ -25,6 +25,9 @@ IMAGES=$LIB/images
 
 [[ $TARGET =~ ^server:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { echo "invalid target: $TARGET" >&2; exit 1; }
 [[ $(id -u) -ne 0 ]] || { echo "run as an admin user with sudo, not as root" >&2; exit 1; }
+for tool in /usr/sbin/ip /usr/sbin/nft; do
+	[[ -x $tool ]] || { echo "missing $tool (iproute2, nftables)" >&2; exit 1; }
+done
 for f in firecracker jailer vmlinux alpine-minirootfs.tar.gz; do
 	[[ -f $ASSETS/$f ]] || { echo "missing $ASSETS/$f (run hack/firecracker-poc/run.sh first)" >&2; exit 1; }
 done
@@ -69,12 +72,32 @@ cat >"$build/tree/init" <<'INIT'
 #!/bin/sh
 mount -t proc proc /proc
 mount -t sysfs sys /sys
+arg() { for kv in $(cat /proc/cmdline); do case "$kv" in "$1="*) echo "${kv#*=}" ;; esac; done; }
 echo "HCC-GUEST-UP kernel=$(uname -r)"
+NET=$(arg hcc.ip)
+PROXY=$(arg hcc.proxy)
+if [ -n "$NET" ]; then
+	# Address only, no gateway: the proxy is on-link and nothing else is
+	# reachable. No DNS either: the proxy resolves names.
+	ip link set lo up
+	ip addr add "$NET" dev eth0
+	ip link set eth0 up
+	export HTTPS_PROXY="http://$PROXY" https_proxy="http://$PROXY" HTTP_PROXY="http://$PROXY" http_proxy="http://$PROXY"
+fi
 echo "HCC-GUEST-NET interfaces: $(ls /sys/class/net | tr '\n' ' ')"
-# For tests of stopping and the kill switch only; harnesses cannot set
-# kernel arguments.
+# Test modes for stopping, the kill switch and the network guard only;
+# harnesses cannot set kernel arguments.
 case " $(cat /proc/cmdline) " in
 *" hcc.mode=hang "*) echo "HCC-GUEST-HANG"; while :; do sleep 1; done ;;
+*" hcc.mode=nettest "*)
+	H=${PROXY%:*}
+	P=${PROXY##*:}
+	probe() { printf 'CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n' "$1" "$1" | nc -w 3 "$H" "$P" 2>/dev/null | head -n 1 | tr -d '\r'; }
+	echo "HCC-NET-ALLOWED $(probe example.com:443)"
+	echo "HCC-NET-DENIED $(probe example.org:443)"
+	if nc -w 2 1.1.1.1 443 </dev/null 2>/dev/null; then echo "HCC-NET-DIRECT open"; else echo "HCC-NET-DIRECT blocked"; fi
+	if nc -w 2 "$H" 22 </dev/null 2>/dev/null; then echo "HCC-NET-HOSTPORT open"; else echo "HCC-NET-HOSTPORT blocked"; fi
+	;;
 esac
 echo "HCC-GUEST-DONE no agent runtime yet; shutting down"
 reboot -f
@@ -108,6 +131,10 @@ images:
   base:
     kernel: $IMAGES/base/vmlinux
     rootfs: $IMAGES/base/rootfs.ext4
+# Sandbox links: one /30 per VM; must not overlap any real network.
+network:
+  subnet: 172.31.0.0/16
+  proxyPort: 3128
 CONF
 sudo chmod 0644 /etc/hcc/runner.yaml
 

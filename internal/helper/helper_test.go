@@ -5,6 +5,10 @@ package helper
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,7 +23,10 @@ type recorder struct {
 	execArgv [][]string
 	execEnv  [][]string
 	runArgv  [][]string
-	free     uint64 // reported free space; 0 means plenty
+	runStdin []string
+	free     uint64          // reported free space; 0 means plenty
+	links    map[string]bool // existing network interfaces
+	failOn   string          // a Run whose argv contains this fails
 }
 
 func (r *recorder) deps() Deps {
@@ -29,10 +36,23 @@ func (r *recorder) deps() Deps {
 			r.execEnv = append(r.execEnv, env)
 			return nil
 		},
-		Run: func(_ context.Context, argv ...string) error {
+		Run: func(_ context.Context, stdin io.Reader, argv ...string) error {
 			r.runArgv = append(r.runArgv, argv)
-			return os.RemoveAll(argv[len(argv)-1]) // behave like rm -rf
+			in := ""
+			if stdin != nil {
+				b, _ := io.ReadAll(stdin)
+				in = string(b)
+			}
+			r.runStdin = append(r.runStdin, in)
+			if r.failOn != "" && slices.Contains(argv, r.failOn) {
+				return errors.New("simulated failure")
+			}
+			if argv[0] == "rm" {
+				return os.RemoveAll(argv[len(argv)-1]) // behave like rm -rf
+			}
+			return nil
 		},
+		LinkExists: func(name string) bool { return r.links[name] },
 		FreeBytes: func(string) (uint64, error) {
 			if r.free == 0 {
 				return 1 << 40, nil
@@ -107,7 +127,7 @@ func (e *env) stageJob1(t *testing.T) string {
 
 func (e *env) call(args ...string) (int, string) {
 	var stderr bytes.Buffer
-	code := Main(e.cfg, args, e.me, e.rec.deps(), &stderr)
+	code := Main(e.cfg, args, e.me, e.rec.deps(), io.Discard, &stderr)
 	return code, stderr.String()
 }
 
@@ -156,7 +176,7 @@ func TestRefusesOtherCallers(t *testing.T) {
 	e := newEnv(t)
 	e.stageJob1(t)
 	var stderr bytes.Buffer
-	code := Main(e.cfg, e.start, e.me+1, e.rec.deps(), &stderr)
+	code := Main(e.cfg, e.start, e.me+1, e.rec.deps(), io.Discard, &stderr)
 	if code == 0 || !strings.Contains(stderr.String(), "not the runner") || len(e.rec.execArgv) != 0 {
 		t.Errorf("foreign caller: code %d, %q", code, stderr.String())
 	}
@@ -449,7 +469,7 @@ func TestConcurrentStartsRespectTheJailLimit(t *testing.T) {
 		for _, id := range []string{"job-1", "job-2"} {
 			go func() {
 				var stderr bytes.Buffer
-				codes <- Main(e.cfg, []string{"start", "--id", id, "--slot", "0", "--cpus", "1", "--memory", "128"}, e.me, (&recorder{}).deps(), &stderr)
+				codes <- Main(e.cfg, []string{"start", "--id", id, "--slot", "0", "--cpus", "1", "--memory", "128"}, e.me, (&recorder{}).deps(), io.Discard, &stderr)
 			}()
 		}
 		ok := 0
@@ -462,5 +482,109 @@ func TestConcurrentStartsRespectTheJailLimit(t *testing.T) {
 		if ok != 1 || len(entries) != 1 {
 			t.Fatalf("%d starts succeeded and %d jails exist; want exactly 1 each", ok, len(entries))
 		}
+	}
+}
+
+func netEnv(t *testing.T) *env {
+	t.Helper()
+	e := newEnv(t)
+	e.cfg.Network = &firecracker.NetworkConfig{Subnet: netip.MustParsePrefix("172.31.0.0/16"), ProxyPort: 3128}
+	e.cfg.IPTool, e.cfg.NFTTool = "/usr/sbin/ip", "/usr/sbin/nft"
+	e.cfg.SysctlRoot = filepath.Join(e.anchor, "sys")
+	e.rec.links = map[string]bool{}
+	return e
+}
+
+func (e *env) callOut(args ...string) (int, string, string) {
+	var stdout, stderr bytes.Buffer
+	code := Main(e.cfg, args, e.me, e.rec.deps(), &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+func TestNetUp(t *testing.T) {
+	e := netEnv(t)
+	v6 := filepath.Join(e.cfg.SysctlRoot, "net", "ipv6", "conf", "hcc1", "disable_ipv6")
+	if err := os.MkdirAll(filepath.Dir(v6), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(v6, []byte("0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, stderr := e.callOut("net-up", "--slot", "1")
+	if code != 0 {
+		t.Fatalf("net-up: %s", stderr)
+	}
+	want := [][]string{
+		{"/usr/sbin/nft", "-f", "-"},
+		{"/usr/sbin/ip", "tuntap", "add", "dev", "hcc1", "mode", "tap", "user", "64001", "group", "64001"},
+		{"/usr/sbin/ip", "addr", "add", "172.31.0.5/30", "dev", "hcc1"},
+		{"/usr/sbin/ip", "link", "set", "dev", "hcc1", "up"},
+	}
+	if !slices.EqualFunc(e.rec.runArgv, want, slices.Equal[[]string]) {
+		t.Errorf("commands:\n%v\nwant:\n%v", e.rec.runArgv, want)
+	}
+	if !strings.Contains(e.rec.runStdin[0], `tcp dport 3128 fib daddr . iif type local ct state new accept`) {
+		t.Errorf("firewall not applied first: %q", e.rec.runStdin[0])
+	}
+	var info firecracker.NetInfo
+	if err := json.Unmarshal([]byte(out), &info); err != nil || info != e.cfg.Network.Link(1) || info.Valid() != nil {
+		t.Errorf("output %q -> %+v, %v", out, info, err)
+	}
+	if data, _ := os.ReadFile(v6); strings.TrimSpace(string(data)) != "1" {
+		t.Errorf("IPv6 not disabled: %q", data)
+	}
+}
+
+func TestNetUpReplacesStaleLinkAndCleansUpOnFailure(t *testing.T) {
+	e := netEnv(t)
+	e.rec.links["hcc0"] = true
+	e.rec.failOn = "172.31.0.1/30" // the address step fails
+	if code, _, _ := e.callOut("net-up", "--slot", "0"); code == 0 {
+		t.Fatal("net-up succeeded despite a failing step")
+	}
+	var dels int
+	for _, argv := range e.rec.runArgv {
+		if slices.Equal(argv, []string{"/usr/sbin/ip", "link", "del", "dev", "hcc0"}) {
+			dels++
+		}
+	}
+	if dels != 2 { // the stale link before, the half-built one after
+		t.Errorf("link deletions = %d, want 2: %v", dels, e.rec.runArgv)
+	}
+}
+
+func TestNetDown(t *testing.T) {
+	e := netEnv(t)
+	if code, _, stderr := e.callOut("net-down", "--slot", "1"); code != 0 || len(e.rec.runArgv) != 0 {
+		t.Errorf("net-down of a missing link: %d %q %v", code, stderr, e.rec.runArgv)
+	}
+	e.rec.links["hcc1"] = true
+	if code, _, stderr := e.callOut("net-down", "--slot", "1"); code != 0 {
+		t.Fatalf("net-down: %s", stderr)
+	}
+	if want := []string{"/usr/sbin/ip", "link", "del", "dev", "hcc1"}; len(e.rec.runArgv) != 1 || !slices.Equal(e.rec.runArgv[0], want) {
+		t.Errorf("commands = %v", e.rec.runArgv)
+	}
+}
+
+func TestNetRefusals(t *testing.T) {
+	e := netEnv(t)
+	for name, args := range map[string][]string{
+		"no slot":        {"net-up"},
+		"slot too high":  {"net-up", "--slot", "2"},
+		"negative slot":  {"net-down", "--slot", "-1"},
+		"caller names":   {"net-up", "--slot", "0", "--tap", "eth0"},
+		"extra argument": {"net-up", "--slot", "0", "eth0"},
+	} {
+		if code, _, _ := e.callOut(args...); code == 0 {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if len(e.rec.runArgv) != 0 {
+		t.Errorf("refused calls ran %v", e.rec.runArgv)
+	}
+	e.cfg.Network = nil
+	if code, _, stderr := e.callOut("net-up", "--slot", "0"); code == 0 || !strings.Contains(stderr, "not configured") {
+		t.Errorf("without network config: %d %q", code, stderr)
 	}
 }

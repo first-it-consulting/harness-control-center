@@ -2,11 +2,13 @@
 
 // Package helper is hcc-helper, the only code that runs as root. The
 // runner calls it through sudo with a single sudoers rule; it performs
-// exactly three operations and trusts nothing it is given:
+// exactly these operations and trusts nothing it is given:
 //
-//	start  --id ID --slot N --cpus C --memory M   build the jail, exec the jailer
-//	kill   --id ID                                 kill everything in the jail's cgroup
-//	remove --id ID                                 delete the jail and its cgroup
+//	start    --id ID --slot N --cpus C --memory M   build the jail, exec the jailer
+//	kill     --id ID                                 kill everything in the jail's cgroup
+//	remove   --id ID                                 delete the jail and its cgroup
+//	net-up   --slot N                                create slot N's tap link (prints its NetInfo)
+//	net-down --slot N                                delete slot N's tap link
 //
 // Binaries, directories and the UID range come from the root-owned
 // configuration, never from the caller, and only the configured runner
@@ -24,12 +26,15 @@ package helper
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +62,12 @@ type Config struct {
 	// MaxRootFSBytes caps the staged root filesystem (default
 	// DefaultMaxRootFSBytes): root copies it onto a root-owned filesystem.
 	MaxRootFSBytes int64
+	// Network enables net-up/net-down; nil refuses them.
+	Network *firecracker.NetworkConfig
+	// IPTool and NFTTool are the absolute paths of ip(8) and nft(8).
+	IPTool, NFTTool string
+	// SysctlRoot is /proc/sys, except in tests.
+	SysctlRoot string
 }
 
 // Size caps for staged files. Root copies them, so without a cap a
@@ -73,8 +84,11 @@ type Deps struct {
 	// Exec replaces the process (syscall.Exec in production), so the
 	// runner's signals reach the jailer and Firecracker directly.
 	Exec func(argv0 string, argv, env []string) error
-	// Run runs a command to completion.
-	Run func(ctx context.Context, argv ...string) error
+	// Run runs a command to completion, feeding it stdin (may be nil).
+	Run func(ctx context.Context, stdin io.Reader, argv ...string) error
+	// LinkExists reports whether a network interface exists (default:
+	// /sys/class/net/<name>).
+	LinkExists func(name string) bool
 	// FreeBytes reports unprivileged free space on a path's filesystem
 	// (default: statfs).
 	FreeBytes func(path string) (uint64, error)
@@ -85,15 +99,15 @@ var execEnv = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 
 // Main runs one helper invocation. callerUID is the real caller (sudo's
 // SUDO_UID). It returns the process exit code.
-func Main(cfg Config, args []string, callerUID int, d Deps, stderr io.Writer) int {
-	if err := run(cfg, args, callerUID, d); err != nil {
+func Main(cfg Config, args []string, callerUID int, d Deps, stdout, stderr io.Writer) int {
+	if err := run(cfg, args, callerUID, d, stdout); err != nil {
 		fmt.Fprintln(stderr, "hcc-helper:", err)
 		return 1
 	}
 	return 0
 }
 
-func run(cfg Config, args []string, callerUID int, d Deps) error {
+func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) error {
 	if callerUID != cfg.RunnerUID {
 		return fmt.Errorf("caller uid %d is not the runner (uid %d)", callerUID, cfg.RunnerUID)
 	}
@@ -112,10 +126,19 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 	if d.FreeBytes == nil {
 		d.FreeBytes = freeBytes
 	}
+	if d.LinkExists == nil {
+		d.LinkExists = func(name string) bool {
+			_, err := os.Lstat(filepath.Join("/sys/class/net", name))
+			return err == nil
+		}
+	}
 	if len(args) == 0 {
-		return errors.New("expected start, kill or remove")
+		return errors.New("expected start, kill, remove, net-up or net-down")
 	}
 	op, rest := args[0], args[1:]
+	if op == "net-up" || op == "net-down" {
+		return runNet(cfg, d, op, rest, stdout)
+	}
 	fs := flag.NewFlagSet(op, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	id := fs.String("id", "", "")
@@ -175,7 +198,7 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 		defer cancel()
 		var errs []error
 		if _, err := os.Lstat(jail); err == nil {
-			if err := d.Run(ctx, "rm", "-rf", "--one-file-system", "--", jail); err != nil {
+			if err := d.Run(ctx, nil, "rm", "-rf", "--one-file-system", "--", jail); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -460,3 +483,80 @@ func cleanAbs(p string) bool { return filepath.IsAbs(p) && filepath.Clean(p) == 
 // toInt64 converts Statfs_t.Bsize, which is int64 on Linux and uint32 on
 // macOS.
 func toInt64[T int64 | uint32](v T) int64 { return int64(v) }
+
+// runNet creates or deletes slot N's link. Names, addresses and the tap
+// owner (the slot's VM identity) all come from the configuration.
+func runNet(cfg Config, d Deps, op string, args []string, stdout io.Writer) error {
+	if cfg.Network == nil {
+		return errors.New("networking is not configured")
+	}
+	if err := cfg.Network.Validate(cfg.Jailer.Identities); err != nil {
+		return err
+	}
+	if !cleanAbs(cfg.IPTool) || !cleanAbs(cfg.NFTTool) {
+		return errors.New("ip and nft tools must be absolute paths")
+	}
+	if cfg.SysctlRoot == "" {
+		cfg.SysctlRoot = "/proc/sys"
+	}
+	fs := flag.NewFlagSet(op, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	slot := fs.Int("slot", -1, "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+	if *slot < 0 || *slot >= cfg.Jailer.Identities {
+		return fmt.Errorf("slot %d outside 0..%d", *slot, cfg.Jailer.Identities-1)
+	}
+	link := cfg.Network.Link(*slot)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ip := func(args ...string) error { return d.Run(ctx, nil, append([]string{cfg.IPTool}, args...)...) }
+
+	if op == "net-down" {
+		if d.LinkExists(link.Tap) {
+			return ip("link", "del", "dev", link.Tap)
+		}
+		return nil
+	}
+
+	// The guard table first: never bring up a link without it.
+	if err := d.Run(ctx, strings.NewReader(cfg.Network.Ruleset()), cfg.NFTTool, "-f", "-"); err != nil {
+		return fmt.Errorf("firewall: %w", err)
+	}
+	if d.LinkExists(link.Tap) { // left over from a crash
+		if err := ip("link", "del", "dev", link.Tap); err != nil {
+			return err
+		}
+	}
+	uid := strconv.Itoa(cfg.Jailer.UID + *slot)
+	gid := strconv.Itoa(cfg.Jailer.GID + *slot)
+	steps := [][]string{
+		// Owned by the slot's VM identity, so only that VMM can attach.
+		{"tuntap", "add", "dev", link.Tap, "mode", "tap", "user", uid, "group", gid},
+		{"addr", "add", netip.PrefixFrom(link.Host, 30).String(), "dev", link.Tap},
+		{"link", "set", "dev", link.Tap, "up"},
+	}
+	for _, step := range steps {
+		if err := ip(step...); err != nil {
+			_ = ip("link", "del", "dev", link.Tap)
+			return err
+		}
+	}
+	// No IPv6 on sandbox links (the guard drops it anyway).
+	if p := filepath.Join(cfg.SysctlRoot, "net", "ipv6", "conf", link.Tap, "disable_ipv6"); fileExists(p) {
+		if err := os.WriteFile(p, []byte("1\n"), 0o644); err != nil { //nolint:gosec // sysctl file
+			_ = ip("link", "del", "dev", link.Tap)
+			return err
+		}
+	}
+	return json.NewEncoder(stdout).Encode(link)
+}
+
+func fileExists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
+}

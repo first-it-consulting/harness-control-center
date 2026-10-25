@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -31,13 +32,16 @@ func main() {
 	}
 	os.Exit(helper.Main(cfg, os.Args[1:], caller, helper.Deps{
 		Exec: syscall.Exec,
-		Run: func(ctx context.Context, argv ...string) error {
-			if out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput(); err != nil { //nolint:gosec // argv built by the helper
+		Run: func(ctx context.Context, stdin io.Reader, argv ...string) error {
+			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // argv built by the helper
+			cmd.Stdin = stdin
+			cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+			if out, err := cmd.CombinedOutput(); err != nil {
 				return fmt.Errorf("%s: %w: %s", argv[0], err, out)
 			}
 			return nil
 		},
-	}, os.Stderr))
+	}, os.Stdout, os.Stderr))
 }
 
 func setup() (helper.Config, int, error) {
@@ -65,6 +69,10 @@ func setup() (helper.Config, int, error) {
 	if err1 != nil || err2 != nil || uid == 0 {
 		return helper.Config{}, 0, fmt.Errorf("runner user %q must be a non-root user", c.RunnerUser)
 	}
+	netCfg, err := c.NetworkConfig()
+	if err != nil {
+		return helper.Config{}, 0, err
+	}
 	return helper.Config{
 		Jailer: firecracker.JailerConfig{
 			JailerPath:      c.Firecracker.Jailer,
@@ -81,5 +89,8 @@ func setup() (helper.Config, int, error) {
 		RootUID:     0,
 		// 0 means the helper's default.
 		MaxRootFSBytes: int64(c.Firecracker.MaxRootFSMiB) << 20,
+		Network:        netCfg,
+		IPTool:         "/usr/sbin/ip",
+		NFTTool:        "/usr/sbin/nft",
 	}, caller, nil
 }

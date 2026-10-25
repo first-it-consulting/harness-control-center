@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -48,6 +50,28 @@ type fakeHost struct {
 	killed   []string
 	removed  []string
 	proc     *fakeProc
+	events   []string // order of jail/network operations
+	netErr   error
+	netSlots []int
+}
+
+func (h *fakeHost) SetupNetwork(_ context.Context, slot int) (NetInfo, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.netErr != nil {
+		return NetInfo{}, h.netErr
+	}
+	h.netSlots = append(h.netSlots, slot)
+	h.events = append(h.events, fmt.Sprintf("net-up %d", slot))
+	nc := NetworkConfig{Subnet: netip.MustParsePrefix("172.31.0.0/16"), ProxyPort: 3128}
+	return nc.Link(slot), nil
+}
+
+func (h *fakeHost) TeardownNetwork(_ context.Context, slot int) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.events = append(h.events, fmt.Sprintf("net-down %d", slot))
+	return nil
 }
 
 type fakeProc struct {
@@ -124,6 +148,7 @@ func (h *fakeHost) RemoveJail(_ context.Context, id string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.removed = append(h.removed, id)
+	h.events = append(h.events, "remove "+id)
 	return nil
 }
 
@@ -525,5 +550,109 @@ func TestUnstoppableVMKeepsItsIdentity(t *testing.T) {
 	f.host.proc.finish(nil)
 	if _, err := f.p.acquire(); err == nil {
 		t.Error("identity of a VM that could not be stopped was reused")
+	}
+}
+
+// testProxy records how the provider uses it.
+type testProxy struct {
+	mu      sync.Mutex
+	served  bool
+	stopped bool
+}
+
+func (p *testProxy) Serve(ctx context.Context, l net.Listener) error {
+	p.mu.Lock()
+	p.served = true
+	p.mu.Unlock()
+	<-ctx.Done()
+	_ = l.Close()
+	p.mu.Lock()
+	p.stopped = true
+	p.mu.Unlock()
+	return nil
+}
+
+// withNetwork gives the fixture a network and records the listener address
+// the provider asks for (it really listens on loopback).
+func withNetwork(t *testing.T, f *fixture) (*testProxy, *[]string) {
+	t.Helper()
+	proxy := &testProxy{}
+	f.spec.Network = &sandbox.Network{Proxy: proxy}
+	var asked []string
+	f.p.cfg.Listen = func(network, addr string) (net.Listener, error) {
+		asked = append(asked, addr)
+		return net.Listen(network, "127.0.0.1:0")
+	}
+	return proxy, &asked
+}
+
+func TestRunWithNetwork(t *testing.T) {
+	f := newFixture(t, exitsCleanly)
+	proxy, asked := withNetwork(t, f)
+	if _, _, err := f.run(context.Background(), t); err != nil {
+		t.Fatal(err)
+	}
+	if len(*asked) != 1 || (*asked)[0] != "172.31.0.1:3128" {
+		t.Errorf("proxy listener on %v, want the link's host address", *asked)
+	}
+	if !proxy.served || !proxy.stopped {
+		t.Errorf("proxy served=%v stopped=%v", proxy.served, proxy.stopped)
+	}
+	boot := f.host.config["boot-source"].(map[string]any)["boot_args"].(string)
+	for _, want := range []string{"hcc.ip=172.31.0.2/30", "hcc.proxy=172.31.0.1:3128"} {
+		if !strings.Contains(boot, want) {
+			t.Errorf("boot_args %q missing %q", boot, want)
+		}
+	}
+	nics, _ := f.host.config["network-interfaces"].([]any)
+	if len(nics) != 1 || nics[0].(map[string]any)["host_dev_name"] != "hcc0" {
+		t.Errorf("network-interfaces = %v", f.host.config["network-interfaces"])
+	}
+	// The link outlives the jail: removed only after the VM's jail is gone.
+	if want := []string{"net-up 0", "remove run-1", "net-down 0"}; !slices.Equal(f.host.events, want) {
+		t.Errorf("order = %v, want %v", f.host.events, want)
+	}
+}
+
+func TestRunWithoutNetworkHasNoInterface(t *testing.T) {
+	f := newFixture(t, exitsCleanly)
+	if _, _, err := f.run(context.Background(), t); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.host.config["network-interfaces"]; ok || len(f.host.netSlots) != 0 {
+		t.Error("a sandbox without Network got a network")
+	}
+	if strings.Contains(f.host.config["boot-source"].(map[string]any)["boot_args"].(string), "hcc.proxy") {
+		t.Error("proxy boot argument without a network")
+	}
+}
+
+func TestRunNetworkSetupFailure(t *testing.T) {
+	f := newFixture(t, exitsCleanly)
+	withNetwork(t, f)
+	f.host.netErr = errors.New("nft: not found")
+	if _, _, err := f.run(context.Background(), t); err == nil || !strings.Contains(err.Error(), "nft") {
+		t.Fatalf("Run = %v, want the network error", err)
+	}
+	if f.host.argv != nil {
+		t.Error("VM started without its network")
+	}
+	if _, err := f.p.acquire(); err != nil {
+		t.Errorf("identity not released after a failed setup: %v", err)
+	}
+}
+
+func TestUnstoppableVMKeepsItsLink(t *testing.T) {
+	f := newFixture(t, unkillable)
+	withNetwork(t, f)
+	f.spec.Timeout = 30 * time.Millisecond
+	if _, _, err := f.run(context.Background(), t); err == nil {
+		t.Fatal("want did-not-stop error")
+	}
+	f.host.proc.finish(nil)
+	for _, e := range f.host.events {
+		if strings.HasPrefix(e, "net-down") {
+			t.Error("link of a VM that could not be stopped was deleted")
+		}
 	}
 }

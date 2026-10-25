@@ -2,11 +2,11 @@
 // submission order, enforces a concurrency limit, tracks each job through
 // its state machine, and offers a per-job cancel and a global kill switch.
 //
-// This is the runner skeleton. It boots the harness's image and treats a
-// clean guest shutdown as success; agent runtimes, the egress proxy,
-// credentials and schedules are not wired in yet. Harnesses that need any
-// of those are rejected (fail closed) rather than run with different
-// behaviour than the user approved.
+// It boots the harness's image and treats a clean guest shutdown as
+// success. Network access goes through a per-job egress proxy (Config.
+// Egress). Agent runtimes, credentials and schedules are not wired in
+// yet: harnesses that need them are rejected (fail closed) rather than
+// run with different behaviour than the user approved.
 package runner
 
 import (
@@ -53,6 +53,9 @@ type Config struct {
 	// discard). If the writer is also an io.Closer, it is closed when the
 	// job ends.
 	Console func(jobID string) io.Writer
+	// Egress returns the egress proxy for a job whose harness grants
+	// network access. Without it, such harnesses are rejected.
+	Egress func(h *spec.Harness, jobID string) (sandbox.Proxy, error)
 	// Now and NewID are injectable for tests.
 	Now   func() time.Time
 	NewID func() string
@@ -121,6 +124,10 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 	if h.Spec.Target != r.cfg.Target {
 		return "", fmt.Errorf("runner: harness targets %q, this runner is %q", h.Spec.Target, r.cfg.Target)
 	}
+	needsNet := len(h.Spec.Permissions.Network.Egress) > 0
+	if needsNet && r.cfg.Egress == nil {
+		return "", errors.New("runner: network access is not configured on this runner")
+	}
 	if err := checkSupported(h); err != nil {
 		return "", err
 	}
@@ -139,6 +146,15 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 		return "", ErrKilled
 	}
 	id := r.cfg.NewID()
+	var network *sandbox.Network
+	if needsNet {
+		proxy, err := r.cfg.Egress(h, id)
+		if err != nil {
+			r.mu.Unlock()
+			return "", fmt.Errorf("runner: egress proxy: %w", err)
+		}
+		network = &sandbox.Network{Proxy: proxy}
+	}
 	ctx, cancel := context.WithCancel(r.root)
 	j := &job{
 		Job:    Job{ID: id, Harness: h.Metadata.Name, State: StateQueued, Created: r.cfg.Now()},
@@ -153,6 +169,7 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 			CPUs:      h.Spec.Sandbox.CPUs,
 			MemoryMiB: h.Spec.Sandbox.MemoryMiB,
 			Timeout:   h.Spec.Sandbox.Timeout.Duration,
+			Network:   network,
 		},
 	}
 	r.jobs[id] = j
@@ -395,9 +412,6 @@ func checkSupported(h *spec.Harness) error {
 	var errs []error
 	notYet := func(what string) {
 		errs = append(errs, fmt.Errorf("%s is not supported by this runner yet", what))
-	}
-	if len(p.Network.Egress) > 0 || p.Network.AllowPrivateNetworks {
-		notYet("network access (needs the egress proxy)")
 	}
 	if len(p.Credentials) > 0 {
 		notYet("credentials (needs the credential broker)")

@@ -39,7 +39,8 @@ ProtectClock=yes
 ProtectHostname=yes
 RestrictRealtime=yes
 LockPersonality=yes
-RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# AF_INET/AF_INET6: the egress proxy connects out on the guests' behalf.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target

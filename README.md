@@ -1,8 +1,9 @@
 # Harness Control Center
 
 > **Status: pre-alpha.** The harness spec, policy engine, Firecracker
-> sandbox, runner daemon and CLI work. Sandboxes boot and are confined,
-> but no agent runtime runs inside them yet, and there is no UI yet.
+> sandbox, runner daemon, CLI and egress proxy work: sandboxes boot,
+> are confined, and reach exactly the hosts their harness allows. No
+> agent runtime runs inside them yet, and there is no UI yet.
 > "Harness Control Center" is a working codename.
 
 Run AI agents on your own machines, safely, without being an expert.

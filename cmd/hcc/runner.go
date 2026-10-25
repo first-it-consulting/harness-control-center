@@ -7,14 +7,19 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/signal"
 	"os/user"
 	"syscall"
 
+	"github.com/first-it-consulting/harness-control-center/internal/egress"
+	"github.com/first-it-consulting/harness-control-center/internal/policy"
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
 	"github.com/first-it-consulting/harness-control-center/internal/runnerd"
+	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox/firecracker"
+	"github.com/first-it-consulting/harness-control-center/internal/spec"
 	"github.com/first-it-consulting/harness-control-center/internal/version"
 )
 
@@ -85,13 +90,21 @@ func serve(configPath string, log *slog.Logger) error {
 	for name, img := range cfg.Images {
 		images[name] = runner.Image{Kernel: img.Kernel, RootFS: img.RootFS}
 	}
-	r, err := runner.New(runner.Config{
+	netCfg, err := cfg.NetworkConfig()
+	if err != nil {
+		return err
+	}
+	rcfg := runner.Config{
 		Provider:      provider,
 		Target:        cfg.Target,
 		Images:        images,
 		MaxConcurrent: cfg.MaxConcurrent,
 		Console:       runnerd.ConsoleFunc(cfg.StateDir, log),
-	})
+	}
+	if netCfg != nil {
+		rcfg.Egress = egressFactory(netCfg, log)
+	}
+	r, err := runner.New(rcfg)
 	if err != nil {
 		return err
 	}
@@ -111,10 +124,29 @@ func serve(configPath string, log *slog.Logger) error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	log.Info("runner started", "version", version.Version, "target", cfg.Target, "socket", cfg.Socket, "maxConcurrent", cfg.MaxConcurrent)
+	log.Info("runner started", "version", version.Version, "target", cfg.Target, "socket", cfg.Socket,
+		"maxConcurrent", cfg.MaxConcurrent, "network", netCfg != nil)
 	err = runnerd.NewServer(r, cfg.StateDir, log).Serve(ctx, l)
 	log.Info("runner stopped; all jobs were stopped")
 	return err
+}
+
+// egressFactory builds each networked job's proxy from that job's own
+// harness. The sandboxes' subnet is never a valid destination.
+func egressFactory(netCfg *firecracker.NetworkConfig, log *slog.Logger) func(*spec.Harness, string) (sandbox.Proxy, error) {
+	return func(h *spec.Harness, jobID string) (sandbox.Proxy, error) {
+		engine, err := policy.New(h)
+		if err != nil {
+			return nil, err
+		}
+		return &egress.Proxy{
+			Policy:       engine,
+			AllowPrivate: h.Spec.Permissions.Network.AllowPrivateNetworks,
+			Blocked:      []netip.Prefix{netCfg.Subnet},
+			JobID:        jobID,
+			Log:          log,
+		}, nil
+	}
 }
 
 func cmdStdio(args []string, stdin io.Reader, stdout, stderr io.Writer) int {

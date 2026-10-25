@@ -55,6 +55,9 @@ func TestSpecValidate(t *testing.T) {
 		{"console override", func(s *Spec) { s.BootArgs = []string{"console=tty0"} }, "controlled by the provider"},
 		{"arg injection", func(s *Spec) { s.BootArgs = []string{"a=b init=/bin/sh"} }, "invalid boot argument"},
 		{"quote", func(s *Spec) { s.BootArgs = []string{`a="b"`} }, "invalid boot argument"},
+		{"guest ip", func(s *Spec) { s.BootArgs = []string{"ip=10.0.0.2::10.0.0.1:255.0.0.0::eth0:off"} }, "controlled by the provider"},
+		{"proxy override", func(s *Spec) { s.BootArgs = []string{"hcc.proxy=evil.example:3128"} }, "controlled by the provider"},
+		{"network without proxy", func(s *Spec) { s.Network = &Network{} }, "without a proxy"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

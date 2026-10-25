@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -188,8 +189,6 @@ func TestOutcomesMapToStates(t *testing.T) {
 
 func TestFailClosedOnUnenforceablePermissions(t *testing.T) {
 	tests := map[string]string{
-		"network":     "  permissions: {network: {egress: [{host: gitlab.com}]}}\n",
-		"private net": "  permissions: {network: {allowPrivateNetworks: true}}\n",
 		"credentials": "  permissions: {credentials: [gitlab]}\n",
 		"tools":       "  permissions: {tools: {install: [git]}}\n",
 		"subagents":   "  permissions: {subagents: {max: 1}}\n",
@@ -503,5 +502,79 @@ func TestWatchReplaysHistoryWithoutGapsOrDuplicates(t *testing.T) {
 	}
 	if _, _, _, err := r.Watch("job-missing", 1); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Watch(missing) = %v", err)
+	}
+}
+
+type nopProxy struct{ job string }
+
+func (nopProxy) Serve(ctx context.Context, l net.Listener) error { <-ctx.Done(); return l.Close() }
+
+const netHarness = "  permissions: {network: {egress: [{host: gitlab.com}]}}\n"
+
+func TestNetworkNeedsEgressConfigured(t *testing.T) {
+	p := newFakeProvider()
+	r := newRunner(t, p, 1)
+	if _, err := r.Submit(harness(t, netHarness)); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("Submit = %v, want not-configured error", err)
+	}
+	if len(r.List()) != 0 {
+		t.Error("rejected harness created a job")
+	}
+}
+
+func TestNetworkGetsPerJobProxy(t *testing.T) {
+	p := newFakeProvider()
+	var asked []string
+	r, err := New(Config{
+		Provider: p,
+		Images:   map[string]Image{"base": {}},
+		Egress: func(h *spec.Harness, jobID string) (sandbox.Proxy, error) {
+			asked = append(asked, h.Metadata.Name+"/"+jobID)
+			return nopProxy{job: jobID}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Shutdown(context.Background()) }()
+
+	id, err := r.Submit(harness(t, netHarness))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, r, id, StateSucceeded)
+	offline, err := r.Submit(harness(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, r, offline, StateSucceeded)
+
+	specs := p.startedSpecs()
+	if specs[0].Network == nil || specs[0].Network.Proxy.(nopProxy).job != id {
+		t.Errorf("networked job got %+v", specs[0].Network)
+	}
+	if specs[1].Network != nil {
+		t.Error("offline job got a network")
+	}
+	if len(asked) != 1 || asked[0] != "hello/"+id {
+		t.Errorf("egress factory calls = %v", asked)
+	}
+}
+
+func TestEgressFactoryErrorRejectsJob(t *testing.T) {
+	r, err := New(Config{
+		Provider: newFakeProvider(),
+		Images:   map[string]Image{"base": {}},
+		Egress:   func(*spec.Harness, string) (sandbox.Proxy, error) { return nil, errors.New("no subnet") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Shutdown(context.Background()) }()
+	if _, err := r.Submit(harness(t, netHarness)); err == nil || !strings.Contains(err.Error(), "no subnet") {
+		t.Errorf("Submit = %v", err)
+	}
+	if len(r.List()) != 0 {
+		t.Error("job created despite the proxy error")
 	}
 }

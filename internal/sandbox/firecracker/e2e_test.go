@@ -8,12 +8,14 @@
 //
 // VMs are started through the installed hcc-helper and boot the
 // installed "base" image. See make e2e.
-package firecracker
+package firecracker_test
 
 import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,13 +24,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/egress"
+	"github.com/first-it-consulting/harness-control-center/internal/policy"
 	"github.com/first-it-consulting/harness-control-center/internal/runnerd"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
+	"github.com/first-it-consulting/harness-control-center/internal/sandbox/firecracker"
+	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
 
 type e2eEnv struct {
 	images, base, staging, rootfs string
-	provider                      *Provider
+	provider                      *firecracker.Provider
+	network                       *firecracker.NetworkConfig
 }
 
 func setupE2E(t *testing.T) *e2eEnv {
@@ -61,11 +68,11 @@ func setupHelperE2E(t *testing.T, cfgPath string) *e2eEnv {
 	if filepath.Base(img.Kernel) != "vmlinux" {
 		t.Fatalf("base kernel must be named vmlinux, got %s", img.Kernel)
 	}
-	p, err := New(Config{
+	p, err := firecracker.New(firecracker.Config{
 		StagingBase: cfg.Firecracker.StagingDir,
 		ImageRoot:   cfg.Firecracker.ImageRoot,
 		Identities:  cfg.MaxConcurrent,
-		Host:        NewHelperHost(cfg.Firecracker.Helper),
+		Host:        firecracker.NewHelperHost(cfg.Firecracker.Helper),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +80,12 @@ func setupHelperE2E(t *testing.T, cfgPath string) *e2eEnv {
 	if cfg.MaxConcurrent < 2 {
 		t.Fatal("maxConcurrent must be at least 2 for the concurrency test")
 	}
-	return &e2eEnv{images: filepath.Dir(img.Kernel), base: cfg.Firecracker.ChrootBase, staging: cfg.Firecracker.StagingDir, rootfs: img.RootFS, provider: p}
+	netCfg, err := cfg.NetworkConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &e2eEnv{images: filepath.Dir(img.Kernel), base: cfg.Firecracker.ChrootBase, staging: cfg.Firecracker.StagingDir,
+		rootfs: img.RootFS, provider: p, network: netCfg}
 }
 
 func (e *e2eEnv) spec(id string, timeout time.Duration, bootArgs ...string) sandbox.Spec {
@@ -86,7 +98,7 @@ func (e *e2eEnv) spec(id string, timeout time.Duration, bootArgs ...string) sand
 // assertNoTrace checks that a run left nothing behind on the host.
 func (e *e2eEnv) assertNoTrace(t *testing.T, id string) {
 	t.Helper()
-	if _, err := os.Stat(JailDir(e.base, id)); !os.IsNotExist(err) {
+	if _, err := os.Stat(firecracker.JailDir(e.base, id)); !os.IsNotExist(err) {
 		t.Errorf("jail %s left behind (%v)", id, err)
 	}
 	if _, err := os.Stat(filepath.Join(e.staging, id)); !os.IsNotExist(err) {
@@ -157,7 +169,7 @@ func TestE2ETimeout(t *testing.T) {
 	if !strings.Contains(c.String(), "HCC-GUEST-HANG") {
 		t.Errorf("guest did not reach the hang:\n%s", c.String())
 	}
-	if res.Duration > 3*time.Second+2*DefaultStopGrace {
+	if res.Duration > 3*time.Second+2*firecracker.DefaultStopGrace {
 		t.Errorf("stopping took too long: %s", res.Duration)
 	}
 	t.Logf("timed out and stopped after %s", res.Duration)
@@ -247,4 +259,81 @@ func guestInterfaces(console string) []string {
 		}
 	}
 	return nil
+}
+
+const netHarness = `
+apiVersion: hcc/v1alpha1
+kind: Harness
+metadata: {name: e2e-net}
+spec:
+  runtime: claude-code
+  prompt: probe the network
+  permissions:
+    network:
+      egress:
+        - host: example.com
+`
+
+// A networked VM reaches exactly what its policy allows, through the
+// proxy, and nothing else: no direct connections, no other host ports.
+func TestE2ENetwork(t *testing.T) {
+	e := setupE2E(t)
+	if e.network == nil {
+		t.Skip("the runner configuration has no network section")
+	}
+	h, err := spec.Parse([]byte(netHarness))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := policy.New(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proxyLog console
+	id := fmt.Sprintf("e2e-net-%d", time.Now().UnixNano())
+	sp := e.spec(id, time.Minute, "hcc.mode=nettest")
+	sp.Network = &sandbox.Network{Proxy: &egress.Proxy{
+		Policy:  engine,
+		Blocked: []netip.Prefix{e.network.Subnet},
+		JobID:   id,
+		Log:     slog.New(slog.NewTextHandler(&proxyLog, nil)),
+	}}
+	var c console
+	res, err := e.provider.Run(context.Background(), sp, &c)
+	if err != nil || res.Outcome != sandbox.OutcomeExited {
+		t.Fatalf("Run = %v, %v\nconsole:\n%s", res.Outcome, err, c.String())
+	}
+	out := c.String()
+	want := map[string]string{
+		"HCC-NET-ALLOWED":  "200",
+		"HCC-NET-DENIED":   "403",
+		"HCC-NET-DIRECT":   "blocked",
+		"HCC-NET-HOSTPORT": "blocked",
+	}
+	for marker, expect := range want {
+		line := consoleLine(out, marker)
+		if !strings.Contains(line, expect) {
+			t.Errorf("%s: got %q, want it to contain %q", marker, line, expect)
+		}
+	}
+	if ifs := guestInterfaces(out); len(ifs) != 2 || ifs[0] != "eth0" || ifs[1] != "lo" {
+		t.Errorf("guest interfaces = %v, want [eth0 lo]", ifs)
+	}
+	if !strings.Contains(proxyLog.String(), "host=example.org") {
+		t.Errorf("refusal not logged:\n%s", proxyLog.String())
+	}
+	e.assertNoTrace(t, id)
+	if links, _ := filepath.Glob("/sys/class/net/hcc*"); len(links) != 0 {
+		t.Errorf("sandbox links left behind: %v", links)
+	}
+	t.Logf("console:\n%s", out)
+}
+
+func consoleLine(console, marker string) string {
+	for _, line := range strings.Split(console, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), marker) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
 }
