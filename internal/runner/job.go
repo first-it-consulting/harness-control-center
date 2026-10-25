@@ -52,6 +52,10 @@ type Job struct {
 	Usage *budget.Usage `json:"usage,omitempty"`
 	// Results is what the job handed back, once collected.
 	Results *Results `json:"results,omitempty"`
+	// Schedule is the schedule that started this job, if any.
+	Schedule string `json:"schedule,omitempty"`
+	// LoopDone: the run reported that its loop's task is complete.
+	LoopDone bool `json:"loopDone,omitempty"`
 }
 
 // Status describes a runner.
@@ -63,8 +67,9 @@ type Status struct {
 	Running       int      `json:"running"`
 	Queued        int      `json:"queued"`
 	// Killed: the kill switch is engaged and new jobs are refused.
-	Killed  bool   `json:"killed"`
-	Version string `json:"version,omitempty"`
+	Killed    bool   `json:"killed"`
+	Schedules int    `json:"schedules"`
+	Version   string `json:"version,omitempty"`
 }
 
 // Store persists jobs. Save is called with the runner's lock held, so it

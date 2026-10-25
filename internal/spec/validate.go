@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/first-it-consulting/harness-control-center/internal/cron"
 )
 
 var (
@@ -18,7 +20,6 @@ var (
 	imageRe      = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,127}(:[A-Za-z0-9._-]{1,128})?$`)
 	packageRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9._+-]{0,127}(@[A-Za-z0-9._-]{1,64})?$`)
 	actionRe     = regexp.MustCompile(`^[a-z0-9_-]+(\.[a-z0-9_-]+)*(\.\*)?$`)
-	cronFieldRe  = regexp.MustCompile(`^[0-9*/,-]+$`)
 	privateNames = []string{".localhost", ".local", ".internal", ".lan", ".home.arpa", ".corp", ".fritz.box"}
 )
 
@@ -90,21 +91,16 @@ func validateTrigger(t *Trigger, add addFunc) {
 		add("spec.trigger", "schedule and loop are mutually exclusive")
 	}
 	if t.Schedule != "" {
-		fields := strings.Fields(t.Schedule)
-		valid := len(fields) == 5
-		for _, f := range fields {
-			valid = valid && cronFieldRe.MatchString(f)
-		}
-		if !valid {
-			add("spec.trigger.schedule", "must be a 5-field cron expression, e.g. \"0 2 * * *\"")
+		if _, err := cron.Parse(t.Schedule); err != nil {
+			add("spec.trigger.schedule", "must be a 5-field cron expression in UTC, e.g. \"0 2 * * *\": %v", err)
 		}
 	}
 	if t.Loop != nil {
 		if t.Loop.MaxIterations < 1 || t.Loop.MaxIterations > MaxLoopIteration {
 			add("spec.trigger.loop.maxIterations", "must be between 1 and %d", MaxLoopIteration)
 		}
-		if t.Loop.Interval.Duration < 0 {
-			add("spec.trigger.loop.interval", "must not be negative")
+		if t.Loop.Interval.Duration < 0 || t.Loop.Interval.Duration > MaxLoopInterval {
+			add("spec.trigger.loop.interval", "must be between 0 and %s", MaxLoopInterval)
 		}
 	}
 }

@@ -111,6 +111,42 @@ func (c *Client) Submit(ctx context.Context, harnessYAML []byte) (string, error)
 	return out.ID, nil
 }
 
+// AddSchedule sends a harness that has a trigger.
+func (c *Client) AddSchedule(ctx context.Context, harnessYAML []byte) (runner.Schedule, error) {
+	var sc runner.Schedule
+	return sc, c.do(ctx, http.MethodPost, "/v1/schedules", bytes.NewReader(harnessYAML), &sc)
+}
+
+// Schedules lists the runner's schedules.
+func (c *Client) Schedules(ctx context.Context) ([]runner.Schedule, error) {
+	var out []runner.Schedule
+	return out, c.do(ctx, http.MethodGet, "/v1/schedules", nil, &out)
+}
+
+// GetSchedule returns one schedule.
+func (c *Client) GetSchedule(ctx context.Context, id string) (runner.Schedule, error) {
+	var sc runner.Schedule
+	if err := sandbox.ValidateID(id); err != nil {
+		return sc, err
+	}
+	return sc, c.do(ctx, http.MethodGet, "/v1/schedules/"+id, nil, &sc)
+}
+
+// ScheduleAction pauses, resumes or deletes a schedule.
+func (c *Client) ScheduleAction(ctx context.Context, id, action string) error {
+	if err := sandbox.ValidateID(id); err != nil {
+		return err
+	}
+	switch action {
+	case "pause", "resume":
+		return c.do(ctx, http.MethodPost, "/v1/schedules/"+id+"/"+action, nil, nil)
+	case "delete":
+		return c.do(ctx, http.MethodDelete, "/v1/schedules/"+id, nil, nil)
+	default:
+		return fmt.Errorf("runnerd: unknown schedule action %q", action)
+	}
+}
+
 // Info returns the runner's status.
 func (c *Client) Info(ctx context.Context) (runner.Status, error) {
 	var st runner.Status

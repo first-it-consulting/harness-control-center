@@ -13,6 +13,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
@@ -30,6 +31,12 @@ import (
 //	POST /v1/jobs/{id}/cancel   cancel one job
 //	GET  /v1/jobs/{id}/console  console log
 //	GET  /v1/jobs/{id}/results  the job's results (a sanitized tar archive)
+//	POST /v1/schedules          add a harness with a trigger (YAML body)
+//	GET  /v1/schedules          list schedules
+//	GET  /v1/schedules/{id}     one schedule
+//	POST /v1/schedules/{id}/pause
+//	POST /v1/schedules/{id}/resume
+//	DELETE /v1/schedules/{id}
 //	GET  /v1/events[?job=ID]    NDJSON event stream
 //	POST /v1/kill               kill switch
 //	POST /v1/resume             accept jobs again
@@ -54,6 +61,12 @@ func NewServer(r *runner.Runner, stateDir string, log *slog.Logger) *Server {
 	mux.HandleFunc("POST /v1/jobs/{id}/cancel", s.cancel)
 	mux.HandleFunc("GET /v1/jobs/{id}/console", s.console)
 	mux.HandleFunc("GET /v1/jobs/{id}/results", s.results)
+	mux.HandleFunc("POST /v1/schedules", s.addSchedule)
+	mux.HandleFunc("GET /v1/schedules", s.schedules)
+	mux.HandleFunc("GET /v1/schedules/{id}", s.schedule)
+	mux.HandleFunc("POST /v1/schedules/{id}/pause", s.scheduleAction)
+	mux.HandleFunc("POST /v1/schedules/{id}/resume", s.scheduleAction)
+	mux.HandleFunc("DELETE /v1/schedules/{id}", s.scheduleAction)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("POST /v1/kill", s.kill)
 	mux.HandleFunc("POST /v1/resume", s.resume)
@@ -177,6 +190,71 @@ func (s *Server) info(w http.ResponseWriter, _ *http.Request) {
 	st := s.r.Status()
 	st.Version = version.Version
 	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) addSchedule(w http.ResponseWriter, req *http.Request) {
+	data, err := io.ReadAll(http.MaxBytesReader(w, req.Body, spec.MaxDocumentBytes))
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, err)
+		return
+	}
+	sc, err := s.r.AddSchedule(data)
+	switch {
+	case errors.Is(err, runner.ErrKilled), errors.Is(err, runner.ErrClosed):
+		writeError(w, http.StatusServiceUnavailable, err)
+	case err != nil:
+		writeError(w, http.StatusBadRequest, err)
+	default:
+		s.log.Info("schedule added", "schedule", sc.ID, "harness", sc.Harness, "cron", sc.Cron, "maxRuns", sc.MaxRuns)
+		writeJSON(w, http.StatusCreated, sc)
+	}
+}
+
+func (s *Server) schedules(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.r.Schedules())
+}
+
+func (s *Server) schedule(w http.ResponseWriter, req *http.Request) {
+	id := req.PathValue("id")
+	if err := sandbox.ValidateID(id); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	sc, ok := s.r.GetSchedule(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, runner.ErrNoSchedule)
+		return
+	}
+	writeJSON(w, http.StatusOK, sc)
+}
+
+func (s *Server) scheduleAction(w http.ResponseWriter, req *http.Request) {
+	id := req.PathValue("id")
+	if err := sandbox.ValidateID(id); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var err error
+	action := "delete"
+	switch {
+	case req.Method == http.MethodDelete:
+		err = s.r.DeleteSchedule(id)
+	case strings.HasSuffix(req.URL.Path, "/pause"):
+		action, err = "pause", s.r.PauseSchedule(id)
+	default:
+		action, err = "resume", s.r.ResumeSchedule(id)
+	}
+	switch {
+	case errors.Is(err, runner.ErrNoSchedule):
+		writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, runner.ErrKilled):
+		writeError(w, http.StatusServiceUnavailable, err)
+	case err != nil:
+		writeError(w, http.StatusBadRequest, err)
+	default:
+		s.log.Info("schedule "+action, "schedule", id)
+		writeJSON(w, http.StatusOK, map[string]string{"id": id})
+	}
 }
 
 func (s *Server) list(w http.ResponseWriter, _ *http.Request) {

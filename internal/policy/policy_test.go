@@ -329,3 +329,20 @@ func TestModelEndpointMustBeAllowed(t *testing.T) {
 		t.Errorf("New with unreachable model endpoint = %v", err)
 	}
 }
+
+func TestExplainTriggers(t *testing.T) {
+	e := mustEngine(t, base+"  trigger: {loop: {maxIterations: 4, interval: 10m}}\n  budget: {maxTokens: 1000, maxCostUSD: 2}\n")
+	text := strings.Join(e.Explain(), "\n")
+	for _, want := range []string{"up to 4 times in a row (10m0s apart)", "4,000 tokens (or $8.00)", "first run that does not succeed"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("loop explanation missing %q:\n%s", want, text)
+		}
+	}
+	if risk, why := e.Risk(); risk != RiskMedium || !slices.Contains(why, "runs again and again without anyone watching") {
+		t.Errorf("loop risk = %s %v", risk, why)
+	}
+	e = mustEngine(t, base+"  trigger: {schedule: '0 2 * * *'}\n")
+	if text := strings.Join(e.Explain(), "\n"); !strings.Contains(text, `cron schedule "0 2 * * *" (times in UTC)`) || !strings.Contains(text, "skipped while the previous one") {
+		t.Errorf("schedule explanation:\n%s", text)
+	}
+}

@@ -27,6 +27,7 @@ const (
 	MaxTokens        = 1_000_000_000
 	MaxSubagents     = 16
 	MaxLoopIteration = 1000
+	MaxLoopInterval  = 7 * 24 * time.Hour
 	MaxPromptBytes   = 256 * 1024
 	MaxEgressRules   = 64
 )

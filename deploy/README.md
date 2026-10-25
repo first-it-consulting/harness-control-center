@@ -101,6 +101,22 @@ hcc results <job> -o results.tar --ssh <host>
 
 See ADR-0006 for what is kept and why.
 
+## Schedules
+
+A harness with `spec.trigger` becomes a schedule when you start it
+(`hcc run`, or the web UI). The runner keeps it in
+`/var/lib/hcc/state/schedules/` and starts its runs itself:
+
+```sh
+hcc schedules --ssh <host>
+hcc schedule pause|resume|delete <schedule> --ssh <host>
+```
+
+Cron times are UTC. A schedule may not run more often than
+`minScheduleInterval` in `/etc/hcc/runner.yaml` (default `15m`). Runs never
+overlap, missed runs are not caught up, and the kill switch pauses every
+schedule (resume each one afterwards). See ADR-0008.
+
 ## Job history
 
 Each job is kept in `/var/lib/hcc/state/jobs/<id>/` (owner-only): its

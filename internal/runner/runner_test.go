@@ -28,6 +28,7 @@ type fakeProvider struct {
 	block   bool
 	release chan struct{}
 	disk    string // handed to Spec.Collect after a clean exit
+	console string // written to the console
 
 	mu      sync.Mutex
 	specs   []sandbox.Spec
@@ -39,10 +40,12 @@ func newFakeProvider() *fakeProvider { return &fakeProvider{release: make(chan s
 
 func (p *fakeProvider) Name() string { return "fake" }
 
-func (p *fakeProvider) Run(ctx context.Context, s sandbox.Spec, _ io.Writer) (sandbox.Result, error) {
+func (p *fakeProvider) Run(ctx context.Context, s sandbox.Spec, console io.Writer) (sandbox.Result, error) {
 	p.mu.Lock()
 	p.specs = append(p.specs, s)
+	out := p.console
 	p.mu.Unlock()
+	_, _ = io.WriteString(console, out)
 	n := p.running.Add(1)
 	defer p.running.Add(-1)
 	for {
@@ -201,8 +204,6 @@ func TestFailClosedOnUnenforceablePermissions(t *testing.T) {
 		"tools":     "  permissions: {tools: {install: [git]}}\n",
 		"subagents": "  permissions: {subagents: {max: 1}}\n",
 		"approvals": "  approvals: {requireFor: [git.push]}\n",
-		"schedule":  "  trigger: {schedule: '0 2 * * *'}\n",
-		"loop":      "  trigger: {loop: {maxIterations: 3}}\n",
 	}
 	for name, extra := range tests {
 		t.Run(name, func(t *testing.T) {

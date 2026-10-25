@@ -190,6 +190,7 @@ function route() {
     harness: () => harnessView(parts[1]),
     new: () => harnessView(""),
     runners: () => runnersView(),
+    schedules: () => schedulesView(),
   };
   (routes[parts[0]] || routes.jobs)();
   view.focus();
@@ -275,6 +276,8 @@ async function jobView(runner, id) {
         ? j.usage.inputTokens.toLocaleString() + " in / " + j.usage.outputTokens.toLocaleString() + " out" +
           (j.usage.costKnown ? " ($" + j.usage.costUSD.toFixed(4) + ")" : "")
         : "–"),
+      j.schedule && h("dt", {}, "Started by"), j.schedule && h("dd", {}, h("a", { href: "#/schedules" }, "schedule " + j.schedule)),
+      j.loopDone && h("dt", {}, "Loop"), j.loopDone && h("dd", {}, "This run reported the task complete."),
       j.error && h("dt", {}, "Why it ended"), j.error && h("dd", {}, j.error));
     set(results, ...resultsBlock(j, jobPath));
     try {
@@ -456,7 +459,7 @@ async function runDialog(doc) {
     h("option", { value: r.name, selected: r.status.target === c.target },
       r.name + " (" + r.status.target + (r.status.killed ? ", stopped" : "") + ")")));
   const ok = h("input", { type: "checkbox" });
-  const start = h("button", { class: "primary", disabled: true }, "Start");
+  const start = h("button", { class: "primary", disabled: true }, c.trigger ? "Add schedule" : "Start");
   const mismatch = h("div");
   const updateMismatch = () => {
     const r = usable.find((x) => x.name === select.value);
@@ -471,23 +474,94 @@ async function runDialog(doc) {
     try {
       const r = await api("POST", "/api/runs", { runner: select.value, yaml: doc, confirmed: true });
       dialog.close();
-      location.hash = "#/job/" + encodeURIComponent(r.runner) + "/" + encodeURIComponent(r.id);
+      if (r.schedule) {
+        say("Added schedule " + r.schedule + " on " + r.runner + ".");
+        location.hash = "#/schedules";
+      } else {
+        location.hash = "#/job/" + encodeURIComponent(r.runner) + "/" + encodeURIComponent(r.id);
+      }
     } catch (err) {
       start.disabled = false;
       set(mismatch, h("div", { class: "error-box" }, err.message));
     }
   });
   set(dialog,
-    h("h1", {}, "Start " + c.name + "?"),
+    h("h1", {}, (c.trigger ? "Schedule " : "Start ") + c.name + "?"),
+    c.trigger && h("div", { class: "warn-box" }, c.trigger === "schedule"
+      ? "This adds a schedule: the runner starts it again and again on its own, without asking you, until you pause or delete it."
+      : "This adds a loop: the runner starts it several times in a row on its own, without asking you."),
     ...checkBlock(c),
     usable.length === 0
       ? h("div", { class: "error-box" }, "No runner is reachable. ", h("a", { href: "#/runners", onclick: () => dialog.close() }, "Check your runners."))
       : h("label", {}, "Runner", select),
     mismatch,
-    h("label", { class: "check" }, ok, "I have read what this harness may do, and I want to start it."),
+    h("label", { class: "check" }, ok, c.trigger
+      ? "I have read what this harness may do, and I want it to run unattended."
+      : "I have read what this harness may do, and I want to start it."),
     h("div", { class: "actions" }, start, h("button", { onclick: () => dialog.close() }, "Cancel")));
   updateMismatch();
   dialog.showModal();
+}
+
+// --- schedules ---
+
+async function schedulesView() {
+  const body = h("tbody");
+  const errors = h("div");
+  show(
+    h("div", { class: "head" },
+      h("div", {}, h("h1", {}, "Schedules"),
+        h("p", { class: "muted" }, "Harnesses with a trigger run on their own. Times are UTC on the runner; shown here in your time.")),
+      h("div", { class: "actions" }, h("a", { class: "button primary", href: "#/harnesses" }, "Add one from a harness"))),
+    errors,
+    h("div", { class: "table-wrap" }, h("table", {},
+      h("thead", {}, h("tr", {}, ["State", "Harness", "Runner", "When", "Runs", "Next run", "Last run", "Detail", ""].map((t) => h("th", {}, t)))),
+      body)));
+  const load = async () => {
+    try {
+      const data = await api("GET", "/api/schedules");
+      set(errors, ...Object.entries(data.errors).map(([r, e]) => h("div", { class: "error-box" }, "Runner " + r + " is unreachable: " + e)));
+      if (data.schedules.length === 0) {
+        set(body, h("tr", {}, h("td", { colspan: 9, class: "muted" }, "No schedules. A harness with spec.trigger becomes one when you start it.")));
+        return;
+      }
+      set(body, ...data.schedules.map(scheduleRow));
+    } catch (err) {
+      fail(err);
+    }
+  };
+  await load();
+  every(5000, load);
+}
+
+function scheduleRow(s) {
+  const path = "/api/runners/" + encodeURIComponent(s.runner) + "/schedules/" + encodeURIComponent(s.id);
+  const act = (method, what, question) => async () => {
+    if (question && !confirm(question)) return;
+    try {
+      await api(method, what ? path + "/" + what : path);
+      schedulesView();
+    } catch (err) {
+      fail(err);
+    }
+  };
+  const when = s.cron
+    ? h("span", {}, h("code", {}, s.cron), " UTC")
+    : "loop, at most " + s.maxRuns + " runs" + (s.interval ? ", " + Math.round(s.interval / 6e10) + " min apart" : "");
+  const kind = { active: "running", paused: "cancelled", finished: "queued" }[s.state] || s.state;
+  return h("tr", {},
+    h("td", {}, badge(s.state, kind)),
+    h("td", {}, s.harness),
+    h("td", {}, s.runner),
+    h("td", {}, when),
+    h("td", {}, String(s.runs)),
+    h("td", {}, s.nextRun ? fmtTime(s.nextRun) : "–"),
+    h("td", {}, s.lastJob ? h("a", { href: "#/job/" + encodeURIComponent(s.runner) + "/" + encodeURIComponent(s.lastJob) }, "open") : "–"),
+    h("td", { class: "detail" }, s.message || ""),
+    h("td", {}, h("div", { class: "actions" },
+      s.state === "active" && h("button", { onclick: act("POST", "pause") }, "Pause"),
+      s.state === "paused" && h("button", { onclick: act("POST", "resume") }, "Resume"),
+      h("button", { onclick: act("DELETE", "", "Delete this schedule? Its past jobs are kept; a running one goes on.") }, "Delete"))));
 }
 
 // --- runners ---
@@ -553,12 +627,13 @@ function runnerCard(r) {
     st && h("dl", { class: "facts" },
       h("dt", {}, "Target"), h("dd", {}, st.target),
       h("dt", {}, "Jobs"), h("dd", {}, st.running + " running, " + st.queued + " queued (at most " + st.maxConcurrent + " at once)"),
+      h("dt", {}, "Schedules"), h("dd", {}, String(st.schedules)),
       h("dt", {}, "Images"), h("dd", {}, st.images.join(", ")),
       h("dt", {}, "Version"), h("dd", {}, st.version || "–")),
     r.error && h("div", { class: "error-box" }, r.error),
     h("div", { class: "actions" },
       st && !st.killed && h("button", { class: "danger", onclick: act("kill", "Stopping every job on " + r.name + ".") }, "Stop all jobs"),
-      st && st.killed && h("button", { onclick: act("resume", r.name + " accepts jobs again.") }, "Accept jobs again"),
+      st && st.killed && h("button", { onclick: act("resume", r.name + " accepts jobs again. Its schedules stay paused until you resume them.") }, "Accept jobs again"),
       h("button", { onclick: async () => {
         if (!confirm("Remove " + r.name + " from this list? The runner itself keeps running.")) return;
         try {
@@ -573,14 +648,14 @@ function runnerCard(r) {
 // --- kill switch ---
 
 document.getElementById("stop-all").addEventListener("click", async () => {
-  if (!confirm("Stop every job on every runner, and refuse new ones until you resume each runner?")) return;
+  if (!confirm("Stop every job on every runner, pause every schedule, and refuse new jobs until you resume each runner?")) return;
   try {
     const res = await api("POST", "/api/kill");
     const failed = res.filter((r) => r.error);
     if (failed.length) {
       say("Could NOT reach: " + failed.map((r) => r.name + " (" + r.error + ")").join(", ") + ". Jobs there may still run.", true);
     } else {
-      say("Every runner is stopping its jobs and refusing new ones.");
+      say("Every runner is stopping its jobs and refusing new ones. Schedules are paused; resume them one by one when you are ready.");
     }
   } catch (err) {
     fail(err);

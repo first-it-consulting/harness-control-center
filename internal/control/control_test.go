@@ -535,3 +535,46 @@ func TestServeOverLoopback(t *testing.T) {
 		}
 	}
 }
+
+func TestSchedulesThroughTheUI(t *testing.T) {
+	ts := newTestServer(t)
+	sock := startRunner(t)
+	var out map[string]any
+	ts.do(http.MethodPost, "/api/runners", RunnerRef{Name: "local", Socket: sock}, &out)
+	doc := okHarness + "  trigger: {schedule: '0 4 * * *'}\n"
+	var c Check
+	ts.do(http.MethodPost, "/api/check", map[string]string{"yaml": doc}, &c)
+	if c.Trigger != "schedule" || c.Risk != "medium" {
+		t.Errorf("check = %+v", c)
+	}
+	var added map[string]string
+	if code := ts.do(http.MethodPost, "/api/runs", runRequest{Runner: "local", YAML: doc, Confirmed: true}, &added); code != http.StatusCreated || added["schedule"] == "" {
+		t.Fatalf("schedule: %d %v", code, added)
+	}
+	var list struct {
+		Schedules []ScheduleView    `json:"schedules"`
+		Errors    map[string]string `json:"errors"`
+	}
+	ts.do(http.MethodGet, "/api/schedules", nil, &list)
+	if len(list.Schedules) != 1 || list.Schedules[0].Runner != "local" || list.Schedules[0].Cron != "0 4 * * *" || list.Schedules[0].Document != nil {
+		t.Fatalf("schedules = %+v", list)
+	}
+	path := "/api/runners/local/schedules/" + added["schedule"]
+	if code := ts.do(http.MethodPost, path+"/pause", map[string]string{}, &out); code != http.StatusOK {
+		t.Errorf("pause: %d %v", code, out)
+	}
+	if code := ts.do(http.MethodPost, path+"/explode", map[string]string{}, &out); code != http.StatusNotFound {
+		t.Errorf("unknown action: %d", code)
+	}
+	ts.do(http.MethodGet, "/api/schedules", nil, &list)
+	if list.Schedules[0].State != runner.SchedulePaused {
+		t.Errorf("after pause: %+v", list.Schedules[0])
+	}
+	if code := ts.do(http.MethodDelete, path, nil, &out); code != http.StatusOK {
+		t.Errorf("delete: %d %v", code, out)
+	}
+	ts.do(http.MethodGet, "/api/schedules", nil, &list)
+	if len(list.Schedules) != 0 {
+		t.Errorf("after delete: %+v", list.Schedules)
+	}
+}

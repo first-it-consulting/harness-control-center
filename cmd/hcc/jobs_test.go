@@ -149,9 +149,10 @@ func TestRunWithDevNullNeedsYes(t *testing.T) {
 
 func TestRunRejectedByRunner(t *testing.T) {
 	sock := startTestRunner(t)
-	// Needs network, which this runner cannot enforce yet.
+	// A schedule for another target, needing tools this runner cannot
+	// install yet.
 	code, _, errOut := runCLI("run", "--yes", "--socket", sock, "../../examples/nightly-dependency-bump.yaml")
-	if code != exitInvalid || !strings.Contains(errOut, "not started") {
+	if code != exitInvalid || !strings.Contains(errOut, "not scheduled") {
 		t.Errorf("exit %d, stderr %q", code, errOut)
 	}
 }
@@ -266,5 +267,42 @@ func TestResultsCommand(t *testing.T) {
 	}
 	if code, _, _ := runCLI("results", "job-missing", "-o", filepath.Join(t.TempDir(), "x.tar"), "--socket", sock); code != exitInvalid {
 		t.Errorf("results of an unknown job: exit %d", code)
+	}
+}
+
+func TestScheduleCommands(t *testing.T) {
+	sock := startTestRunner(t)
+	doc, err := os.ReadFile("../../examples/hello-offline.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "nightly.yaml")
+	if err := os.WriteFile(p, append(doc, []byte("  trigger: {schedule: '0 2 * * *'}\n")...), 0o600); err != nil { //nolint:gosec // a temp file in the test
+		t.Fatal(err)
+	}
+	code, out, errOut := runCLI("run", p, "--yes", "--socket", sock)
+	if code != exitOK || !strings.Contains(out, "Added schedule") || !strings.Contains(out, "cron schedule \"0 2 * * *\" (times in UTC)") {
+		t.Fatalf("run: %d\n%s\n%s", code, out, errOut)
+	}
+	_, id, _ := strings.Cut(out, "Added schedule ")
+	id, _, _ = strings.Cut(id, " ")
+	code, out, _ = runCLI("schedules", "--socket", sock)
+	if code != exitOK || !strings.Contains(out, id) || !strings.Contains(out, "cron 0 2 * * * (UTC)") || !strings.Contains(out, "active") {
+		t.Errorf("schedules:\n%s", out)
+	}
+	if code, out, errOut := runCLI("schedule", "pause", id, "--socket", sock); code != exitOK {
+		t.Errorf("pause: %d %s %s", code, out, errOut)
+	}
+	if _, out, _ := runCLI("schedules", "--socket", sock); !strings.Contains(out, "paused") {
+		t.Errorf("after pause:\n%s", out)
+	}
+	if code, _, _ := runCLI("schedule", "explode", id, "--socket", sock); code != exitUsage {
+		t.Errorf("unknown action: %d", code)
+	}
+	if code, _, _ := runCLI("schedule", "delete", id, "--socket", sock); code != exitOK {
+		t.Errorf("delete: %d", code)
+	}
+	if _, out, _ := runCLI("schedules", "--socket", sock); !strings.Contains(out, "No schedules.") {
+		t.Errorf("after delete:\n%s", out)
 	}
 }

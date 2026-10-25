@@ -18,6 +18,7 @@ import (
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
 	"github.com/first-it-consulting/harness-control-center/internal/runnerd"
 	"github.com/first-it-consulting/harness-control-center/internal/safetext"
+	"github.com/first-it-consulting/harness-control-center/internal/spec"
 	"golang.org/x/term"
 )
 
@@ -99,6 +100,16 @@ func cmdRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	ctx := context.Background()
+	if h, err := spec.Parse(data); err == nil && (h.Spec.Trigger.Schedule != "" || h.Spec.Trigger.Loop != nil) {
+		sc, err := c.AddSchedule(ctx, data)
+		if err != nil {
+			fmt.Fprintln(stderr, "hcc run: not scheduled:", err)
+			return exitInvalid
+		}
+		fmt.Fprintf(stdout, "Added schedule %s on %s. %s\n", sc.ID, conn.where(), describeNext(sc))
+		fmt.Fprintf(stdout, "See it with \"hcc schedules%s\"; stop it with \"hcc schedule pause %s%s\".\n", conn.flags(), sc.ID, conn.flags())
+		return exitOK
+	}
 	id, err := c.Submit(ctx, data)
 	if err != nil {
 		fmt.Fprintln(stderr, "hcc run: not started:", err)
@@ -224,6 +235,79 @@ func cmdJobs(cmd string, args []string, stdout, stderr io.Writer) int {
 		return exitInvalid
 	}
 	return exitOK
+}
+
+// describeNext says when a schedule runs next.
+func describeNext(sc runner.Schedule) string {
+	switch {
+	case sc.State != runner.ScheduleActive:
+		return "It is " + sc.State + "."
+	case sc.NextRun.IsZero():
+		return "A run is going."
+	default:
+		return "Next run: " + sc.NextRun.Local().Format("2006-01-02 15:04 MST") + "."
+	}
+}
+
+func cmdSchedules(cmd string, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var conn connFlags
+	conn.register(fs)
+	pos, err := parseFlags(fs, args)
+	if err != nil {
+		return exitUsage
+	}
+	c, err := conn.client()
+	if err != nil {
+		fmt.Fprintf(stderr, "hcc %s: %v\n", cmd, err)
+		return exitUsage
+	}
+	ctx := context.Background()
+	if cmd == "schedules" {
+		if len(pos) != 0 {
+			fmt.Fprintf(stderr, "hcc schedules: no arguments expected\n\n%s", usage)
+			return exitUsage
+		}
+		list, err := c.Schedules(ctx)
+		if err != nil {
+			fmt.Fprintln(stderr, "hcc schedules:", err)
+			return exitInvalid
+		}
+		printSchedules(stdout, list)
+		return exitOK
+	}
+	if len(pos) != 2 || (pos[0] != "pause" && pos[0] != "resume" && pos[0] != "delete") {
+		fmt.Fprintf(stderr, "hcc schedule: expected pause, resume or delete and a schedule\n\n%s", usage)
+		return exitUsage
+	}
+	if err := c.ScheduleAction(ctx, pos[1], pos[0]); err != nil {
+		fmt.Fprintf(stderr, "hcc schedule %s: %v\n", pos[0], err)
+		return exitInvalid
+	}
+	fmt.Fprintf(stdout, "Schedule %s: %s done.\n", pos[1], pos[0])
+	return exitOK
+}
+
+func printSchedules(w io.Writer, list []runner.Schedule) {
+	if len(list) == 0 {
+		fmt.Fprintln(w, "No schedules.")
+		return
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "SCHEDULE\tHARNESS\tWHEN\tSTATE\tRUNS\tNEXT RUN\tDETAIL")
+	for _, s := range list {
+		when := "cron " + s.Cron + " (UTC)"
+		if s.Cron == "" {
+			when = fmt.Sprintf("loop, at most %d runs", s.MaxRuns)
+		}
+		next := "-"
+		if !s.NextRun.IsZero() {
+			next = s.NextRun.Local().Format("2006-01-02 15:04")
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", s.ID, s.Harness, when, s.State, s.Runs, next, safetext.Line(s.Message))
+	}
+	_ = tw.Flush()
 }
 
 // cmdResults saves a job's results archive. It never writes to a

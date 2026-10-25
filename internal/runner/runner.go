@@ -35,6 +35,9 @@ var (
 	ErrKilled   = errors.New("runner: kill switch is engaged; call Resume to accept jobs again")
 	ErrClosed   = errors.New("runner: shut down")
 	ErrNotFound = errors.New("runner: no such job")
+	// ErrTriggered: a harness with a schedule or loop is added as a
+	// schedule (AddSchedule), not run directly.
+	ErrTriggered = errors.New("runner: this harness has a trigger (schedule or loop): add it as a schedule")
 )
 
 // Config configures a Runner.
@@ -78,6 +81,11 @@ type Config struct {
 	// Log receives problems that do not belong to a single caller, such
 	// as a job that could not be saved (default: discarded).
 	Log *slog.Logger
+	// ScheduleStore, if set, persists schedules.
+	ScheduleStore ScheduleStore
+	// MinScheduleInterval bounds how often a cron schedule may fire
+	// (default DefaultMinScheduleInterval).
+	MinScheduleInterval time.Duration
 	// Now and NewID are injectable for tests.
 	Now   func() time.Time
 	NewID func() string
@@ -110,6 +118,12 @@ type Runner struct {
 	// the root that was current when it was submitted.
 	root       context.Context
 	cancelRoot context.CancelFunc
+
+	schedules     map[string]*schedule
+	wake          chan struct{}
+	stopScheduler chan struct{}
+	schedulerDone chan struct{}
+	stopOnce      sync.Once
 }
 
 // New returns a Runner.
@@ -138,13 +152,24 @@ func New(cfg Config) (*Runner, error) {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
-	r := &Runner{cfg: cfg, jobs: map[string]*job{}, subs: map[chan Event]struct{}{}}
+	if cfg.MinScheduleInterval <= 0 {
+		cfg.MinScheduleInterval = DefaultMinScheduleInterval
+	}
+	r := &Runner{cfg: cfg, jobs: map[string]*job{}, subs: map[chan Event]struct{}{},
+		schedules: map[string]*schedule{}, wake: make(chan struct{}, 1),
+		stopScheduler: make(chan struct{}), schedulerDone: make(chan struct{})}
 	r.root, r.cancelRoot = context.WithCancel(context.Background())
 	if cfg.Store != nil {
 		if err := r.load(); err != nil {
 			return nil, err
 		}
 	}
+	if cfg.ScheduleStore != nil {
+		if err := r.loadSchedules(); err != nil {
+			return nil, err
+		}
+	}
+	go r.scheduler()
 	return r, nil
 }
 
@@ -201,36 +226,60 @@ func (r *Runner) save(j Job) {
 // Submit validates h against what this runner can enforce, queues it and
 // returns the job ID.
 func (r *Runner) Submit(h *spec.Harness) (string, error) {
+	if err := r.check(h); err != nil {
+		return "", err
+	}
+	if triggered(h) {
+		return "", ErrTriggered
+	}
+	return r.enqueue(h, "", nil)
+}
+
+func triggered(h *spec.Harness) bool {
+	return h.Spec.Trigger.Schedule != "" || h.Spec.Trigger.Loop != nil
+}
+
+// check validates h against what this runner can enforce.
+func (r *Runner) check(h *spec.Harness) error {
 	if h == nil {
-		return "", errors.New("runner: nil harness")
+		return errors.New("runner: nil harness")
 	}
 	if err := h.Validate(); err != nil {
-		return "", fmt.Errorf("runner: invalid harness: %w", err)
+		return fmt.Errorf("runner: invalid harness: %w", err)
 	}
 	if h.Spec.Target != r.cfg.Target {
-		return "", fmt.Errorf("runner: harness targets %q, this runner is %q", h.Spec.Target, r.cfg.Target)
+		return fmt.Errorf("runner: harness targets %q, this runner is %q", h.Spec.Target, r.cfg.Target)
 	}
 	// Credentials only ever travel through the egress proxy, so they need
 	// it too (and the factory checks their hosts against the allowlist).
-	needsNet := len(h.Spec.Permissions.Network.Egress) > 0 || len(h.Spec.Permissions.Credentials) > 0
-	if needsNet && r.cfg.Egress == nil {
-		return "", errors.New("runner: network access is not configured on this runner")
+	if needsNetwork(h) && r.cfg.Egress == nil {
+		return errors.New("runner: network access is not configured on this runner")
 	}
 	if err := checkSupported(h); err != nil {
-		return "", err
+		return err
 	}
 	if !slices.Contains(r.cfg.Images, h.Spec.Sandbox.Image) {
-		return "", fmt.Errorf("runner: unknown image %q", h.Spec.Sandbox.Image)
+		return fmt.Errorf("runner: unknown image %q", h.Spec.Sandbox.Image)
 	}
+	if r.cfg.Results != nil && h.Spec.Sandbox.DiskMiB > r.cfg.MaxDiskMiB {
+		return fmt.Errorf("runner: spec.sandbox.diskMiB %d exceeds this runner's limit of %d", h.Spec.Sandbox.DiskMiB, r.cfg.MaxDiskMiB)
+	}
+	return nil
+}
+
+func needsNetwork(h *spec.Harness) bool {
+	return len(h.Spec.Permissions.Network.Egress) > 0 || len(h.Spec.Permissions.Credentials) > 0
+}
+
+// enqueue queues a checked harness as a job; scheduleID and loop are set
+// for runs started by a schedule.
+func (r *Runner) enqueue(h *spec.Harness, scheduleID string, loop *TaskLoop) (string, error) {
+	needsNet := needsNetwork(h)
 	diskMiB := 0
 	if r.cfg.Results != nil {
 		diskMiB = h.Spec.Sandbox.DiskMiB
-		if diskMiB > r.cfg.MaxDiskMiB {
-			return "", fmt.Errorf("runner: spec.sandbox.diskMiB %d exceeds this runner's limit of %d", diskMiB, r.cfg.MaxDiskMiB)
-		}
 	}
-
-	task, err := taskFor(h)
+	task, err := taskFor(h, loop)
 	if err != nil {
 		return "", err
 	}
@@ -265,7 +314,7 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 	}
 	ctx, cancel := context.WithCancel(r.root)
 	j = &job{
-		Job:    Job{ID: id, Harness: h.Metadata.Name, State: StateQueued, Created: r.cfg.Now()},
+		Job:    Job{ID: id, Harness: h.Metadata.Name, State: StateQueued, Created: r.cfg.Now(), Schedule: scheduleID},
 		ctx:    ctx,
 		cancel: cancel,
 		spec: sandbox.Spec{
@@ -335,6 +384,9 @@ func (r *Runner) execute(j *job) {
 			err = fmt.Errorf("console: %w", cerr)
 		}
 	}
+	r.mu.Lock()
+	j.LoopDone = result.loopDone()
+	r.mu.Unlock()
 	switch {
 	case err != nil:
 		r.transition(j, StateFailed, err.Error())
@@ -380,6 +432,9 @@ func (r *Runner) transitionLocked(j *job, to State, msg string) {
 	}
 	r.emitLocked(j, Event{JobID: j.ID, Harness: j.Harness, From: from, To: to, At: now, Message: msg})
 	r.save(j.snapshot())
+	if to.Terminal() && j.Schedule != "" {
+		r.runEndedLocked(j)
+	}
 }
 
 // Prune forgets finished jobs, oldest first, that finished more than
@@ -452,6 +507,7 @@ func (r *Runner) Cancel(id string) error {
 func (r *Runner) KillAll() {
 	r.mu.Lock()
 	r.killed = true
+	r.pauseAllLocked("paused by the kill switch")
 	r.cancelQueuedLocked(func(*job) bool { return true }, "cancelled by kill switch")
 	cancel := r.cancelRoot
 	r.root, r.cancelRoot = context.WithCancel(context.Background())
@@ -472,7 +528,17 @@ func (r *Runner) Shutdown(ctx context.Context) error {
 	r.mu.Lock()
 	r.closed = true
 	r.mu.Unlock()
-	r.KillAll()
+	r.stopOnce.Do(func() { close(r.stopScheduler) })
+	<-r.schedulerDone
+	// Not KillAll: shutting down must not pause the schedules, which
+	// continue when the runner starts again.
+	r.mu.Lock()
+	r.killed = true
+	r.cancelQueuedLocked(func(*job) bool { return true }, "cancelled: the runner is shutting down")
+	cancel := r.cancelRoot
+	r.root, r.cancelRoot = context.WithCancel(context.Background())
+	r.mu.Unlock()
+	cancel()
 	done := make(chan struct{})
 	go func() { r.wg.Wait(); close(done) }()
 	select {
@@ -491,7 +557,7 @@ func (r *Runner) Status() Status {
 	slices.Sort(images)
 	return Status{
 		Target: r.cfg.Target, Images: images, MaxConcurrent: r.cfg.MaxConcurrent, MaxDiskMiB: r.cfg.MaxDiskMiB,
-		Running: r.running, Queued: len(r.queue), Killed: r.killed,
+		Running: r.running, Queued: len(r.queue), Killed: r.killed, Schedules: len(r.schedules),
 	}
 }
 
@@ -638,9 +704,6 @@ func checkSupported(h *spec.Harness) error {
 	if len(s.Approvals.RequireFor) > 0 {
 		notYet("approval gates")
 	}
-	if s.Trigger.Schedule != "" || s.Trigger.Loop != nil {
-		notYet("scheduled and looping triggers")
-	}
 	if len(errs) > 0 {
 		return fmt.Errorf("runner: %w", errors.Join(errs...))
 	}
@@ -652,6 +715,13 @@ func checkSupported(h *spec.Harness) error {
 // agent (whose own output might contain the text) has exited.
 const resultMarker = "HCC-RESULT-END exit="
 
+// LoopDoneMarker is printed by an image's init, before the result marker,
+// when a looping harness's agent reported that the whole task is done.
+// Only a marker followed by a result marker counts, so the agent cannot
+// fake it by printing it itself mid-run (init prints both after the
+// agent exited).
+const LoopDoneMarker = "HCC-LOOP-DONE"
+
 // resultWatcher reads the agent's exit status from the console. It
 // keeps only the current line, so memory stays bounded.
 type resultWatcher struct {
@@ -659,6 +729,9 @@ type resultWatcher struct {
 	line []byte
 	code int // valid once seen
 	seen bool
+	// doneLine: the previous line was LoopDoneMarker; done: it was
+	// directly followed by the result marker.
+	doneLine, done bool
 }
 
 func (w *resultWatcher) Write(p []byte) (int, error) {
@@ -676,10 +749,19 @@ func (w *resultWatcher) Write(p []byte) (int, error) {
 		if rest, ok := strings.CutPrefix(line, resultMarker); ok {
 			if n, err := strconv.Atoi(rest); err == nil {
 				w.code, w.seen = n, true
+				w.done = w.doneLine
 			}
 		}
+		w.doneLine = line == LoopDoneMarker
 	}
 	return len(p), nil
+}
+
+// loopDone reports whether init said the loop's task is done.
+func (w *resultWatcher) loopDone() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.done
 }
 
 // exitCode is the agent's status, or 0 if the image reported none.
@@ -698,6 +780,14 @@ type Task struct {
 	Runtime string     `json:"runtime"`
 	Prompt  string     `json:"prompt"`
 	Model   *TaskModel `json:"model,omitempty"`
+	Loop    *TaskLoop  `json:"loop,omitempty"`
+}
+
+// TaskLoop tells a looping harness's runtime where it is. The runtime
+// reports that the whole task is done by printing LoopDoneMarker.
+type TaskLoop struct {
+	Iteration     int `json:"iteration"`
+	MaxIterations int `json:"maxIterations"`
 }
 
 // TaskModel tells the runtime which model to ask, and where.
@@ -706,8 +796,8 @@ type TaskModel struct {
 	Endpoint string `json:"endpoint"`
 }
 
-func taskFor(h *spec.Harness) ([]byte, error) {
-	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt}
+func taskFor(h *spec.Harness, loop *TaskLoop) ([]byte, error) {
+	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt, Loop: loop}
 	if m := h.Spec.Model; m != nil {
 		t.Model = &TaskModel{Name: m.Name, Endpoint: m.Endpoint}
 	}

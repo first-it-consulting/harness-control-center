@@ -102,6 +102,7 @@ func startDaemonIn(t *testing.T, dir string) *testDaemon {
 		Console:       ConsoleFunc(state, log),
 		Results:       ResultsFunc(state),
 		Store:         NewFileStore(state, log),
+		ScheduleStore: NewFileStore(state, log),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -534,5 +535,58 @@ func TestInfo(t *testing.T) {
 	}
 	if st, _ := d.client.Info(context.Background()); !st.Killed {
 		t.Error("kill switch not reported")
+	}
+}
+
+func TestScheduleAPI(t *testing.T) {
+	dir := shortTempDir(t)
+	ctx := context.Background()
+	d := startDaemonIn(t, dir)
+	doc := []byte(harnessDoc + "  trigger: {schedule: '0 3 * * *'}\n")
+	if _, err := d.client.Submit(ctx, doc); err == nil || !strings.Contains(err.Error(), "add it as a schedule") {
+		t.Errorf("triggered harness as a job: %v", err)
+	}
+	sc, err := d.client.AddSchedule(ctx, doc)
+	if err != nil || sc.Cron != "0 3 * * *" || sc.State != runner.ScheduleActive || sc.NextRun.Hour() != 3 {
+		t.Fatalf("AddSchedule = %+v, %v", sc, err)
+	}
+	if _, err := d.client.AddSchedule(ctx, []byte(harnessDoc)); err == nil {
+		t.Error("a harness without a trigger became a schedule")
+	}
+	if err := d.client.ScheduleAction(ctx, sc.ID, "pause"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := d.client.GetSchedule(ctx, sc.ID); got.State != runner.SchedulePaused {
+		t.Errorf("after pause: %+v", got)
+	}
+	if err := d.client.ScheduleAction(ctx, sc.ID, "resume"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(d.state, "schedules", sc.ID+".json")); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
+		t.Errorf("stored schedule: %v %v", fi, err)
+	}
+
+	d.cancel()
+	if err := <-d.done; err != nil {
+		t.Fatal(err)
+	}
+	d.done <- nil
+	d2 := startDaemonIn(t, dir)
+	list, err := d2.client.Schedules(ctx)
+	if err != nil || len(list) != 1 || list[0].ID != sc.ID || list[0].State != runner.ScheduleActive {
+		t.Fatalf("after restart: %+v, %v (a shutdown must not pause schedules)", list, err)
+	}
+	if st, _ := d2.client.Info(ctx); st.Schedules != 1 {
+		t.Errorf("info = %+v", st)
+	}
+	if err := d2.client.ScheduleAction(ctx, sc.ID, "delete"); err != nil {
+		t.Fatal(err)
+	}
+	var apiErr *APIError
+	if _, err := d2.client.GetSchedule(ctx, sc.ID); !errors.As(err, &apiErr) || apiErr.Status != 404 {
+		t.Errorf("deleted schedule: %v", err)
+	}
+	if err := d2.client.ScheduleAction(ctx, sc.ID, "explode"); err == nil {
+		t.Error("unknown action accepted")
 	}
 }

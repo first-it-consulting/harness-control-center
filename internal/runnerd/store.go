@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
@@ -49,28 +50,7 @@ func (s *FileStore) Save(j runner.Job) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(dir, ".job-*.json")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = os.Rename(tmp, filepath.Join(dir, "job.json"))
-	}
-	if err != nil {
-		_ = os.Remove(tmp)
-	}
-	return err
+	return writeAtomic(filepath.Join(dir, "job.json"), data)
 }
 
 // Load implements runner.Store. Unreadable records are skipped (and
@@ -163,4 +143,113 @@ func (s *FileStore) PruneOrphans(maxAge time.Duration, now time.Time) []string {
 		}
 	}
 	return pruned
+}
+
+var _ runner.ScheduleStore = (*FileStore)(nil)
+
+func (s *FileStore) schedulePath(id string) (string, error) {
+	if err := sandbox.ValidateID(id); err != nil {
+		return "", err
+	}
+	return filepath.Join(s.stateDir, "schedules", id+".json"), nil
+}
+
+// SaveSchedule implements runner.ScheduleStore.
+func (s *FileStore) SaveSchedule(sc runner.Schedule) error {
+	p, err := s.schedulePath(sc.ID)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(sc)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(p, data)
+}
+
+// LoadSchedules implements runner.ScheduleStore; unreadable records are
+// skipped and logged.
+func (s *FileStore) LoadSchedules() ([]runner.Schedule, error) {
+	dir := filepath.Join(s.stateDir, "schedules")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []runner.Schedule
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok || !e.Type().IsRegular() || sandbox.ValidateID(id) != nil {
+			continue
+		}
+		sc, err := readJSONFile[runner.Schedule](filepath.Join(dir, e.Name()))
+		if err == nil && sc.ID != id {
+			err = fmt.Errorf("record is for schedule %q", sc.ID)
+		}
+		if err != nil {
+			s.log.Warn("skipping unreadable schedule record", "schedule", id, "err", err)
+			continue
+		}
+		out = append(out, sc)
+	}
+	return out, nil
+}
+
+// DeleteSchedule implements runner.ScheduleStore.
+func (s *FileStore) DeleteSchedule(id string) error {
+	p, err := s.schedulePath(id)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// writeAtomic writes data through a temporary file in the same
+// directory (owner-only) and a rename.
+func writeAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
+}
+
+func readJSONFile[T any](path string) (T, error) {
+	var v T
+	f, err := os.Open(path) //nolint:gosec // path built from a validated id
+	if err != nil {
+		return v, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxJobFileBytes+1))
+	if err != nil {
+		return v, err
+	}
+	if len(data) > maxJobFileBytes {
+		return v, errors.New("record too large")
+	}
+	return v, json.Unmarshal(data, &v)
 }

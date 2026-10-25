@@ -16,6 +16,13 @@ if [ -z "$TASK" ]; then
 fi
 echo "$TASK" | jq -r .prompt >/tmp/prompt.txt
 MODEL=$(echo "$TASK" | jq -r '.model.name // empty')
+# A looping harness: tell the agent where it is and how to say it is done.
+ITER=$(echo "$TASK" | jq -r '.loop.iteration // empty | tonumber? // empty')
+MAXITER=$(echo "$TASK" | jq -r '.loop.maxIterations // empty | tonumber? // empty')
+if [ -n "$ITER" ]; then
+	printf '\n\n(This task runs in a loop: this is run %s of at most %s, and each run starts with an empty working directory. When the whole task is complete, create the file .hcc-done in the current directory. Otherwise do the next part of the work and stop.)\n' \
+		"$ITER" "$MAXITER" >>/tmp/prompt.txt
+fi
 ENDPOINT=$(echo "$TASK" | jq -r '.model.endpoint // empty')
 
 # Writable home and workspace in memory, owned by the agent. The
@@ -39,5 +46,10 @@ echo "HCC-RESULT-BEGIN"
 su -s /bin/sh agent -c 'cd /tmp/workspace && /usr/local/bin/claude -p --output-format text --dangerously-skip-permissions </tmp/prompt.txt' 2>&1
 rc=$?
 hcc_save_results /tmp/workspace
+# Printed by init, right before the result line, after the agent exited:
+# the runner counts the loop as done only then.
+if [ -n "$ITER" ] && [ -e /tmp/workspace/.hcc-done ]; then
+	echo "HCC-LOOP-DONE"
+fi
 echo "HCC-RESULT-END exit=$rc"
 reboot -f

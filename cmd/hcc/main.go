@@ -32,6 +32,8 @@ Jobs (on a local runner, or a remote one with --ssh HOST):
   jobs                     list jobs
   logs <job>               print a job's console output
   results <job> -o <file>  save what a job handed back (a tar archive)
+  schedules                list schedules (harnesses with a trigger; "run" adds them)
+  schedule pause|resume|delete <schedule>
   cancel <job>             stop one job
   kill                     kill switch: stop all jobs and refuse new ones
   resume                   accept jobs again after kill
@@ -67,6 +69,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdJobs(cmd, rest, stdout, stderr)
 	case "results":
 		return cmdResults(rest, stdout, stderr)
+	case "schedules", "schedule":
+		return cmdSchedules(cmd, rest, stdout, stderr)
 	case "runner":
 		return cmdRunner(rest, stdin, stdout, stderr)
 	case "control":

@@ -110,7 +110,9 @@ func serve(configPath string, log *slog.Logger) error {
 		Recover: func(ctx context.Context, ids []string) error {
 			return provider.Recover(ctx, ids, netCfg != nil)
 		},
-		Log: log,
+		Log:                 log,
+		ScheduleStore:       store,
+		MinScheduleInterval: cfg.ScheduleInterval(),
 	}
 	if netCfg != nil {
 		rcfg.Egress = egressFactory(netCfg, cfg.Credentials, log)

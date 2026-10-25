@@ -44,8 +44,11 @@ var webFS embed.FS
 //	POST   /api/runners/{runner}/jobs/{id}/cancel
 //	GET    /api/runners/{runner}/jobs/{id}/console   console, control characters made visible
 //	POST   /api/runners/{runner}/jobs/{id}/download  a ticket for GET /download/{ticket}: the results archive
+//	GET    /api/schedules                        schedules of every runner
+//	POST   /api/runners/{runner}/schedules/{id}/{action}   pause or resume
+//	DELETE /api/runners/{runner}/schedules/{id}
 //	POST   /api/check                            validate and explain a harness
-//	POST   /api/runs                             start a harness (after it was explained)
+//	POST   /api/runs                             start a harness, or add it as a schedule if it has a trigger
 //	GET    /api/harnesses                        the library
 //	GET    /api/harnesses/{name}
 //	PUT    /api/harnesses                        save (named by its metadata.name)
@@ -100,6 +103,9 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /api/runners/{runner}/jobs/{id}/console", s.console)
 	mux.HandleFunc("POST /api/runners/{runner}/jobs/{id}/download", s.download)
 	mux.HandleFunc("GET /download/{ticket}", s.results)
+	mux.HandleFunc("GET /api/schedules", s.schedules)
+	mux.HandleFunc("POST /api/runners/{runner}/schedules/{id}/{action}", s.scheduleAction)
+	mux.HandleFunc("DELETE /api/runners/{runner}/schedules/{id}", s.scheduleAction)
 	mux.HandleFunc("POST /api/check", s.check)
 	mux.HandleFunc("POST /api/runs", s.run)
 	mux.HandleFunc("GET /api/harnesses", s.harnesses)
@@ -479,6 +485,55 @@ func (s *Server) results(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// --- schedules ---
+
+// ScheduleView is a schedule and the runner it belongs to. The harness
+// document is left out of the list.
+type ScheduleView struct {
+	Runner string `json:"runner"`
+	runner.Schedule
+}
+
+func (s *Server) schedules(w http.ResponseWriter, r *http.Request) {
+	var mu sync.Mutex
+	list := []ScheduleView{}
+	views := s.eachRunner(r.Context(), func(ctx context.Context, c *runnerd.Client, ref RunnerRef) error {
+		scheds, err := c.Schedules(ctx)
+		mu.Lock()
+		for _, sc := range scheds {
+			sc.Document = nil
+			list = append(list, ScheduleView{Runner: ref.Name, Schedule: sc})
+		}
+		mu.Unlock()
+		return err
+	})
+	errs := map[string]string{}
+	for _, v := range views {
+		if v.Error != "" {
+			errs[v.Name] = v.Error
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"schedules": list, "errors": errs})
+}
+
+func (s *Server) scheduleAction(w http.ResponseWriter, r *http.Request) {
+	action := r.PathValue("action")
+	if r.Method == http.MethodDelete {
+		action = "delete"
+	} else if action != "pause" && action != "resume" {
+		writeError(w, http.StatusNotFound, errNotFound("unknown action "+action))
+		return
+	}
+	s.withRunner(w, r, func(ctx context.Context, c *runnerd.Client) (any, error) {
+		id, err := jobID(r)
+		if err != nil {
+			return nil, err
+		}
+		s.log.Info("schedule "+action, "runner", r.PathValue("runner"), "schedule", id)
+		return map[string]string{}, c.ScheduleAction(ctx, id, action)
+	})
+}
+
 // --- harnesses ---
 
 // Check is what the UI shows before a harness may start.
@@ -490,6 +545,9 @@ type Check struct {
 	Risk    string   `json:"risk,omitempty"`
 	Reasons []string `json:"reasons,omitempty"`
 	Explain []string `json:"explain,omitempty"`
+	// Trigger is "schedule" or "loop" for harnesses that run
+	// unattended: starting them adds a schedule.
+	Trigger string `json:"trigger,omitempty"`
 }
 
 func checkHarness(yamlDoc string) (Check, *spec.Harness) {
@@ -502,7 +560,14 @@ func checkHarness(yamlDoc string) (Check, *spec.Harness) {
 		return Check{Errors: splitErrors(err)}, nil
 	}
 	risk, why := e.Risk()
-	return Check{Valid: true, Name: h.Metadata.Name, Target: h.Spec.Target, Risk: risk.String(), Reasons: why, Explain: e.Explain()}, h
+	c := Check{Valid: true, Name: h.Metadata.Name, Target: h.Spec.Target, Risk: risk.String(), Reasons: why, Explain: e.Explain()}
+	switch {
+	case h.Spec.Trigger.Schedule != "":
+		c.Trigger = "schedule"
+	case h.Spec.Trigger.Loop != nil:
+		c.Trigger = "loop"
+	}
+	return c, h
 }
 
 type yamlBody struct {
@@ -555,6 +620,16 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	if st.Target != h.Spec.Target {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("this harness is meant for %q, but runner %s is %q: change spec.target or pick another runner",
 			h.Spec.Target, req.Runner, st.Target))
+		return
+	}
+	if chk.Trigger != "" {
+		sc, err := c.AddSchedule(ctx, []byte(req.YAML))
+		if err != nil {
+			writeError(w, statusFor(err), err)
+			return
+		}
+		s.log.Info("schedule added", "runner", req.Runner, "schedule", sc.ID, "harness", h.Metadata.Name, "risk", chk.Risk)
+		writeJSON(w, http.StatusCreated, map[string]string{"runner": req.Runner, "schedule": sc.ID})
 		return
 	}
 	id, err := c.Submit(ctx, []byte(req.YAML))

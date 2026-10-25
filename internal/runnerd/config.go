@@ -59,6 +59,16 @@ type Config struct {
 	// Retention bounds the finished jobs kept in stateDir (record,
 	// console log and results each).
 	Retention Retention `yaml:"retention"`
+	// MinScheduleInterval bounds how often a cron schedule may run (a Go
+	// duration, default "15m", at least "1m").
+	MinScheduleInterval string `yaml:"minScheduleInterval"`
+}
+
+// ScheduleInterval is MinScheduleInterval parsed (valid after
+// LoadConfig).
+func (c *Config) ScheduleInterval() time.Duration {
+	d, _ := time.ParseDuration(c.MinScheduleInterval)
+	return d
 }
 
 // Retention defaults.
@@ -174,6 +184,9 @@ func LoadConfig(path string) (*Config, error) {
 	if c.Retention.MaxAge == "" {
 		c.Retention.MaxAge = DefaultRetentionAge.String()
 	}
+	if c.MinScheduleInterval == "" {
+		c.MinScheduleInterval = runner.DefaultMinScheduleInterval.String()
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -229,6 +242,9 @@ func (c *Config) Validate() error {
 	}
 	if d, err := time.ParseDuration(c.Retention.MaxAge); err != nil || d < time.Hour || d > 10*365*24*time.Hour {
 		add("retention.maxAge must be a duration between 1h and 87600h, got %q", c.Retention.MaxAge)
+	}
+	if d, err := time.ParseDuration(c.MinScheduleInterval); err != nil || d < time.Minute || d > 24*time.Hour {
+		add("minScheduleInterval must be a duration between 1m and 24h, got %q", c.MinScheduleInterval)
 	}
 	if c.MaxDiskMiB < 1 || c.MaxDiskMiB > sandbox.MaxDiskMiB {
 		add("maxDiskMiB must be between 1 and %d", sandbox.MaxDiskMiB)

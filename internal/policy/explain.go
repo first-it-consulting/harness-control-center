@@ -34,6 +34,7 @@ func (r Risk) String() string {
 //	+1 any network egress     +1 any wildcard egress
 //	+1 any credential         +1 network AND credentials (exfiltration path)
 //	+1 any subagents          +2 private networks
+//	+1 http model endpoint    +1 runs unattended (schedule or loop)
 //
 // 0 is low, 1-2 medium, 3+ high.
 func (e *Engine) Risk() (Risk, []string) {
@@ -69,6 +70,9 @@ func (e *Engine) Risk() (Risk, []string) {
 		if scheme, _, _ := m.EndpointHostPort(); scheme == "http" {
 			bump(1, "talks to its model unencrypted (http)")
 		}
+	}
+	if t := e.h.Spec.Trigger; t.Schedule != "" || t.Loop != nil {
+		bump(1, "runs again and again without anyone watching")
 	}
 	switch {
 	case score == 0:
@@ -108,9 +112,18 @@ func (e *Engine) Explain() []string {
 
 	switch {
 	case s.Trigger.Schedule != "":
-		lines = append(lines, fmt.Sprintf("Starts automatically on the schedule %q.", s.Trigger.Schedule))
+		lines = append(lines, fmt.Sprintf("Starts automatically on the cron schedule %q (times in UTC), without anyone watching, "+
+			"until you pause or delete the schedule. A run is skipped while the previous one is still going. Every run has the limits above.",
+			s.Trigger.Schedule))
 	case s.Trigger.Loop != nil:
-		lines = append(lines, fmt.Sprintf("Repeats until done, at most %d times.", s.Trigger.Loop.MaxIterations))
+		n := s.Trigger.Loop.MaxIterations
+		gap := "back to back"
+		if d := s.Trigger.Loop.Interval.Duration; d > 0 {
+			gap = d.String() + " apart"
+		}
+		lines = append(lines, fmt.Sprintf("Runs up to %d times in a row (%s), without anyone watching, until the agent reports the task complete; "+
+			"it stops at the first run that does not succeed. Every run has the limits above, so all runs together may use up to %s tokens (or $%.2f).",
+			n, gap, groupDigits(int64(n)*s.Budget.MaxTokens), float64(n)*s.Budget.MaxCostUSD))
 	default:
 		lines = append(lines, "Starts only when you start it.")
 	}

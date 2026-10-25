@@ -64,7 +64,8 @@ These are extension points (see [ADR-0002](adr/0002-plugin-system.md)):
 | `internal/policy` | permission decisions, risk rating, plain-language explanation |
 | `internal/sandbox` | provider-neutral sandbox interface and validated run spec |
 | `internal/sandbox/firecracker` | Firecracker provider: jailer, cgroup v2 limits, kill switch, cleanup |
-| `internal/runner` | job queue and state machine, concurrency limit, per-job cancel, kill switch, event stream |
+| `internal/runner` | job queue and state machine, concurrency limit, per-job cancel, kill switch, event stream, schedules and loops (ADR-0008) |
+| `internal/cron` | 5-field cron expressions in UTC |
 | `internal/helper`, `cmd/hcc-helper` | the only root-side code: start, kill, remove a jail, network links, copy out a jail's disk; validates every argument |
 | `internal/budget` | per-job token and cost meter |
 | `internal/results` | re-packs a guest's results archive into a safe one (ADR-0006) |
