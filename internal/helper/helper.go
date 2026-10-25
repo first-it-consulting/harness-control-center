@@ -75,6 +75,9 @@ type Deps struct {
 	Exec func(argv0 string, argv, env []string) error
 	// Run runs a command to completion.
 	Run func(ctx context.Context, argv ...string) error
+	// FreeBytes reports unprivileged free space on a path's filesystem
+	// (default: statfs).
+	FreeBytes func(path string) (uint64, error)
 }
 
 // execEnv is the entire environment the jailer gets.
@@ -105,6 +108,9 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 	}
 	if cfg.MaxRootFSBytes <= 0 {
 		cfg.MaxRootFSBytes = DefaultMaxRootFSBytes
+	}
+	if d.FreeBytes == nil {
+		d.FreeBytes = freeBytes
 	}
 	if len(args) == 0 {
 		return errors.New("expected start, kill or remove")
@@ -145,7 +151,7 @@ func run(cfg Config, args []string, callerUID int, d Deps) error {
 		if err != nil {
 			return err
 		}
-		if err := buildJail(cfg, base, *id); err != nil {
+		if err := buildJail(cfg, d, base, *id); err != nil {
 			return err
 		}
 		return d.Exec(argv[0], argv, execEnv)
@@ -198,9 +204,15 @@ func (cfg Config) maxBytes(name string) int64 {
 	}
 }
 
+// MinFreeBytes must remain free on the jail filesystem after a jail is
+// built, counted as space available to unprivileged users, so root's
+// reserved blocks are never touched.
+const MinFreeBytes = 1 << 30
+
 // buildJail creates base/firecracker/<id>/root as root and copies the
-// staged files into it, read-only for the VM.
-func buildJail(cfg Config, base, id string) error {
+// staged files into it, read-only for the VM. On any failure the partial
+// jail is removed.
+func buildJail(cfg Config, d Deps, base, id string) (err error) {
 	parent := filepath.Join(base, "firecracker")
 	// 0711: the runner may check whether its jail still exists, but can
 	// neither list nor change anything.
@@ -210,19 +222,17 @@ func buildJail(cfg Config, base, id string) error {
 	if err := checkRootOwnedDirs(parent, cfg.RootUID, cfg.TrustAnchor); err != nil {
 		return err
 	}
-	jail := filepath.Join(parent, id)
-	// Exclusive: a jail is never reused.
-	if err := os.Mkdir(jail, 0o700); err != nil {
-		return fmt.Errorf("create jail: %w", err)
-	}
-	root := filepath.Join(jail, "root")
-	if err := os.Mkdir(root, 0o700); err != nil {
+	// At most one jail per VM identity may exist; leftovers count, so a
+	// runner cannot pile up jails by starting many IDs.
+	entries, err := os.ReadDir(parent)
+	if err != nil {
 		return err
 	}
-	// The jail root becomes the VM's "/": its UID must traverse it.
-	if err := os.Chmod(root, 0o711); err != nil { //nolint:gosec // traversal by the jailed UID is required
-		return err
+	if len(entries) >= cfg.Jailer.Identities {
+		return fmt.Errorf("%d jails exist already (limit %d); remove finished ones first", len(entries), cfg.Jailer.Identities)
 	}
+
+	// Open and check every staged file before writing anything.
 	staging, err := openNoFollow(filepath.Join(cfg.StagingBase, id), true)
 	if err != nil {
 		return fmt.Errorf("staging: %w", err)
@@ -231,57 +241,119 @@ func buildJail(cfg Config, base, id string) error {
 	if err := checkOwner(staging, cfg.RunnerUID); err != nil {
 		return err
 	}
+	files := make(map[string]*stagedFile, len(stagedFiles))
+	defer func() {
+		for _, f := range files {
+			_ = f.Close()
+		}
+	}()
+	var total int64
 	for _, name := range stagedFiles {
-		if err := copyStaged(staging, name, filepath.Join(root, name), cfg.RunnerUID, cfg.maxBytes(name)); err != nil {
+		f, err := openStaged(staging, name, cfg.RunnerUID, cfg.maxBytes(name))
+		if err != nil {
+			return err
+		}
+		files[name] = f
+		total += f.size
+	}
+	free, err := d.FreeBytes(base)
+	if err != nil {
+		return err
+	}
+	if total < 0 || uint64(total)+MinFreeBytes > free {
+		return fmt.Errorf("not enough space for a %d-byte jail (%d bytes free, %d must stay free)", total, free, MinFreeBytes)
+	}
+
+	jail := filepath.Join(parent, id)
+	// Exclusive: a jail is never reused.
+	if err := os.Mkdir(jail, 0o700); err != nil {
+		return fmt.Errorf("create jail: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(jail) // ours, root-owned: safe to remove
+		}
+	}()
+	root := filepath.Join(jail, "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		return err
+	}
+	// The jail root becomes the VM's "/": its UID must traverse it.
+	if err := os.Chmod(root, 0o711); err != nil { //nolint:gosec // traversal by the jailed UID is required
+		return err
+	}
+	for _, name := range stagedFiles {
+		if err := files[name].copyTo(filepath.Join(root, name)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// copyStaged copies one staged file, opened relative to the staging
-// directory without following symlinks, into the jail. Only regular,
-// singly linked files owned by the runner and at most limit bytes long
-// are accepted, so root never copies something the runner could not read
-// itself, nor more than it was configured to.
-func copyStaged(staging *os.File, name, dst string, runnerUID int, limit int64) error {
+// stagedFile is a checked, open staged file.
+type stagedFile struct {
+	*os.File
+	size, limit int64
+}
+
+// openStaged opens one staged file relative to the staging directory
+// without following symlinks. Only regular, singly linked files owned by
+// the runner and at most limit bytes long are accepted, so root never
+// copies something the runner could not read itself, nor more than it
+// was configured to.
+func openStaged(staging *os.File, name string, runnerUID int, limit int64) (*stagedFile, error) {
 	fd, err := unix.Openat(int(staging.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return fmt.Errorf("staged %s: %w", name, err)
+		return nil, fmt.Errorf("staged %s: %w", name, err)
 	}
-	in := os.NewFile(uintptr(fd), name)
-	defer in.Close()
+	f := os.NewFile(uintptr(fd), name)
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		return err
+		_ = f.Close()
+		return nil, err
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG || int(st.Uid) != runnerUID || st.Nlink != 1 {
-		return fmt.Errorf("staged %s must be a regular, singly linked file owned by the runner", name)
+		_ = f.Close()
+		return nil, fmt.Errorf("staged %s must be a regular, singly linked file owned by the runner", name)
 	}
 	if st.Size > limit {
-		return fmt.Errorf("staged %s is %d bytes; the limit is %d", name, st.Size, limit)
+		_ = f.Close()
+		return nil, fmt.Errorf("staged %s is %d bytes; the limit is %d", name, st.Size, limit)
 	}
+	return &stagedFile{File: f, size: st.Size, limit: limit}, nil
+}
+
+// copyTo copies the file into the jail, read-only and readable by the VM.
+func (f *stagedFile) copyTo(dst string) error {
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o600) //nolint:gosec // dst is in the jail we just created
 	if err != nil {
 		return err
 	}
-	// Also cap the copy itself: the runner could grow the file after the
-	// size check.
-	n, err := io.Copy(out, io.LimitReader(in, limit+1))
-	if err == nil && n > limit {
-		err = fmt.Errorf("grew beyond the limit of %d bytes", limit)
+	// Cap the copy itself: the runner could grow the file after the size
+	// check (but not beyond what it was checked against).
+	n, err := io.Copy(out, io.LimitReader(f, f.size+1))
+	if err == nil && n > f.size {
+		err = fmt.Errorf("%s grew after it was checked", f.Name())
 	}
 	if err != nil {
 		_ = out.Close()
-		_ = os.Remove(dst)
-		return fmt.Errorf("copy %s: %w", name, err)
+		return fmt.Errorf("copy %s: %w", f.Name(), err)
 	}
-	// Read-only, and readable by the VMM, which runs as another UID.
 	if err := out.Chmod(0o444); err != nil {
 		_ = out.Close()
 		return err
 	}
 	return out.Close()
+}
+
+// freeBytes is the space on path's filesystem available to unprivileged
+// users (excluding root's reserved blocks).
+func freeBytes(path string) (uint64, error) {
+	var st unix.Statfs_t
+	if err := unix.Statfs(path, &st); err != nil {
+		return 0, err
+	}
+	return st.Bavail * uint64(st.Bsize), nil
 }
 
 // openNoFollow opens path one component at a time from "/", refusing to

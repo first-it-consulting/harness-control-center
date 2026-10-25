@@ -19,6 +19,7 @@ type recorder struct {
 	execArgv [][]string
 	execEnv  [][]string
 	runArgv  [][]string
+	free     uint64 // reported free space; 0 means plenty
 }
 
 func (r *recorder) deps() Deps {
@@ -31,6 +32,12 @@ func (r *recorder) deps() Deps {
 		Run: func(_ context.Context, argv ...string) error {
 			r.runArgv = append(r.runArgv, argv)
 			return os.RemoveAll(argv[len(argv)-1]) // behave like rm -rf
+		},
+		FreeBytes: func(string) (uint64, error) {
+			if r.free == 0 {
+				return 1 << 40, nil
+			}
+			return r.free, nil
 		},
 	}
 }
@@ -352,8 +359,52 @@ func TestRefusesOversizedStagedFiles(t *testing.T) {
 	if len(e.rec.execArgv) != 0 {
 		t.Error("jailer was executed")
 	}
-	if fi, err := os.Stat(filepath.Join(firecracker.JailDir(e.base, "job-1"), "root", "rootfs.ext4")); err == nil && fi.Size() > 1024 {
-		t.Errorf("copied %d bytes despite the limit", fi.Size())
+	if _, err := os.Stat(firecracker.JailDir(e.base, "job-1")); !os.IsNotExist(err) {
+		t.Error("a jail was created for a refused start")
+	}
+}
+
+func TestLimitsTotalJailSpace(t *testing.T) {
+	t.Run("too many jails", func(t *testing.T) {
+		e := newEnv(t) // Identities: 2
+		for _, id := range []string{"old-1", "old-2"} {
+			if err := os.MkdirAll(firecracker.JailDir(e.base, id), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		e.stageJob1(t)
+		if code, stderr := e.call(e.start...); code == 0 || !strings.Contains(stderr, "jails exist already") {
+			t.Errorf("start with the jail limit reached: %d %q", code, stderr)
+		}
+	})
+	t.Run("not enough free space", func(t *testing.T) {
+		e := newEnv(t)
+		e.stageJob1(t)
+		e.rec.free = MinFreeBytes // nothing left once MinFreeBytes is kept
+		if code, stderr := e.call(e.start...); code == 0 || !strings.Contains(stderr, "not enough space") {
+			t.Errorf("start without free space: %d %q", code, stderr)
+		}
+		if _, err := os.Stat(firecracker.JailDir(e.base, "job-1")); !os.IsNotExist(err) {
+			t.Error("a jail was created without space for it")
+		}
+	})
+}
+
+func TestFailedCopyRemovesPartialJail(t *testing.T) {
+	e := newEnv(t)
+	dir := e.stageJob1(t)
+	// An unreadable staged file fails after the jail directory exists.
+	if err := os.Chmod(filepath.Join(dir, "config.json"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root can read anything")
+	}
+	if code, _ := e.call(e.start...); code == 0 {
+		t.Fatal("start succeeded with an unreadable staged file")
+	}
+	if _, err := os.Stat(firecracker.JailDir(e.base, "job-1")); !os.IsNotExist(err) {
+		t.Errorf("partial jail left behind: %v", err)
 	}
 }
 
