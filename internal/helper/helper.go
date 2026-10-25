@@ -353,7 +353,11 @@ func freeBytes(path string) (uint64, error) {
 	if err := unix.Statfs(path, &st); err != nil {
 		return 0, err
 	}
-	return st.Bavail * uint64(st.Bsize), nil
+	bsize := toInt64(st.Bsize)
+	if bsize <= 0 {
+		return 0, fmt.Errorf("%s: invalid block size %d", path, bsize)
+	}
+	return st.Bavail * uint64(bsize), nil
 }
 
 // openNoFollow opens path one component at a time from "/", refusing to
@@ -440,3 +444,7 @@ func writeCgroupKill(path string) error {
 }
 
 func cleanAbs(p string) bool { return filepath.IsAbs(p) && filepath.Clean(p) == p }
+
+// toInt64 converts Statfs_t.Bsize, which is int64 on Linux and uint32 on
+// macOS.
+func toInt64[T int64 | uint32](v T) int64 { return int64(v) }
