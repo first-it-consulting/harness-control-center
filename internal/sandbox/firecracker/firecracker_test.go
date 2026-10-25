@@ -33,6 +33,7 @@ type fakeHost struct {
 	t        *testing.T
 	behavior behavior
 	startErr error
+	onStart  func(jailRoot string)
 
 	mu       sync.Mutex
 	argv     []string
@@ -72,6 +73,9 @@ func (h *fakeHost) StartJailer(argv []string, console io.Writer) (Process, error
 	h.argv = argv
 	root := filepath.Join(argValue(argv, "--chroot-base-dir"), "firecracker", argValue(argv, "--id"), "root")
 	h.jailSeen = map[string]os.FileMode{}
+	if h.onStart != nil {
+		h.onStart(root)
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		h.t.Errorf("jail root missing at start: %v", err)

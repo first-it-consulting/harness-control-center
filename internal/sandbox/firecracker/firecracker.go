@@ -14,6 +14,7 @@
 package firecracker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -198,10 +199,17 @@ func (p *Provider) stop(id string, proc Process, done <-chan error) error {
 
 // prepare fills the chroot. Files are copied, not linked, so the VM can
 // never affect the originals, and are made read-only.
+//
+// Modes are set with chmod after creation: the runner typically runs with
+// umask 077, which would otherwise silently make the files unreadable for
+// the jailed UID.
 func (p *Provider) prepare(root string, spec *sandbox.Spec, kernel, rootfs *os.File) error {
+	if err := os.Mkdir(root, 0o700); err != nil {
+		return fmt.Errorf("firecracker: %w", err)
+	}
 	// The jail root becomes the VMM's "/": its UID must traverse it (x)
 	// but needs no listing (r) or writing (w).
-	if err := os.Mkdir(root, 0o711); err != nil { //nolint:gosec // traversal by the jailed UID is required
+	if err := os.Chmod(root, 0o711); err != nil { //nolint:gosec // traversal by the jailed UID is required
 		return fmt.Errorf("firecracker: %w", err)
 	}
 	if err := copyReadOnly(kernel, filepath.Join(root, "vmlinux")); err != nil {
@@ -214,11 +222,7 @@ func (p *Provider) prepare(root string, spec *sandbox.Spec, kernel, rootfs *os.F
 	if err != nil {
 		return fmt.Errorf("firecracker: %w", err)
 	}
-	// World-readable because the VMM runs as a different UID; read-only.
-	if err := os.WriteFile(filepath.Join(root, "config.json"), cfg, 0o444); err != nil { //nolint:gosec // must be readable by the jailed UID
-		return fmt.Errorf("firecracker: %w", err)
-	}
-	return nil
+	return writeReadOnly(bytes.NewReader(cfg), "config.json", filepath.Join(root, "config.json"))
 }
 
 func (p *Provider) jailerArgv(spec *sandbox.Spec) []string {
@@ -295,13 +299,23 @@ func (p *Provider) openImage(path string) (*os.File, error) {
 }
 
 func copyReadOnly(in *os.File, dst string) error {
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o444) //nolint:gosec // dst is inside our own jail
+	return writeReadOnly(in, filepath.Base(in.Name()), dst)
+}
+
+// writeReadOnly creates dst exclusively, fills it from r and then makes it
+// world-readable and read-only (0444): the VMM runs as a different UID.
+func writeReadOnly(r io.Reader, name, dst string) error {
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // dst is inside our own jail
 	if err != nil {
 		return fmt.Errorf("firecracker: %w", err)
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	if _, err := io.Copy(out, r); err != nil {
 		_ = out.Close() // the copy error is the one worth reporting
-		return fmt.Errorf("firecracker: copy %s: %w", filepath.Base(in.Name()), err)
+		return fmt.Errorf("firecracker: write %s: %w", name, err)
+	}
+	if err := out.Chmod(0o444); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("firecracker: %w", err)
 	}
 	return out.Close()
 }
