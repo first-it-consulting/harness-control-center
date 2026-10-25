@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/credentials"
 	"github.com/first-it-consulting/harness-control-center/internal/egress"
 	"github.com/first-it-consulting/harness-control-center/internal/policy"
 	"github.com/first-it-consulting/harness-control-center/internal/runnerd"
@@ -292,11 +293,21 @@ func TestE2ENetwork(t *testing.T) {
 	var proxyLog console
 	id := fmt.Sprintf("e2e-net-%d", time.Now().UnixNano())
 	sp := e.spec(id, time.Minute, "hcc.mode=nettest")
+	// A credential for example.com: the guest must receive the job CA, and
+	// the CONNECT still succeeds (the broker then expects TLS).
+	ca, err := egress.NewCA([]string{"example.com"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
 	sp.Network = &sandbox.Network{Proxy: &egress.Proxy{
 		Policy:  engine,
 		Blocked: []netip.Prefix{e.network.Subnet},
 		JobID:   id,
 		Log:     slog.New(slog.NewTextHandler(&proxyLog, nil)),
+		CA:      ca,
+		Credentials: map[string]credentials.Credential{
+			"example.com": {Name: "e2e", Hosts: []string{"example.com"}, Header: "x-e2e", Value: "e2e-secret"},
+		},
 	}}
 	var c console
 	res, err := e.provider.Run(context.Background(), sp, &c)
@@ -309,6 +320,7 @@ func TestE2ENetwork(t *testing.T) {
 		"HCC-NET-DENIED":   "403",
 		"HCC-NET-DIRECT":   "blocked",
 		"HCC-NET-HOSTPORT": "blocked",
+		"HCC-NET-CA":       "present",
 	}
 	for marker, expect := range want {
 		line := consoleLine(out, marker)

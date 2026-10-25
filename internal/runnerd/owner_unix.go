@@ -40,3 +40,14 @@ func checkRootOwned(path string) error {
 		}
 	}
 }
+
+func checkNotWorldReadable(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if fi.Mode().Perm()&0o004 != 0 {
+		return fmt.Errorf("%s must not be readable by others", path)
+	}
+	return nil
+}

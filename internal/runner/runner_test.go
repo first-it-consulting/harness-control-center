@@ -189,12 +189,11 @@ func TestOutcomesMapToStates(t *testing.T) {
 
 func TestFailClosedOnUnenforceablePermissions(t *testing.T) {
 	tests := map[string]string{
-		"credentials": "  permissions: {credentials: [gitlab]}\n",
-		"tools":       "  permissions: {tools: {install: [git]}}\n",
-		"subagents":   "  permissions: {subagents: {max: 1}}\n",
-		"approvals":   "  approvals: {requireFor: [git.push]}\n",
-		"schedule":    "  trigger: {schedule: '0 2 * * *'}\n",
-		"loop":        "  trigger: {loop: {maxIterations: 3}}\n",
+		"tools":     "  permissions: {tools: {install: [git]}}\n",
+		"subagents": "  permissions: {subagents: {max: 1}}\n",
+		"approvals": "  approvals: {requireFor: [git.push]}\n",
+		"schedule":  "  trigger: {schedule: '0 2 * * *'}\n",
+		"loop":      "  trigger: {loop: {maxIterations: 3}}\n",
 	}
 	for name, extra := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -576,5 +575,12 @@ func TestEgressFactoryErrorRejectsJob(t *testing.T) {
 	}
 	if len(r.List()) != 0 {
 		t.Error("job created despite the proxy error")
+	}
+}
+
+func TestCredentialsNeedTheEgressProxy(t *testing.T) {
+	r := newRunner(t, newFakeProvider(), 1)
+	if _, err := r.Submit(harness(t, "  permissions: {credentials: [gitlab]}\n")); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Errorf("credentials without a broker: %v", err)
 	}
 }

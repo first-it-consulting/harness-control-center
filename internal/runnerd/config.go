@@ -41,6 +41,10 @@ type Config struct {
 	// Network enables network access for harnesses that are granted it;
 	// without it, such harnesses are rejected.
 	Network *NetworkSection `yaml:"network"`
+	// Credentials is the credential broker's store (see
+	// internal/credentials). Root-owned, readable by the runner's group
+	// only; re-read for every job.
+	Credentials string `yaml:"credentials"`
 }
 
 // NetworkSection configures sandbox links and the egress proxy.
@@ -190,6 +194,14 @@ func (c *Config) Validate() error {
 	if _, err := c.NetworkConfig(); err != nil {
 		errs = append(errs, err)
 	}
+	if c.Credentials != "" {
+		if !cleanAbs(c.Credentials) {
+			add("credentials must be a clean absolute path, got %q", c.Credentials)
+		}
+		if c.Network == nil {
+			add("credentials need a network section (they travel through the egress proxy)")
+		}
+	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("runnerd: invalid config: %w", err)
 	}
@@ -203,6 +215,15 @@ func (c *Config) CheckFiles() error {
 	var errs []error
 	for _, p := range []string{c.Firecracker.Helper, c.Firecracker.Jailer, c.Firecracker.Firecracker} {
 		if err := checkRootOwned(p); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	// The runner must not be able to change where secrets go, and nobody
+	// else may read them.
+	if c.Credentials != "" {
+		if err := checkRootOwned(c.Credentials); err != nil {
+			errs = append(errs, err)
+		} else if err := checkNotWorldReadable(c.Credentials); err != nil {
 			errs = append(errs, err)
 		}
 	}

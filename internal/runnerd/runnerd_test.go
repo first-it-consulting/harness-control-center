@@ -231,7 +231,7 @@ func TestAPIRejectsBadInput(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.Status != 400 {
 		t.Errorf("invalid harness: %v", err)
 	}
-	_, err = d.client.Submit(ctx, []byte(harnessDoc+"  permissions: {credentials: [x]}\n"))
+	_, err = d.client.Submit(ctx, []byte(harnessDoc+"  permissions: {subagents: {max: 1}}\n"))
 	if !errors.As(err, &apiErr) || !strings.Contains(apiErr.Message, "not supported") {
 		t.Errorf("unsupported harness: %v", err)
 	}

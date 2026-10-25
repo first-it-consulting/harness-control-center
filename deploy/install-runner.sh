@@ -82,6 +82,16 @@ if [ -n "$NET" ]; then
 	ip link set lo up
 	ip addr add "$NET" dev eth0
 	ip link set eth0 up
+	# Jobs with credentials: trust the job's CA (public; fetched directly
+	# from the proxy, before the proxy variables exist).
+	mount -t tmpfs -o mode=1777,size=16m tmpfs /tmp
+	if wget -q -T 5 -O /tmp/hcc-ca.pem "http://$PROXY/hcc/ca.pem" 2>/dev/null && grep -q "BEGIN CERTIFICATE" /tmp/hcc-ca.pem; then
+		cat /etc/ssl/certs/ca-certificates.crt /tmp/hcc-ca.pem >/tmp/hcc-bundle.pem 2>/dev/null || cp /tmp/hcc-ca.pem /tmp/hcc-bundle.pem
+		export SSL_CERT_FILE=/tmp/hcc-bundle.pem NODE_EXTRA_CA_CERTS=/tmp/hcc-ca.pem REQUESTS_CA_BUNDLE=/tmp/hcc-bundle.pem \
+			CURL_CA_BUNDLE=/tmp/hcc-bundle.pem GIT_SSL_CAINFO=/tmp/hcc-bundle.pem
+	else
+		rm -f /tmp/hcc-ca.pem
+	fi
 	export HTTPS_PROXY="http://$PROXY" https_proxy="http://$PROXY" HTTP_PROXY="http://$PROXY" http_proxy="http://$PROXY"
 fi
 echo "HCC-GUEST-NET interfaces: $(ls /sys/class/net | tr '\n' ' ')"
@@ -97,6 +107,7 @@ case " $(cat /proc/cmdline) " in
 	echo "HCC-NET-DENIED $(probe example.org:443)"
 	if nc -w 2 1.1.1.1 443 </dev/null 2>/dev/null; then echo "HCC-NET-DIRECT open"; else echo "HCC-NET-DIRECT blocked"; fi
 	if nc -w 2 "$H" 22 </dev/null 2>/dev/null; then echo "HCC-NET-HOSTPORT open"; else echo "HCC-NET-HOSTPORT blocked"; fi
+	if [ -s /tmp/hcc-ca.pem ]; then echo "HCC-NET-CA present"; else echo "HCC-NET-CA absent"; fi
 	;;
 esac
 echo "HCC-GUEST-DONE no agent runtime yet; shutting down"
@@ -109,6 +120,13 @@ sudo install -o root -g root -m 0644 "$build/rootfs.ext4" "$IMAGES/base/rootfs.e
 
 echo "== configuration"
 sudo install -d -o root -g root -m 0755 /etc/hcc
+# Credential store: root-owned, readable by the runner only. Keep existing.
+sudo install -d -o root -g "$RUN_USER" -m 0750 /etc/hcc/secrets
+if ! sudo test -e /etc/hcc/credentials.yaml; then
+	printf '%s\n' "# Credential broker store; see deploy/README.md." "{}" | sudo tee /etc/hcc/credentials.yaml >/dev/null
+fi
+sudo chown root:"$RUN_USER" /etc/hcc/credentials.yaml
+sudo chmod 0640 /etc/hcc/credentials.yaml
 sudo tee /etc/hcc/runner.yaml >/dev/null <<CONF
 # Managed by install-runner.sh.
 target: $TARGET
@@ -131,6 +149,8 @@ images:
   base:
     kernel: $IMAGES/base/vmlinux
     rootfs: $IMAGES/base/rootfs.ext4
+# Credential broker store (root:$RUN_USER 0640).
+credentials: /etc/hcc/credentials.yaml
 # Sandbox links: one /30 per VM; must not overlap any real network.
 network:
   subnet: 172.31.0.0/16

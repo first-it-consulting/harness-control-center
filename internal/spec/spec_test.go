@@ -227,3 +227,16 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+func TestValidateHostNameRejectsIPs(t *testing.T) {
+	for _, h := range []string{"1.2.3.4", "127.0.0.1", "::1", "[::1]", "2001:db8::1"} {
+		if ValidateHostName(h) == nil {
+			t.Errorf("ValidateHostName(%q) accepted an IP address", h)
+		}
+	}
+	for _, h := range []string{"a.example", "1.example", "x1.2.example"} {
+		if err := ValidateHostName(h); err != nil {
+			t.Errorf("ValidateHostName(%q) = %v", h, err)
+		}
+	}
+}

@@ -200,6 +200,9 @@ func ValidateEgressHost(host string, allowPrivate bool) error {
 // of the characters ('/', '#', '@', ':', NUL ...) that URL or socket
 // parsers might interpret differently from the policy engine.
 func ValidateHostName(name string) error {
+	if _, err := netip.ParseAddr(strings.Trim(name, "[]")); err == nil {
+		return fmt.Errorf("host %q is an IP address, not a name", name)
+	}
 	if len(name) == 0 || len(name) > 253 {
 		return fmt.Errorf("host %q has an invalid length", name)
 	}

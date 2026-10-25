@@ -12,7 +12,9 @@ import (
 	"os/signal"
 	"os/user"
 	"syscall"
+	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/credentials"
 	"github.com/first-it-consulting/harness-control-center/internal/egress"
 	"github.com/first-it-consulting/harness-control-center/internal/policy"
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
@@ -102,7 +104,7 @@ func serve(configPath string, log *slog.Logger) error {
 		Console:       runnerd.ConsoleFunc(cfg.StateDir, log),
 	}
 	if netCfg != nil {
-		rcfg.Egress = egressFactory(netCfg, log)
+		rcfg.Egress = egressFactory(netCfg, cfg.Credentials, log)
 	}
 	r, err := runner.New(rcfg)
 	if err != nil {
@@ -132,20 +134,47 @@ func serve(configPath string, log *slog.Logger) error {
 }
 
 // egressFactory builds each networked job's proxy from that job's own
-// harness. The sandboxes' subnet is never a valid destination.
-func egressFactory(netCfg *firecracker.NetworkConfig, log *slog.Logger) func(*spec.Harness, string) (sandbox.Proxy, error) {
+// harness. The sandboxes' subnet is never a valid destination. Granted
+// credentials are loaded fresh for every job and get a CA of their own.
+func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slog.Logger) func(*spec.Harness, string) (sandbox.Proxy, error) {
 	return func(h *spec.Harness, jobID string) (sandbox.Proxy, error) {
 		engine, err := policy.New(h)
 		if err != nil {
 			return nil, err
 		}
-		return &egress.Proxy{
+		p := &egress.Proxy{
 			Policy:       engine,
 			AllowPrivate: h.Spec.Permissions.Network.AllowPrivateNetworks,
 			Blocked:      []netip.Prefix{netCfg.Subnet},
 			JobID:        jobID,
 			Log:          log,
-		}, nil
+		}
+		if len(h.Spec.Permissions.Credentials) == 0 {
+			return p, nil
+		}
+		if credsPath == "" {
+			return nil, errors.New("this runner has no credentials configured")
+		}
+		store, err := credentials.Load(credsPath)
+		if err != nil {
+			return nil, err
+		}
+		byHost, err := credentials.ForHarness(store, h, func(host string, port int) bool {
+			return engine.CheckEgress(host, port).Allowed
+		})
+		if err != nil {
+			return nil, err
+		}
+		hosts := make([]string, 0, len(byHost))
+		for host := range byHost {
+			hosts = append(hosts, host)
+		}
+		if p.CA, err = egress.NewCA(hosts, time.Now()); err != nil {
+			return nil, err
+		}
+		p.Credentials = byHost
+		log.Info("credentials granted", "job", jobID, "credentials", h.Spec.Permissions.Credentials, "hosts", hosts)
+		return p, nil
 	}
 }
 

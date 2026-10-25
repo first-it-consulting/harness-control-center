@@ -5,12 +5,18 @@
 // The proxy resolves names itself (the guest has no DNS) and connects to
 // the very address it checked, so a name cannot be re-resolved to
 // something else afterwards (DNS rebinding). Every decision is logged.
+//
+// It is also the credential broker: for hosts with a granted credential
+// (port 443) it terminates TLS with the job's CA and adds the secret to
+// each request, so the guest never holds it. All other hosts are plain
+// tunnels the proxy cannot read.
 package egress
 
 import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -23,7 +29,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/credentials"
 	"github.com/first-it-consulting/harness-control-center/internal/policy"
+	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
 
 // Defaults.
@@ -49,6 +57,13 @@ type Proxy struct {
 	Log     *slog.Logger
 	// MaxConns bounds concurrent tunnels (default DefaultMaxConns).
 	MaxConns int
+	// Credentials maps host names to the credential added to requests for
+	// them; CA (required with Credentials) issues their certificates.
+	Credentials map[string]credentials.Credential
+	CA          *CA
+	// UpstreamRoots verifies upstream servers when brokering (nil: the
+	// system roots).
+	UpstreamRoots *x509.CertPool
 	// Resolve, Dial and LocalAddrs are replaceable for tests.
 	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 	Dial    func(ctx context.Context, addr netip.AddrPort) (net.Conn, error)
@@ -63,6 +78,9 @@ type Proxy struct {
 func (p *Proxy) Serve(ctx context.Context, l net.Listener) error {
 	if p.Policy == nil {
 		return errors.New("egress: no policy")
+	}
+	if len(p.Credentials) > 0 && p.CA == nil {
+		return errors.New("egress: credentials need a CA")
 	}
 	p.defaults()
 	ctx, cancel := context.WithCancel(ctx)
@@ -133,6 +151,10 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 	if req.Method != http.MethodConnect {
+		if req.Method == http.MethodGet && req.URL.Path == caPath && p.CA != nil {
+			p.serveCA(conn)
+			return
+		}
 		p.refuse(conn, http.StatusMethodNotAllowed, "only HTTPS through CONNECT is supported", req.Host, 0, nil)
 		return
 	}
@@ -168,6 +190,17 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 		p.refuse(conn, http.StatusForbidden, "host resolves only to internal or blocked addresses", host, port, nil)
 		return
 	}
+	buffered, _ := br.Peek(br.Buffered())
+	if cred, ok := p.Credentials[spec.NormalizeHost(host)]; ok && port == 443 {
+		_ = conn.SetReadDeadline(time.Time{})
+		if _, err := io.WriteString(conn, connectedResponse); err != nil {
+			return
+		}
+		b := &broker{p: p, host: spec.NormalizeHost(host), port: port, target: target, cred: cred}
+		b.serve(ctx, &prefixConn{Conn: conn, prefix: bytes.Clone(buffered)})
+		return
+	}
+
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	upstream, err := p.Dial(dctx, netip.AddrPortFrom(target, uint16(port)))
 	cancel()
@@ -183,7 +216,6 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 	}
 	// Bytes the client sent right after the request (e.g. a TLS
 	// ClientHello) are already buffered; forward them first.
-	buffered, _ := br.Peek(br.Buffered())
 	clientSide := io.MultiReader(bytes.NewReader(bytes.Clone(buffered)), conn)
 
 	// End the tunnel when the job ends.
@@ -203,6 +235,16 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 	<-done
 	p.Log.Info("egress: tunnel closed", "job", p.JobID, "host", host, "port", port, "ip", target.String(),
 		"bytesUp", up, "bytesDown", down, "duration", time.Since(start).Round(time.Millisecond).String())
+}
+
+// caPath is where a guest fetches the job CA to trust (plain HTTP from
+// the proxy itself; the certificate is public).
+const caPath = "/hcc/ca.pem"
+
+func (p *Proxy) serveCA(conn net.Conn) {
+	pemBytes := p.CA.PEM()
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, _ = fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/x-pem-file\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(pemBytes), pemBytes)
 }
 
 func (p *Proxy) refuse(conn net.Conn, code int, reason, host string, port int, err error) {

@@ -3,8 +3,8 @@
 // its state machine, and offers a per-job cancel and a global kill switch.
 //
 // It boots the harness's image and treats a clean guest shutdown as
-// success. Network access goes through a per-job egress proxy (Config.
-// Egress). Agent runtimes, credentials and schedules are not wired in
+// success. Network access and credentials go through a per-job egress
+// proxy (Config.Egress). Agent runtimes and schedules are not wired in
 // yet: harnesses that need them are rejected (fail closed) rather than
 // run with different behaviour than the user approved.
 package runner
@@ -124,7 +124,9 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 	if h.Spec.Target != r.cfg.Target {
 		return "", fmt.Errorf("runner: harness targets %q, this runner is %q", h.Spec.Target, r.cfg.Target)
 	}
-	needsNet := len(h.Spec.Permissions.Network.Egress) > 0
+	// Credentials only ever travel through the egress proxy, so they need
+	// it too (and the factory checks their hosts against the allowlist).
+	needsNet := len(h.Spec.Permissions.Network.Egress) > 0 || len(h.Spec.Permissions.Credentials) > 0
 	if needsNet && r.cfg.Egress == nil {
 		return "", errors.New("runner: network access is not configured on this runner")
 	}
@@ -412,9 +414,6 @@ func checkSupported(h *spec.Harness) error {
 	var errs []error
 	notYet := func(what string) {
 		errs = append(errs, fmt.Errorf("%s is not supported by this runner yet", what))
-	}
-	if len(p.Credentials) > 0 {
-		notYet("credentials (needs the credential broker)")
 	}
 	if len(p.Tools.Install) > 0 {
 		notYet("installing tools")

@@ -24,7 +24,8 @@ Living document. Update it in the same PR as any change that affects it.
 
 | Threat | Control | Status |
 |---|---|---|
-| Agent reads secrets | Secrets never enter the sandbox. The broker adds them at the egress proxy, per allowed host. | planned |
+| Agent reads secrets | Secrets never enter the sandbox: the egress proxy adds them, only for their own hosts (which must be in the harness's allowlist), replacing any header of that name the guest sent. TLS for those hosts is terminated with a per-job, in-memory CA whose name constraints allow only those hosts. Secrets never appear in logs. See ADR-0005. | done (unit, real-internet and VM tests) |
+| Agent exfiltrates a secret through an echoing host | Inherent to injection: hosts that echo request headers would reveal the secret. Credential hosts are chosen by the operator and must be real APIs. | accepted risk, documented |
 | Agent exfiltrates data | Default: no network at all. A networked VM has no gateway and no DNS; its only peer is a per-VM CONNECT proxy that allows only allowlisted host names and ports (IP literals refused), resolves names itself and dials only an address that is not loopback, link-local (cloud metadata), reserved, the sandbox subnet or private (unless `allowPrivateNetworks`), so DNS rebinding fails. nftables on the host additionally drops everything from sandbox links except the proxy port on their own address, and all forwarding. See ADR-0004. | done (e2e-tested) |
 | Parser differential in egress checks (`evil.com#.allowed.org` suffix-matching a wildcard while the proxy connects elsewhere) | The policy engine matches only plain, label-validated DNS names. The proxy must pass the policy the same host string it then dials. | policy done, proxy planned |
 | Malformed tool references reaching an installer (`pkg@1;rm -rf /`) | Requests must match the strict package syntax before any grant is checked. Installers must never use a shell. | policy done, installer planned |
@@ -46,7 +47,7 @@ Living document. Update it in the same PR as any change that affects it.
 | Runner user becomes root by replacing the jailer | The daemon refuses to start unless the jailer, Firecracker and every parent directory are root-owned and not group/other-writable. Images and config are root-owned and read-only for the runner. The runner refuses to run as root. | done |
 | Guest fills the host disk through its console | Console logs are capped at 10 MiB per job; further output is dropped. | done (no rotation of old jobs yet) |
 | Tampered release | Keyless cosign signatures, SBOMs, SLSA provenance, SHA-pinned actions, least-privilege workflow tokens. | pipeline done |
-| Log leakage | Secrets are redacted at the broker. Logs stay on the user's machines. | planned |
+| Log leakage | Credentials format without their secret (`%v`, `%#v`); the broker logs credential names, hosts, paths and status codes only (tested). Logs stay on the user's machines. | done |
 
 ## Known limitations
 
