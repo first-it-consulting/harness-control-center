@@ -28,9 +28,9 @@ const (
 // Anthropic Messages API ("input_tokens", "output_tokens", cache tokens)
 // and the OpenAI API ("prompt_tokens", "completion_tokens"). Counts are
 // cumulative within a response, so the largest seen wins; record gets the
-// increments. A response's usage is final once a complete JSON body or a
-// stream's closing usage (Anthropic's message_delta, OpenAI's usage
-// chunk) was read; message_start only carries a first estimate.
+// increments. A response's usage is final only if the body was read to
+// its end and it reported usage beyond a stream's first estimate
+// (Anthropic's message_start); see meteredBody.
 type usageTap struct {
 	sse    bool
 	record func(in, out int64)
@@ -157,7 +157,8 @@ func (t *usageTap) observe(doc []byte) {
 }
 
 // meteredBody records a response's usage as it is read and calls onEnd
-// once, when the body is done (read to the end, or closed early).
+// once, when the body is done. Usage is final only if the body was read
+// to EOF: a body closed early may have generated more than it reported.
 type meteredBody struct {
 	io.ReadCloser
 	tap   *usageTap
@@ -171,21 +172,21 @@ func (b *meteredBody) Read(p []byte) (int, error) {
 		_, _ = b.tap.Write(p[:n])
 	}
 	if err == io.EOF {
-		b.done()
+		b.done(true)
 	}
 	return n, err
 }
 
 func (b *meteredBody) Close() error {
-	b.done()
+	b.done(false)
 	return b.ReadCloser.Close()
 }
 
-func (b *meteredBody) done() {
+func (b *meteredBody) done(eof bool) {
 	b.once.Do(func() {
 		in, out, seen, final := b.tap.finish()
 		if b.onEnd != nil {
-			b.onEnd(in, out, seen, final)
+			b.onEnd(in, out, seen, final && eof)
 		}
 	})
 }
@@ -196,9 +197,11 @@ var freePaths = []string{"/messages/count_tokens"}
 
 // Bounds on what the proxy parses in a model request. Larger bodies pass
 // through unparsed: their response must then report usage by itself.
+// A max_tokens above maxChargeableTokens counts as no bound at all.
 const (
-	maxParsedRequest  = 8 << 20
-	maxRequestOptions = 64 << 10
+	maxParsedRequest    = 8 << 20
+	maxRequestOptions   = 64 << 10
+	maxChargeableTokens = 10_000_000
 )
 
 // cleanPath reports whether p is in canonical form, so that the path
@@ -315,12 +318,19 @@ func prepareRequest(req *http.Request) (maxTokens int64, err error) {
 	maxTokens = -1
 	var top map[string]json.RawMessage
 	if json.Unmarshal(raw, &top) == nil {
+		// The largest of the fields an API might honour; any that is
+		// present but not a sane count makes the request unbounded.
 		for _, k := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+			v, ok := top[k]
+			if !ok {
+				continue
+			}
 			var n int64
-			if v, ok := top[k]; ok && json.Unmarshal(v, &n) == nil && n > 0 {
-				maxTokens = n
+			if json.Unmarshal(v, &n) != nil || n <= 0 || n > maxChargeableTokens {
+				maxTokens = -1
 				break
 			}
+			maxTokens = max(maxTokens, n)
 		}
 		if openAIStyle(req.URL.Path) && string(bytes.TrimSpace(top["stream"])) == "true" {
 			opts := map[string]json.RawMessage{}

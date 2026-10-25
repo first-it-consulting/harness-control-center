@@ -7,6 +7,7 @@ package budget
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 )
 
@@ -116,14 +117,14 @@ func (m *Meter) Record(input, output int64) {
 		return
 	}
 	m.mu.Lock()
-	m.usage.InputTokens += input
-	m.usage.OutputTokens += output
+	m.usage.InputTokens = addSat(m.usage.InputTokens, input)
+	m.usage.OutputTokens = addSat(m.usage.OutputTokens, output)
 	if m.price != nil {
 		m.usage.CostUSD += float64(input)/1e6*m.price.InputPerMTok + float64(output)/1e6*m.price.OutputPerMTok
 	}
 	var reason string
 	if m.exceeded == "" {
-		total := m.usage.InputTokens + m.usage.OutputTokens
+		total := addSat(m.usage.InputTokens, m.usage.OutputTokens)
 		switch {
 		case m.limits.MaxTokens > 0 && total >= m.limits.MaxTokens:
 			reason = fmt.Sprintf("used %d of %d tokens", total, m.limits.MaxTokens)
@@ -150,4 +151,13 @@ func (m *Meter) Exceeded() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.exceeded
+}
+
+// addSat adds non-negative counts, saturating instead of overflowing (a
+// saturated count is over every limit).
+func addSat(a, b int64) int64 {
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
 }

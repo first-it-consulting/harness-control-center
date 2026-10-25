@@ -221,3 +221,56 @@ func TestMeteredLargeBodyPassesThrough(t *testing.T) {
 		t.Errorf("upstream got %d bytes, want %d", got, len(body))
 	}
 }
+
+// cutAfter sends a request and closes its response after n bytes.
+func cutAfter(t *testing.T, tr http.RoundTripper, body string, n int64) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "https://model.example/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.CopyN(io.Discard, resp.Body, n)
+	_ = resp.Body.Close()
+}
+
+// Usage counts as final only at EOF: a body closed early may have been
+// generating more than its last usage event said.
+func TestMeteredEarlyCloseIsNotFinal(t *testing.T) {
+	stream := messageStart + "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":10}}\n\n" + strings.Repeat("data: {}\n\n", 100)
+	m := budget.New(budget.Limits{}, nil, nil)
+	tr := &meteredTransport{meter: m, base: rtFunc(func(*http.Request) (*http.Response, error) {
+		return respond(200, "text/event-stream", "", stream), nil
+	})}
+	cutAfter(t, tr, `{"max_tokens":800}`, int64(len(stream)-50))
+	if u := m.Usage(); u.OutputTokens != 800 {
+		t.Errorf("output tokens = %d, want max_tokens (800) charged", u.OutputTokens)
+	}
+}
+
+func TestMeteredChargesTheLargestMaxTokens(t *testing.T) {
+	m := budget.New(budget.Limits{}, nil, nil)
+	tr := &meteredTransport{meter: m, base: rtFunc(func(*http.Request) (*http.Response, error) {
+		return respond(200, "text/event-stream", "", messageStart), nil
+	})}
+	post(t, tr, "/v1/messages", `{"max_tokens":10,"max_completion_tokens":5000}`)
+	if u := m.Usage(); u.OutputTokens != 5000 {
+		t.Errorf("output tokens = %d, want 5000", u.OutputTokens)
+	}
+}
+
+func TestMeteredInsaneMaxTokensIsUnbounded(t *testing.T) {
+	for _, body := range []string{`{"max_tokens":9223372036854775807}`, `{"max_tokens":100,"max_output_tokens":"lots"}`, `{"max_tokens":-5}`} {
+		m := budget.New(budget.Limits{}, nil, nil)
+		tr := &meteredTransport{meter: m, base: rtFunc(func(*http.Request) (*http.Response, error) {
+			return respond(200, "text/event-stream", "", messageStart), nil
+		})}
+		post(t, tr, "/v1/messages", body)
+		if m.Exceeded() == "" {
+			t.Errorf("%s: cut stream did not stop the budget (usage %+v)", body, m.Usage())
+		}
+	}
+}

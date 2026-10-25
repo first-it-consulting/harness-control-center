@@ -115,3 +115,12 @@ func TestFailStopsOnce(t *testing.T) {
 		t.Errorf("Begin after Fail: %v", err)
 	}
 }
+
+func TestRecordSaturates(t *testing.T) {
+	m := New(Limits{MaxTokens: 1000}, nil, nil)
+	m.Record(math.MaxInt64, 0)
+	m.Record(math.MaxInt64, math.MaxInt64)
+	if u := m.Usage(); u.InputTokens != math.MaxInt64 || u.OutputTokens != math.MaxInt64 || m.Exceeded() == "" {
+		t.Errorf("usage %+v exceeded %q", u, m.Exceeded())
+	}
+}
