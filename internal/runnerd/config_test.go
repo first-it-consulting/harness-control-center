@@ -11,9 +11,12 @@ import (
 const goodConfig = `
 target: server:hcc-dev
 maxConcurrent: 2
+runnerUser: hcc-runner
 socket: /run/hcc/runner.sock
+socketGroup: hcc
 stateDir: /var/lib/hcc/state
 firecracker:
+  helper: /usr/local/lib/hcc/hcc-helper
   jailer: /usr/local/lib/hcc/jailer
   firecracker: /usr/local/lib/hcc/firecracker
   chrootBase: /var/lib/hcc/jails
@@ -47,7 +50,8 @@ func TestLoadConfig(t *testing.T) {
 		t.Errorf("config = %+v", c)
 	}
 
-	minimal := strings.Replace(goodConfig, "target: server:hcc-dev\nmaxConcurrent: 2\nsocket: /run/hcc/runner.sock\n", "", 1)
+	minimal := strings.Replace(goodConfig, "target: server:hcc-dev\nmaxConcurrent: 2\n", "", 1)
+	minimal = strings.Replace(minimal, "socket: /run/hcc/runner.sock\nsocketGroup: hcc\n", "", 1)
 	c, err = LoadConfig(writeConfig(t, minimal))
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +73,10 @@ func TestLoadConfigRejects(t *testing.T) {
 		"image outside root":  {"/var/lib/hcc/images/base/rootfs.ext4", "/etc/shadow", "inside firecracker.imageRoot"},
 		"root uid":            {"uid: 64000", "uid: 0", "non-root"},
 		"too many concurrent": {"maxConcurrent: 2", "maxConcurrent: 1000", "maxConcurrent"},
+		"root runner":         {"runnerUser: hcc-runner", "runnerUser: root", "runnerUser"},
+		"no runner user":      {"runnerUser: hcc-runner\n", "", "runnerUser"},
+		"root socket group":   {"socketGroup: hcc", "socketGroup: root", "socketGroup"},
+		"relative helper":     {"/usr/local/lib/hcc/hcc-helper", "hcc-helper", "firecracker.helper"},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -78,7 +86,7 @@ func TestLoadConfigRejects(t *testing.T) {
 			}
 		})
 	}
-	if _, err := LoadConfig(writeConfig(t, "target: local\n")); err == nil || !strings.Contains(err.Error(), "at least one image") {
+	if _, err := LoadConfig(writeConfig(t, "target: local\nrunnerUser: hcc-runner\n")); err == nil || !strings.Contains(err.Error(), "at least one image") {
 		t.Errorf("empty config: %v", err)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,6 +35,8 @@ type fakeHost struct {
 	behavior behavior
 	startErr error
 	onStart  func(jailRoot string)
+	// jailer turns requests into argv exactly like the real hosts do.
+	jailer JailerConfig
 
 	mu       sync.Mutex
 	argv     []string               // last jailer call
@@ -67,9 +68,13 @@ func (p *fakeProc) Signal(s os.Signal) error {
 	return nil
 }
 
-func (h *fakeHost) StartJailer(argv []string, console io.Writer) (Process, error) {
+func (h *fakeHost) StartVM(req StartRequest, console io.Writer) (Process, error) {
 	if h.startErr != nil {
 		return nil, h.startErr
+	}
+	argv, err := h.jailer.Argv(req)
+	if err != nil {
+		return nil, err
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -119,17 +124,8 @@ func (h *fakeHost) RemoveJail(_ context.Context, id string) error {
 	defer h.mu.Unlock()
 	h.removed = append(h.removed, id)
 	// Mimic the real host so leftovers would be visible to the test.
-	return os.RemoveAll(filepath.Join(h.chrootBase(), "firecracker", id))
+	return os.RemoveAll(JailDir(h.jailer.ChrootBase, id))
 }
-
-func (h *fakeHost) chrootBase() string {
-	if h.argv != nil {
-		return argValue(h.argv, "--chroot-base-dir")
-	}
-	return testBase
-}
-
-var testBase string
 
 func argValue(argv []string, flag string) string {
 	if i := slices.Index(argv, flag); i >= 0 && i+1 < len(argv) {
@@ -149,7 +145,6 @@ func newFixture(t *testing.T, b behavior) *fixture {
 	t.Helper()
 	dir := t.TempDir()
 	base := filepath.Join(dir, "jails")
-	testBase = base
 	k, r := filepath.Join(dir, "vmlinux"), filepath.Join(dir, "rootfs.ext4")
 	if err := os.WriteFile(k, []byte("kernel"), 0o600); err != nil {
 		t.Fatal(err)
@@ -157,11 +152,11 @@ func newFixture(t *testing.T, b behavior) *fixture {
 	if err := os.WriteFile(r, []byte("rootfs"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	host := &fakeHost{t: t, behavior: b}
-	p, err := New(Config{
+	host := &fakeHost{t: t, behavior: b, jailer: JailerConfig{
 		JailerPath: filepath.Join(dir, "jailer"), FirecrackerPath: filepath.Join(dir, "firecracker"),
-		ChrootBase: base, ImageRoot: dir, UID: 64000, GID: 64000, StopGrace: 20 * time.Millisecond, Host: host,
-	})
+		ChrootBase: base, UID: 64000, GID: 64000, Identities: 8,
+	}}
+	p, err := New(Config{ChrootBase: base, ImageRoot: dir, StopGrace: 20 * time.Millisecond, Host: host})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +216,7 @@ func TestJailerArgv(t *testing.T) {
 	}
 	argv := f.host.argv
 	checks := map[string]string{
-		"--id": "run-1", "--exec-file": f.p.cfg.FirecrackerPath, "--uid": "64000", "--gid": "64000",
+		"--id": "run-1", "--exec-file": f.host.jailer.FirecrackerPath, "--uid": "64000", "--gid": "64000",
 		"--chroot-base-dir": f.base, "--cgroup-version": "2", "--config-file": "config.json",
 	}
 	for flag, want := range checks {
@@ -229,7 +224,7 @@ func TestJailerArgv(t *testing.T) {
 			t.Errorf("%s = %q, want %q", flag, got, want)
 		}
 	}
-	if argv[0] != f.p.cfg.JailerPath {
+	if argv[0] != f.host.jailer.JailerPath {
 		t.Errorf("argv[0] = %q", argv[0])
 	}
 	for _, want := range []string{"memory.max=335544320", "pids.max=64", "cpu.max=200000 100000"} {
@@ -369,23 +364,12 @@ func TestRunInvalidSpecTouchesNothing(t *testing.T) {
 
 func TestNewRejectsUnsafeConfig(t *testing.T) {
 	d := t.TempDir()
-	good := Config{
-		JailerPath: filepath.Join(d, "jailer"), FirecrackerPath: filepath.Join(d, "firecracker"),
-		ChrootBase: filepath.Join(d, "j"), ImageRoot: filepath.Join(d, "img"), UID: 64000, GID: 64000, Host: &fakeHost{},
-	}
+	good := Config{ChrootBase: filepath.Join(d, "j"), ImageRoot: filepath.Join(d, "img"), Host: &fakeHost{}}
 	tests := map[string]func(*Config){
-		"root uid":         func(c *Config) { c.UID = 0 },
-		"root gid":         func(c *Config) { c.GID = 0 },
-		"relative jailer":  func(c *Config) { c.JailerPath = "jailer" },
-		"unclean base":     func(c *Config) { c.ChrootBase = c.ImageRoot + string(filepath.Separator) + ".." },
-		"no host":          func(c *Config) { c.Host = nil },
-		"no image root":    func(c *Config) { c.ImageRoot = "" },
-		"too many ids":     func(c *Config) { c.Identities = MaxIdentities + 1 },
-		"range overflows":  func(c *Config) { c.UID = math.MaxInt32 },
-		"runner's own uid": func(c *Config) { c.UID = os.Getuid() },
-		"range covers own uid": func(c *Config) {
-			c.UID, c.Identities = os.Getuid()-1, 4
-		},
+		"unclean base":  func(c *Config) { c.ChrootBase = c.ImageRoot + string(filepath.Separator) + ".." },
+		"no host":       func(c *Config) { c.Host = nil },
+		"no image root": func(c *Config) { c.ImageRoot = "" },
+		"too many ids":  func(c *Config) { c.Identities = MaxIdentities + 1 },
 	}
 	if _, err := New(good); err != nil {
 		t.Fatalf("good config rejected: %v", err)
@@ -393,9 +377,6 @@ func TestNewRejectsUnsafeConfig(t *testing.T) {
 	for name, mutate := range tests {
 		c := good
 		mutate(&c)
-		if (name == "runner's own uid" || name == "range covers own uid") && os.Getuid() <= 0 {
-			continue // running as root or on Windows: covered by "root uid"
-		}
 		if _, err := New(c); err == nil {
 			t.Errorf("%s: accepted", name)
 		}

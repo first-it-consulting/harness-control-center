@@ -24,7 +24,13 @@ type Config struct {
 	// Target is this runner's name as used in spec.target.
 	Target        string `yaml:"target"`
 	MaxConcurrent int    `yaml:"maxConcurrent"`
-	Socket        string `yaml:"socket"`
+	// RunnerUser is the system user the daemon runs as; it is the only
+	// user hcc-helper accepts calls from.
+	RunnerUser string `yaml:"runnerUser"`
+	Socket     string `yaml:"socket"`
+	// SocketGroup, if set, may also use the socket (mode 0660): operators
+	// in this group can drive the runner without being the runner user.
+	SocketGroup string `yaml:"socketGroup"`
 	// StateDir holds per-job console logs.
 	StateDir    string                 `yaml:"stateDir"`
 	Firecracker FirecrackerConfig      `yaml:"firecracker"`
@@ -33,6 +39,10 @@ type Config struct {
 
 // FirecrackerConfig configures the Firecracker sandbox provider.
 type FirecrackerConfig struct {
+	// Helper is the root-owned hcc-helper the runner calls through sudo.
+	// Without it, the runner falls back to running the jailer through
+	// sudo directly (development only: that needs broad sudo rights).
+	Helper      string `yaml:"helper"`
 	Jailer      string `yaml:"jailer"`
 	Firecracker string `yaml:"firecracker"`
 	ChrootBase  string `yaml:"chrootBase"`
@@ -51,6 +61,7 @@ type ImageConfig struct {
 
 var (
 	targetRe    = regexp.MustCompile(`^(local|server:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)$`)
+	unixNameRe  = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 	imageNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,127}$`)
 )
 
@@ -98,6 +109,15 @@ func (c *Config) Validate() error {
 	if c.MaxConcurrent < 1 || c.MaxConcurrent > 64 {
 		add("maxConcurrent must be between 1 and 64")
 	}
+	if !unixNameRe.MatchString(c.RunnerUser) || c.RunnerUser == "root" {
+		add("runnerUser must name a non-root user, got %q", c.RunnerUser)
+	}
+	if c.SocketGroup != "" && (!unixNameRe.MatchString(c.SocketGroup) || c.SocketGroup == "root") {
+		add("socketGroup must name a non-root group, got %q", c.SocketGroup)
+	}
+	if c.Firecracker.Helper != "" && !cleanAbs(c.Firecracker.Helper) {
+		add("firecracker.helper must be a clean absolute path, got %q", c.Firecracker.Helper)
+	}
 	paths := map[string]string{
 		"socket": c.Socket, "stateDir": c.StateDir,
 		"firecracker.jailer": c.Firecracker.Jailer, "firecracker.firecracker": c.Firecracker.Firecracker,
@@ -130,12 +150,16 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// CheckFiles verifies the binaries the daemon will run as root through
-// sudo. Whoever can modify the jailer can become root, so it must be
-// owned by root and writable by nobody else.
+// CheckFiles verifies the binaries that run as root (through sudo).
+// Whoever can modify one can become root, so each must be owned by root
+// and writable by nobody else.
 func (c *Config) CheckFiles() error {
 	var errs []error
-	for _, p := range []string{c.Firecracker.Jailer, c.Firecracker.Firecracker} {
+	bins := []string{c.Firecracker.Jailer, c.Firecracker.Firecracker}
+	if c.Firecracker.Helper != "" {
+		bins = append(bins, c.Firecracker.Helper)
+	}
+	for _, p := range bins {
 		if err := checkRootOwned(p); err != nil {
 			errs = append(errs, err)
 		}

@@ -17,19 +17,32 @@ hcc run --ssh <host> my-harness.yaml
 
 ## What gets installed
 
-| Path | Owner | Why |
+| Path / account | Owner | Why |
 |---|---|---|
-| `/usr/local/bin/hcc`, `/usr/local/lib/hcc/{jailer,firecracker}` | root, 0755 | The jailer runs as root via sudo; whoever can modify it is root. The daemon refuses to start otherwise. |
+| user `hcc-runner` | system user, no login, no password | Runs the daemon. Its only root access is one sudoers rule for `hcc-helper`. |
+| group `hcc` | | May use the runner socket. The installing admin user is added; `hcc --ssh` works through it. |
+| `/etc/sudoers.d/hcc-runner` | root, 0440 | `hcc-runner ALL=(root) NOPASSWD: /usr/local/lib/hcc/hcc-helper`, checked with `visudo -c` before install. |
+| `/usr/local/lib/hcc/hcc-helper` | root, 0755 | The only code that runs as root: start, kill, remove a jail. It builds the jailer command from `/etc/hcc/runner.yaml` and re-validates every argument. |
+| `/usr/local/bin/hcc`, `/usr/local/lib/hcc/{jailer,firecracker}` | root, 0755 | Whoever can modify these is root. The daemon and helper refuse to start otherwise. |
 | `/usr/local/lib/hcc/images/` | root, read-only | The runner boots images but cannot change them. |
-| `/etc/hcc/runner.yaml` | root, 0644 | The runner cannot change its own configuration. |
-| `/var/lib/hcc/` (state, jails), `/run/hcc/` (socket) | runner user, 0700 | Nobody else can reach jobs or logs. |
-| `/etc/systemd/system/hcc-runner.service` | root | Hardened unit; see comments inside. |
+| `/etc/hcc/runner.yaml` | root, 0644 | Neither the runner nor the caller can change what runs as root. |
+| `/var/lib/hcc/` (state, jails) | hcc-runner, 0700 | Only the runner. |
+| `/run/hcc/runner.sock` | hcc-runner:hcc, 0660 in a 0750 dir | The runner and group `hcc`; nobody else. |
+
+## Testing an installation
+
+```sh
+make e2e-helper E2E_HOST=<host>   # real VMs, as hcc-runner, through hcc-helper
+```
+
+It stops the daemon while it runs (they would share VM identities) and
+starts it again afterwards.
 
 ## Current limitations
 
-- The runner runs as the installing user, which needs non-interactive
-  sudo. A dedicated system user with a sudoers rule limited to the jailer
-  (and, later, a privileged helper instead of sudo) is planned.
+- The systemd unit cannot use `NoNewPrivileges` or `ProtectSystem=strict`,
+  because sudo needs setuid. Replacing sudo with a socket-activated root
+  service would allow that.
 - The `base` image boots and shuts down; no agent runtime runs in it yet.
 - Job history lives in memory and is lost on restart; console logs stay in
   `/var/lib/hcc/state` and are not rotated yet.

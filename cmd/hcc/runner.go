@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"os/user"
 	"syscall"
 
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
@@ -58,6 +59,9 @@ func serve(configPath string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if me, err := user.Current(); err != nil || me.Username != cfg.RunnerUser {
+		return fmt.Errorf("must run as the configured runnerUser %q", cfg.RunnerUser)
+	}
 	if err := cfg.CheckFiles(); err != nil {
 		return err
 	}
@@ -66,13 +70,16 @@ func serve(configPath string, log *slog.Logger) error {
 			return err
 		}
 	}
-	fc := cfg.Firecracker
+	host, err := sandboxHost(cfg, log)
+	if err != nil {
+		return err
+	}
 	provider, err := firecracker.New(firecracker.Config{
-		JailerPath: fc.Jailer, FirecrackerPath: fc.Firecracker,
-		ChrootBase: fc.ChrootBase, ImageRoot: fc.ImageRoot,
+		ChrootBase: cfg.Firecracker.ChrootBase,
+		ImageRoot:  cfg.Firecracker.ImageRoot,
 		// One UID/GID per concurrently running VM: uid..uid+maxConcurrent-1.
-		UID: fc.UID, GID: fc.GID, Identities: cfg.MaxConcurrent,
-		Host: firecracker.NewSudoHost(fc.ChrootBase),
+		Identities: cfg.MaxConcurrent,
+		Host:       host,
 	})
 	if err != nil {
 		return err
@@ -101,7 +108,7 @@ func serve(configPath string, log *slog.Logger) error {
 		}
 	}()
 
-	l, err := runnerd.Listen(cfg.Socket)
+	l, err := runnerd.Listen(cfg.Socket, cfg.SocketGroup)
 	if err != nil {
 		return err
 	}
@@ -111,6 +118,25 @@ func serve(configPath string, log *slog.Logger) error {
 	err = runnerd.NewServer(r, cfg.StateDir, log).Serve(ctx, l)
 	log.Info("runner stopped; all jobs were stopped")
 	return err
+}
+
+// sandboxHost returns the helper-based host, or (development only) one
+// that runs the jailer through broad sudo rights.
+func sandboxHost(cfg *runnerd.Config, log *slog.Logger) (firecracker.Host, error) {
+	fc := cfg.Firecracker
+	if fc.Helper != "" {
+		return firecracker.NewHelperHost(fc.Helper), nil
+	}
+	log.Warn("firecracker.helper not set: running the jailer through sudo directly; this needs broad sudo rights and is for development only")
+	jc := firecracker.JailerConfig{
+		JailerPath: fc.Jailer, FirecrackerPath: fc.Firecracker, ChrootBase: fc.ChrootBase,
+		UID: fc.UID, GID: fc.GID, Identities: cfg.MaxConcurrent,
+		ForbiddenIDs: []int{0, os.Getuid(), os.Getgid()},
+	}
+	if err := jc.Validate(); err != nil {
+		return nil, err
+	}
+	return firecracker.NewSudoHost(jc), nil
 }
 
 func cmdStdio(args []string, stdin io.Reader, stdout, stderr io.Writer) int {

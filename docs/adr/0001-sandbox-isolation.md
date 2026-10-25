@@ -25,8 +25,10 @@ explicitly unsafe developer plugin.
 ## Consequences
 
 - Strong isolation and fast starts (Firecracker boots in about 125 ms).
-- Networking needs privileges, so a separate minimal **privileged helper**
-  creates tap devices, jails and firewall rules, keeping the runner unprivileged.
+- Root is needed for the jailer (and, later, tap devices and firewall
+  rules), so a separate minimal **privileged helper** (`hcc-helper`) does
+  that work. The runner stays unprivileged and its only sudo right is the
+  helper. Implemented for start, kill and remove; networking follows.
 - We must build and ship microVM kernels and root filesystems (images),
   signed like the binaries.
 - End-to-end tests need KVM in CI (GitHub's Linux runners provide

@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
@@ -75,10 +77,26 @@ func ConsoleFunc(stateDir string, log *slog.Logger) func(string) io.Writer {
 }
 
 // Listen creates the socket so that only this user can connect: its
-// directory is 0700 and the socket itself 0600. A stale socket is
+// directory is 0700 and the socket itself 0600. With group set, members
+// of that group may connect as well (0750 and 0660). A stale socket is
 // replaced; any other file at that path is an error.
-func Listen(path string) (net.Listener, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+func Listen(path, group string) (net.Listener, error) {
+	dirMode, sockMode, gid := os.FileMode(0o700), os.FileMode(0o600), -1
+	if group != "" {
+		g, err := user.LookupGroup(group)
+		if err != nil {
+			return nil, fmt.Errorf("runnerd: socket group: %w", err)
+		}
+		if gid, err = strconv.Atoi(g.Gid); err != nil || gid == 0 {
+			return nil, fmt.Errorf("runnerd: socket group %q must be a non-root group", group)
+		}
+		dirMode, sockMode = 0o750, 0o660
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, dirMode); err != nil {
+		return nil, err
+	}
+	if err := setMode(dir, dirMode, gid); err != nil {
 		return nil, err
 	}
 	if fi, err := os.Lstat(path); err == nil {
@@ -93,11 +111,20 @@ func Listen(path string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := setMode(path, sockMode, gid); err != nil {
 		_ = l.Close()
 		return nil, err
 	}
 	return l, nil
+}
+
+func setMode(path string, mode os.FileMode, gid int) error {
+	if gid >= 0 {
+		if err := os.Chown(path, -1, gid); err != nil {
+			return fmt.Errorf("runnerd: %w (is the runner user in the socket group?)", err)
+		}
+	}
+	return os.Chmod(path, mode)
 }
 
 // Serve serves on l until ctx ends, then stops accepting requests and

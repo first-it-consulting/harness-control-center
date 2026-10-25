@@ -1,4 +1,5 @@
-# hcc runner daemon. @RUN_USER@ is replaced by install-runner.sh.
+# hcc runner daemon. @RUN_USER@ and @GROUP@ are replaced by
+# install-runner.sh.
 [Unit]
 Description=Harness Control Center runner
 Documentation=https://github.com/first-it-consulting/harness-control-center
@@ -8,10 +9,14 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=@RUN_USER@
+Group=@RUN_USER@
+# Members of @GROUP@ may use the socket.
+SupplementaryGroups=@GROUP@
 ExecStart=/usr/local/bin/hcc runner serve --config /etc/hcc/runner.yaml
-# /run/hcc (socket) and /var/lib/hcc (state, jails), owner-only.
+# /run/hcc (socket, group-accessible) and /var/lib/hcc (state, jails,
+# owner-only).
 RuntimeDirectory=hcc
-RuntimeDirectoryMode=0700
+RuntimeDirectoryMode=0750
 StateDirectory=hcc
 StateDirectoryMode=0700
 UMask=0077
@@ -22,10 +27,9 @@ TimeoutStopSec=60
 Restart=on-failure
 RestartSec=5
 
-# Hardening that still lets sudo start the jailer (which needs to write
-# cgroups and create device nodes in the chroot). NoNewPrivileges and
-# ProtectSystem=strict would break sudo; they come with the privileged
-# helper that replaces it.
+# Hardening that still lets sudo run hcc-helper (the jailer writes
+# cgroups and creates device nodes in the chroot). NoNewPrivileges and
+# ProtectSystem=strict would break sudo's setuid.
 ProtectSystem=full
 ProtectHome=yes
 PrivateTmp=yes

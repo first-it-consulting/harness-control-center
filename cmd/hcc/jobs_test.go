@@ -54,7 +54,7 @@ func startTestRunner(t *testing.T) string {
 		t.Fatal(err)
 	}
 	sock := filepath.Join(dir, "runner.sock")
-	l, err := runnerd.Listen(sock)
+	l, err := runnerd.Listen(sock, "")
 	if err != nil {
 		t.Fatal(err)
 	}

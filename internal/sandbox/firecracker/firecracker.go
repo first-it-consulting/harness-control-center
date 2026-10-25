@@ -6,8 +6,9 @@
 //  1. creates <ChrootBase>/firecracker/<id>/root (owned by the runner),
 //  2. copies the kernel and root filesystem into it read-only and writes
 //     the VM configuration,
-//  3. starts the jailer, which applies cgroup v2 limits, pivot_roots into
-//     a private mount namespace, drops to UID/GID and execs Firecracker,
+//  3. asks its Host to start the VM: the jailer applies cgroup v2 limits,
+//     pivot_roots into a private mount namespace, drops to the slot's
+//     UID/GID and execs Firecracker,
 //  4. stops the VM on timeout or cancellation (SIGTERM, then
 //     cgroup.kill), and
 //  5. always removes the chroot and cgroup.
@@ -20,10 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -49,24 +48,20 @@ const (
 // sandbox.Spec.BootArgs).
 var baseBootArgs = []string{"console=ttyS0", "quiet", "loglevel=1", "reboot=k", "panic=1", "pci=off", "ro", "init=/init"}
 
-// Config configures the provider.
+// Config configures the provider. Which binaries run and under which
+// UIDs is decided root-side (JailerConfig); the provider only picks a
+// free identity slot per VM.
 type Config struct {
-	// JailerPath and FirecrackerPath are absolute paths to the binaries.
-	JailerPath      string
-	FirecrackerPath string
 	// ChrootBase holds the per-run chroots. It must be owned by the
-	// runner's user and must not be shared with anything else.
+	// runner's user, must not be shared with anything else, and must match
+	// the Host's.
 	ChrootBase string
 	// ImageRoot bounds which files can become a guest's kernel or root
 	// filesystem: Spec.Kernel and Spec.RootFS must resolve (symlinks
 	// included) to regular files inside it.
 	ImageRoot string
-	// UID and GID are the first of Identities consecutive user and group
-	// IDs. Every running VM gets its own pair, so one VMM can never
-	// signal, trace or read another (Firecracker's recommendation). They
-	// need no accounts but must not include 0 or the runner's own IDs.
-	UID, GID int
-	// Identities is how many VMs can run at once (default 1).
+	// Identities is how many VMs can run at once (default 1); it must not
+	// exceed the Host's.
 	Identities int
 	// StopGrace is how long to wait after SIGTERM, and again after
 	// cgroup.kill, before giving up.
@@ -87,7 +82,7 @@ var _ sandbox.Provider = (*Provider)(nil)
 // New validates cfg and returns a provider.
 func New(cfg Config) (*Provider, error) {
 	var errs []error
-	for name, p := range map[string]string{"JailerPath": cfg.JailerPath, "FirecrackerPath": cfg.FirecrackerPath, "ChrootBase": cfg.ChrootBase, "ImageRoot": cfg.ImageRoot} {
+	for name, p := range map[string]string{"ChrootBase": cfg.ChrootBase, "ImageRoot": cfg.ImageRoot} {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
 			errs = append(errs, fmt.Errorf("%s must be a clean absolute path, got %q", name, p))
 		}
@@ -97,15 +92,6 @@ func New(cfg Config) (*Provider, error) {
 	}
 	if cfg.Identities < 0 || cfg.Identities > MaxIdentities {
 		errs = append(errs, fmt.Errorf("identities must be between 1 and %d", MaxIdentities))
-	}
-	if cfg.UID <= 0 || cfg.GID <= 0 {
-		errs = append(errs, errors.New("UID and GID must be non-root"))
-	}
-	if cfg.UID > math.MaxInt32-cfg.Identities || cfg.GID > math.MaxInt32-cfg.Identities {
-		errs = append(errs, errors.New("UID/GID range overflows"))
-	}
-	if inRange(os.Getuid(), cfg.UID, cfg.Identities) || inRange(os.Getgid(), cfg.GID, cfg.Identities) {
-		errs = append(errs, errors.New("the UID/GID range must not include the runner's own IDs"))
 	}
 	if cfg.Host == nil {
 		errs = append(errs, errors.New("Host is required"))
@@ -118,8 +104,6 @@ func New(cfg Config) (*Provider, error) {
 	}
 	return &Provider{cfg: cfg, inUse: make([]bool, cfg.Identities)}, nil
 }
-
-func inRange(id, first, n int) bool { return id >= first && id < first+n }
 
 // acquire reserves a free identity slot.
 func (p *Provider) acquire() (int, error) {
@@ -174,7 +158,6 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 			p.release(slot)
 		}
 	}()
-	uid, gid := p.cfg.UID+slot, p.cfg.GID+slot
 
 	jail := jailDir(p.cfg.ChrootBase, spec.ID)
 	// Only the jailer (root) walks the directories above the jail root.
@@ -202,7 +185,7 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 	runCtx, cancel := context.WithTimeout(ctx, spec.Timeout)
 	defer cancel()
 
-	proc, err := p.cfg.Host.StartJailer(p.jailerArgv(&spec, uid, gid), console)
+	proc, err := p.cfg.Host.StartVM(StartRequest{ID: spec.ID, Slot: slot, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB}, console)
 	if err != nil {
 		return res, err
 	}
@@ -280,25 +263,6 @@ func (p *Provider) prepare(root string, spec *sandbox.Spec, kernel, rootfs *os.F
 		return fmt.Errorf("firecracker: %w", err)
 	}
 	return writeReadOnly(bytes.NewReader(cfg), "config.json", filepath.Join(root, "config.json"))
-}
-
-func (p *Provider) jailerArgv(spec *sandbox.Spec, uid, gid int) []string {
-	memMax := int64(spec.MemoryMiB+MemoryOverheadMiB) << 20
-	return []string{
-		p.cfg.JailerPath,
-		"--id", spec.ID,
-		"--exec-file", p.cfg.FirecrackerPath,
-		"--uid", strconv.Itoa(uid),
-		"--gid", strconv.Itoa(gid),
-		"--chroot-base-dir", p.cfg.ChrootBase,
-		"--cgroup-version", "2",
-		"--cgroup", "memory.max=" + strconv.FormatInt(memMax, 10),
-		"--cgroup", "pids.max=" + strconv.Itoa(MaxPids),
-		"--cgroup", fmt.Sprintf("cpu.max=%d 100000", spec.CPUs*100000),
-		"--",
-		"--no-api",
-		"--config-file", "config.json",
-	}
 }
 
 // vmConfig is Firecracker's configuration file. Built from structs, never

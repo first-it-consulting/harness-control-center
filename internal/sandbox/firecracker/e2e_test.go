@@ -1,11 +1,15 @@
 //go:build e2e
 
-// End-to-end tests against real Firecracker. They need Linux with
-// /dev/kvm, non-interactive sudo, and HCC_E2E_ASSETS pointing to a
-// directory with: firecracker, jailer, vmlinux, alpine-minirootfs.tar.gz
-// (as produced by hack/firecracker-poc/run.sh in ~/.cache/hcc-poc).
+// End-to-end tests against real Firecracker, on Linux with /dev/kvm, in
+// one of two modes:
 //
-//	go test -tags e2e -run E2E ./internal/sandbox/firecracker
+//   - HCC_E2E_CONFIG=/etc/hcc/runner.yaml: the production path. Run as the
+//     configured runner user (with the daemon stopped, so the two do not
+//     share identities); VMs are started through the installed hcc-helper
+//     and boot the installed "base" image. See make e2e-helper.
+//   - HCC_E2E_ASSETS=<dir with firecracker, jailer, vmlinux,
+//     alpine-minirootfs.tar.gz>: development path through broad sudo
+//     (SudoHost), with images built in a temp dir. See make e2e-firecracker.
 package firecracker
 
 import (
@@ -20,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/runnerd"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 )
 
@@ -42,12 +47,15 @@ type e2eEnv struct {
 
 func setupE2E(t *testing.T) *e2eEnv {
 	t.Helper()
-	assets := os.Getenv("HCC_E2E_ASSETS")
-	if assets == "" {
-		t.Skip("HCC_E2E_ASSETS not set")
-	}
 	if _, err := os.Stat("/dev/kvm"); err != nil {
 		t.Skip("no /dev/kvm")
+	}
+	if cfgPath := os.Getenv("HCC_E2E_CONFIG"); cfgPath != "" {
+		return setupHelperE2E(t, cfgPath)
+	}
+	assets := os.Getenv("HCC_E2E_ASSETS")
+	if assets == "" {
+		t.Skip("neither HCC_E2E_CONFIG nor HCC_E2E_ASSETS is set")
 	}
 	dir := t.TempDir()
 	images := filepath.Join(dir, "images")
@@ -57,18 +65,54 @@ func setupE2E(t *testing.T) *e2eEnv {
 	mustRun(t, "cp", filepath.Join(assets, "vmlinux"), filepath.Join(images, "vmlinux"))
 	rootfs := buildRootFS(t, filepath.Join(assets, "alpine-minirootfs.tar.gz"), dir, images)
 	base := filepath.Join(dir, "jails")
-	p, err := New(Config{
+	jailer := JailerConfig{
 		JailerPath:      filepath.Join(assets, "jailer"),
 		FirecrackerPath: filepath.Join(assets, "firecracker"),
 		ChrootBase:      base,
-		ImageRoot:       images,
 		UID:             64000, GID: 64000, Identities: 2,
-		Host: NewSudoHost(base),
-	})
+		ForbiddenIDs: []int{0, os.Getuid(), os.Getgid()},
+	}
+	if err := jailer.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(Config{ChrootBase: base, ImageRoot: images, Identities: 2, Host: NewSudoHost(jailer)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &e2eEnv{images: images, base: base, rootfs: rootfs, provider: p}
+}
+
+// setupHelperE2E builds the provider exactly as the daemon does from an
+// installed configuration.
+func setupHelperE2E(t *testing.T, cfgPath string) *e2eEnv {
+	t.Helper()
+	cfg, err := runnerd.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Firecracker.Helper == "" {
+		t.Fatal("config has no firecracker.helper")
+	}
+	img, ok := cfg.Images["base"]
+	if !ok {
+		t.Fatal(`config has no "base" image`)
+	}
+	if filepath.Base(img.Kernel) != "vmlinux" {
+		t.Fatalf("base kernel must be named vmlinux, got %s", img.Kernel)
+	}
+	p, err := New(Config{
+		ChrootBase: cfg.Firecracker.ChrootBase,
+		ImageRoot:  cfg.Firecracker.ImageRoot,
+		Identities: cfg.MaxConcurrent,
+		Host:       NewHelperHost(cfg.Firecracker.Helper),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxConcurrent < 2 {
+		t.Fatal("maxConcurrent must be at least 2 for the concurrency test")
+	}
+	return &e2eEnv{images: filepath.Dir(img.Kernel), base: cfg.Firecracker.ChrootBase, rootfs: img.RootFS, provider: p}
 }
 
 func buildRootFS(t *testing.T, tarball, dir, images string) string {
@@ -153,8 +197,8 @@ func TestE2EExit(t *testing.T) {
 	if !strings.Contains(out, "HCC-GUEST-UP") {
 		t.Errorf("guest never came up:\n%s", out)
 	}
-	if !strings.Contains(out, "HCC-GUEST-NET lo ") {
-		t.Errorf("guest must see only the loopback interface:\n%s", out)
+	if ifs := guestInterfaces(out); len(ifs) != 1 || ifs[0] != "lo" {
+		t.Errorf("guest must see only the loopback interface, saw %v:\n%s", ifs, out)
 	}
 	t.Logf("exited after %s", res.Duration)
 	e.assertNoTrace(t, id)
@@ -250,4 +294,15 @@ func TestE2EConcurrent(t *testing.T) {
 	for _, id := range ids {
 		e.assertNoTrace(t, id)
 	}
+}
+
+// guestInterfaces parses the guest's "HCC-GUEST-NET [interfaces:] ..." line.
+func guestInterfaces(console string) []string {
+	for _, line := range strings.Split(console, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "HCC-GUEST-NET"); ok {
+			rest = strings.TrimPrefix(strings.TrimSpace(rest), "interfaces:")
+			return strings.Fields(rest)
+		}
+	}
+	return nil
 }

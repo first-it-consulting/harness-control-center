@@ -83,7 +83,7 @@ func startDaemon(t *testing.T) *testDaemon {
 		t.Fatal(err)
 	}
 	sock := filepath.Join(dir, "run", "runner.sock")
-	l, err := Listen(sock)
+	l, err := Listen(sock, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestListenRefusesNonSocket(t *testing.T) {
 	if err := os.WriteFile(p, []byte("important"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Listen(p); err == nil {
+	if _, err := Listen(p, ""); err == nil {
 		t.Fatal("Listen replaced a regular file")
 	}
 	if data, _ := os.ReadFile(p); string(data) != "important" {

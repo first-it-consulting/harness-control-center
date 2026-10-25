@@ -23,6 +23,20 @@ builds:
     # Reproducible builds: timestamps come from the commit, not the clock.
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+  # The runner's only root-side code; Linux only.
+  - id: hcc-helper
+    main: ./cmd/hcc-helper
+    binary: hcc-helper
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
 archives:
   - formats: [tar.gz]
     format_overrides:
