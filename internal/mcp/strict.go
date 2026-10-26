@@ -7,8 +7,36 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
+
+// foldKey folds a key exactly as encoding/json does when it matches keys
+// to fields (ASCII upper case; other runes to the smallest rune of their
+// case-folding orbit, so that "ſ" is "S" and the Kelvin sign is "K").
+// Two keys that fold alike are ones Go's decoder could confuse.
+func foldKey(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r < utf8.RuneSelf:
+			if 'a' <= r && r <= 'z' {
+				r -= 'a' - 'A'
+			}
+		default:
+			for {
+				r2 := unicode.SimpleFold(r)
+				if r2 <= r {
+					r = r2
+					break
+				}
+				r = r2
+			}
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 // maxDepth bounds the nesting StrictJSON accepts.
 const maxDepth = 64
@@ -65,7 +93,7 @@ func StrictJSON(b []byte) error {
 			if !ok {
 				return errors.New("not valid JSON: an object key that is not a string")
 			}
-			k := strings.ToLower(key)
+			k := foldKey(key)
 			if top.keys[k] {
 				return fmt.Errorf("the key %q appears twice (perhaps in another case)", key)
 			}

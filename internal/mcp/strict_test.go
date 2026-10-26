@@ -21,6 +21,8 @@ func TestStrictJSON(t *testing.T) {
 		`{"a":{"x":1,"x":2}}`,
 		`[{"k":1,"K":2}]`,
 		`{"name":"a","name":"b"}`,
+		`{"params":{"name":"delete_note"},"paramſ":{"name":"list_notes"}}`, // ſ folds to s in Go's decoder
+		`{"kind":1,"\u212aind":2}`, // the Kelvin sign folds to k
 		"\xef\xbb\xbf{}",
 		"{\"a\":\"\xff\"}",
 		`{} {}`,

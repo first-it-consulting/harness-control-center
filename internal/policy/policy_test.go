@@ -400,7 +400,9 @@ func TestApprovalVocabulary(t *testing.T) {
 			t.Errorf("A2A pattern %q accepted = %v", p, got)
 		}
 	}
-	for m, want := range map[string]string{"message/send": "a2a.rev.send", "message/stream": "a2a.rev.send", "tasks/cancel": "a2a.rev.cancel", "tasks/get": "a2a.rev.read"} {
+	for m, want := range map[string]string{"message/send": "a2a.rev.send", "message/stream": "a2a.rev.send", "tasks/cancel": "a2a.rev.cancel",
+		"tasks/get": "a2a.rev.read", "tasks/send": "a2a.rev.send", "tasks/sendSubscribe": "a2a.rev.send",
+		"tasks/pushNotificationConfig/set": "a2a.rev.send", "something/new": "a2a.rev.send"} {
 		if got := A2AAction("rev", m); got != want {
 			t.Errorf("A2AAction(%s) = %s", m, got)
 		}

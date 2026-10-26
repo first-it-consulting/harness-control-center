@@ -69,15 +69,23 @@ func enforceableA2A(p string, s *spec.Spec) bool {
 	return len(parts) < 3 || slices.Contains(a2aActions, parts[2])
 }
 
-// A2AAction is the approval action of calling method on an A2A agent.
+// a2aReadMethods are the A2A methods known to only read.
+var a2aReadMethods = []string{
+	"tasks/get", "tasks/pushNotificationConfig/get", "tasks/pushNotificationConfig/list",
+	"agent/getAuthenticatedExtendedCard",
+}
+
+// A2AAction is the approval action of calling method on an A2A agent. A
+// method not known to only read or to cancel counts as sending, the
+// strictest: so do older and future methods nobody listed here.
 func A2AAction(agent, method string) string {
-	switch method {
-	case "message/send", "message/stream":
-		return "a2a." + agent + ".send"
-	case "tasks/cancel":
+	switch {
+	case method == "tasks/cancel":
 		return "a2a." + agent + ".cancel"
-	default:
+	case slices.Contains(a2aReadMethods, method):
 		return "a2a." + agent + ".read"
+	default:
+		return "a2a." + agent + ".send"
 	}
 }
 

@@ -7,14 +7,30 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
+
+	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
 
 // Pack makes a bundle of a plugin directory: its plain files and
 // directories. Anything else (a symlink, a device) is an error rather
 // than silently left out, so what is reviewed is what is installed.
+//
+// Windows keeps no executable bits: there, the manifest's command (if it
+// is a file of the plugin) is marked executable, and nothing else.
 func Pack(dir string) ([]byte, error) {
+	execOnWindows := ""
+	if runtime.GOOS == "windows" {
+		if m, err := os.ReadFile(filepath.Join(dir, ManifestName)); err == nil { //nolint:gosec // the user's plugin directory
+			if p, err := spec.ParsePlugin(m); err == nil && strings.Contains(p.Spec.Command[0], "/") {
+				execOnWindows = path.Clean(p.Spec.Command[0])
+			}
+		}
+	}
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	var total int64
@@ -44,7 +60,7 @@ func Pack(dir string) ([]byte, error) {
 				return fmt.Errorf("more than %d bytes", MaxBundleBytes)
 			}
 			mode := int64(0o644)
-			if info.Mode()&0o111 != 0 {
+			if info.Mode()&0o111 != 0 || name == execOnWindows {
 				mode = 0o755
 			}
 			if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: name, Size: info.Size(), Mode: mode, ModTime: epoch}); err != nil {
