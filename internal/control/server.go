@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -36,6 +37,7 @@ var webFS embed.FS
 //	POST   /api/logout
 //	GET    /api/runners                          configured runners and their status
 //	POST   /api/runners                          add a runner
+//	GET    /api/ssh-hosts                        host aliases from ~/.ssh/config, to suggest
 //	PUT    /api/runners/{runner}                 change how a runner is reached, or rename it
 //	DELETE /api/runners/{runner}                 remove a runner (from this list only)
 //	POST   /api/runners/{runner}/kill            kill switch on one runner
@@ -72,6 +74,8 @@ type Server struct {
 	auth    *auth
 	log     *slog.Logger
 	handler http.Handler
+	// sshConfig is the user's ssh configuration, read for host suggestions.
+	sshConfig string
 
 	mu      sync.Mutex
 	cfg     *Config
@@ -86,6 +90,9 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{cfgPath: cfgPath, lib: NewLibrary(libDir), auth: newAuth(), log: log, cfg: cfg, clients: map[RunnerRef]*runnerd.Client{}}
+	if home, err := os.UserHomeDir(); err == nil {
+		s.sshConfig = filepath.Join(home, ".ssh", "config")
+	}
 	mux := http.NewServeMux()
 	static, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -98,6 +105,7 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /api/runners", s.runners)
 	mux.HandleFunc("POST /api/runners", s.addRunner)
 	mux.HandleFunc("PUT /api/runners/{runner}", s.updateRunner)
+	mux.HandleFunc("GET /api/ssh-hosts", s.sshHosts)
 	mux.HandleFunc("DELETE /api/runners/{runner}", s.removeRunner)
 	mux.HandleFunc("POST /api/runners/{runner}/kill", s.killRunner)
 	mux.HandleFunc("POST /api/runners/{runner}/resume", s.resumeRunner)
@@ -335,6 +343,14 @@ func (s *Server) addRunner(w http.ResponseWriter, r *http.Request) {
 	s.cfg = next
 	s.log.Info("runner added", "runner", ref.Name, "ssh", ref.SSH, "socket", ref.Socket)
 	writeJSON(w, http.StatusCreated, ref)
+}
+
+func (s *Server) sshHosts(w http.ResponseWriter, _ *http.Request) {
+	hosts := []string{}
+	if s.sshConfig != "" {
+		hosts = append(hosts, SSHHosts(s.sshConfig)...)
+	}
+	writeJSON(w, http.StatusOK, map[string][]string{"hosts": hosts})
 }
 
 // updateRunner replaces a runner's entry, keeping its place in the list.

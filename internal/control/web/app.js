@@ -588,9 +588,13 @@ function scheduleRow(s) {
 function runnerFields(ref) {
   const name = h("input", { required: true, placeholder: "hcc-dev", pattern: "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?" });
   const kind = h("select", {}, h("option", { value: "ssh" }, "over ssh"), h("option", { value: "socket" }, "on this computer"));
-  const where = h("input", { required: true });
+  // A combo box: pick a host from your ssh configuration, or type any.
+  const listId = "where-" + Math.random().toString(36).slice(2);
+  const where = h("input", { required: true, list: listId, autocomplete: "off" });
+  const options = h("datalist", { id: listId });
   const hint = () => {
     where.placeholder = kind.value === "ssh" ? "ssh host, e.g. hcc-dev" : "/run/hcc/runner.sock";
+    set(options, ...(kind.value === "ssh" ? sshHosts : ["/run/hcc/runner.sock"]).map((v) => h("option", { value: v })));
   };
   kind.addEventListener("change", hint);
   if (ref) {
@@ -606,10 +610,18 @@ function runnerFields(ref) {
     if (kind.value === "ssh" && ref && ref.remoteSocket) out.remoteSocket = ref.remoteSocket;
     return out;
   };
-  return { labels: [h("label", {}, "Name", name), h("label", {}, "Reached", kind), h("label", {}, "Where", where)], read };
+  return { labels: [h("label", {}, "Name", name), h("label", {}, "Reached", kind), h("label", {}, "Where", where, options)], read };
 }
 
+// Host aliases from ~/.ssh/config, loaded with the runners page.
+let sshHosts = [];
+
 async function runnersView() {
+  try {
+    sshHosts = (await api("GET", "/api/ssh-hosts")).hosts;
+  } catch {
+    sshHosts = []; // only suggestions
+  }
   const list = h("div", { class: "grid wide" });
   const fields = runnerFields();
   const form = h("form", { class: "inline", onsubmit: async (ev) => {
