@@ -584,7 +584,7 @@ function scheduleRow(s) {
 // --- runners ---
 
 async function runnersView() {
-  const list = h("div", { class: "grid" });
+  const list = h("div", { class: "grid wide" });
   const name = h("input", { required: true, placeholder: "hcc-dev", pattern: "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?" });
   const kind = h("select", {}, h("option", { value: "ssh" }, "over ssh"), h("option", { value: "socket" }, "on this computer"));
   const where = h("input", { required: true, placeholder: "ssh host, e.g. hcc-dev" });
@@ -644,15 +644,15 @@ function runnerCard(r) {
     st && h("dl", { class: "facts" },
       h("dt", {}, "Target"), h("dd", {}, st.target),
       h("dt", {}, "Jobs"), h("dd", {}, st.running + " running, " + st.queued + " queued (at most " + st.maxConcurrent + " at once)"),
-      h("dt", {}, "Schedules"), h("dd", {}, String(st.schedules) + (st.contactTimeout
-        ? " (paused if nobody contacts this runner for " + st.contactTimeout + "; this Control Center does every 5 minutes while it runs)"
-        : "")),
+      h("dt", {}, "Schedules"), h("dd", {}, String(st.schedules), st.contactTimeout && h("span", { class: "muted note" },
+        "Paused if nobody contacts this runner for " + st.contactTimeout + "; this Control Center does every 5 minutes while it runs.")),
       h("dt", {}, "Last contact"), h("dd", {}, fmtTime(st.lastContact)),
       h("dt", {}, "Plugins"), h("dd", {}, (r.plugins || []).length === 0 ? "none" : h("ul", { class: "explain" },
         r.plugins.map((p) => h("li", {}, p.name + " " + p.version + " (" + p.type + ", risk " + p.risk + ")",
           p.status && p.status.lastResult ? " – last run " + fmtTime(p.status.lastRun) + ": " + p.status.lastResult : "")))),
       h("dt", {}, "Images"), h("dd", {}, st.images.join(", ")),
-      h("dt", {}, "Tools"), h("dd", {}, Object.entries(st.tools || {}).map(([img, list]) => img + ": " + list.join(", ")).join("; ") || "none"),
+      h("dt", {}, "Tools"), h("dd", {}, Object.keys(st.tools || {}).length === 0 ? "none" : Object.entries(st.tools).map(([img, list]) =>
+        h("div", {}, h("span", { class: "muted" }, img), h("ul", { class: "chips" }, list.map((t) => h("li", {}, t)))))),
       h("dt", {}, "Version"), h("dd", {}, st.version || "–")),
     r.error && h("div", { class: "error-box" }, r.error),
     h("div", { class: "actions" },
