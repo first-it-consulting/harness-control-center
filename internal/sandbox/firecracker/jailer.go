@@ -24,6 +24,8 @@ type StartRequest struct {
 	// DiskMiB sizes the guest's writable disk (0: none). The helper
 	// creates it in the jail, owned by the slot's identity.
 	DiskMiB int
+	// Tools attaches the image's tool catalog (read-only).
+	Tools bool
 }
 
 // JailerConfig holds the root-side settings for starting VMs.

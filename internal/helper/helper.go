@@ -80,6 +80,8 @@ type Config struct {
 // Image is one bootable image (root-side configuration).
 type Image struct {
 	Kernel, RootFS string
+	// Tools is the image's tool catalog drive (optional, ADR-0010).
+	Tools string
 }
 
 // Size caps for staged files. Root copies them, so without a cap a
@@ -157,7 +159,9 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 	id := fs.String("id", "", "")
 	var slot, cpus, memory, disk *int
 	var image *string
+	var tools *bool
 	if op == "start" {
+		tools = fs.Bool("tools", false, "")
 		image = fs.String("image", "", "")
 		slot = fs.Int("slot", -1, "")
 		cpus = fs.Int("cpus", 0, "")
@@ -186,7 +190,7 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 
 	switch op {
 	case "start":
-		req := firecracker.StartRequest{ID: *id, Slot: *slot, CPUs: *cpus, MemoryMiB: *memory, DiskMiB: *disk}
+		req := firecracker.StartRequest{ID: *id, Slot: *slot, CPUs: *cpus, MemoryMiB: *memory, DiskMiB: *disk, Tools: *tools}
 		argv, err := cfg.Jailer.Argv(req)
 		if err != nil {
 			return err
@@ -194,6 +198,9 @@ func run(cfg Config, args []string, callerUID int, d Deps, stdout io.Writer) err
 		img, ok := cfg.Images[*image]
 		if !ok {
 			return fmt.Errorf("unknown image %q", *image)
+		}
+		if req.Tools && img.Tools == "" {
+			return fmt.Errorf("image %q has no tool catalog", *image)
 		}
 		if err := buildJail(cfg, d, base, req, img); err != nil {
 			return err
@@ -321,7 +328,11 @@ func buildJail(cfg Config, d Deps, base string, req firecracker.StartRequest, im
 	}
 	// The image must be root's all the way up: the runner chooses only
 	// its name.
-	for _, p := range []string{img.Kernel, img.RootFS} {
+	images := map[string]string{"vmlinux": img.Kernel, "rootfs.ext4": img.RootFS}
+	if req.Tools {
+		images["tools.ext4"] = img.Tools
+	}
+	for _, p := range images {
 		if err := checkRootOwnedFile(p, cfg.RootUID, cfg.TrustAnchor); err != nil {
 			return fmt.Errorf("image: %w", err)
 		}
@@ -361,7 +372,7 @@ func buildJail(cfg Config, d Deps, base string, req firecracker.StartRequest, im
 			return err
 		}
 	}
-	for dst, src := range map[string]string{"vmlinux": img.Kernel, "rootfs.ext4": img.RootFS} {
+	for dst, src := range images {
 		if err := linkOrCopy(d, base, src, filepath.Join(root, dst)); err != nil {
 			return fmt.Errorf("image %s: %w", dst, err)
 		}

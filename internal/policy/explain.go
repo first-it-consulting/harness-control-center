@@ -149,7 +149,8 @@ func (e *Engine) Explain() []string {
 	}
 
 	if len(p.Tools.Install) > 0 {
-		lines = append(lines, "May install: "+strings.Join(p.Tools.Install, ", ")+".")
+		lines = append(lines, "Gets these tools installed before it starts: "+strings.Join(p.Tools.Install, ", ")+
+			". They come from the runner's own catalog of signed packages. The agent cannot install system packages itself; what it can download is limited by its network access.")
 	}
 
 	if p.Subagents.Max == 0 {

@@ -75,7 +75,11 @@ func setup() (helper.Config, int, error) {
 	}
 	images := make(map[string]helper.Image, len(c.Images))
 	for name, img := range c.Images {
-		images[name] = helper.Image{Kernel: img.Kernel, RootFS: img.RootFS}
+		hi := helper.Image{Kernel: img.Kernel, RootFS: img.RootFS}
+		if img.Tools != nil {
+			hi.Tools = img.Tools.Drive
+		}
+		images[name] = hi
 	}
 	return helper.Config{
 		Jailer: firecracker.JailerConfig{

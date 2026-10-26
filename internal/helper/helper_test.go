@@ -680,6 +680,47 @@ func TestStartCreatesSparseDiskForTheSlot(t *testing.T) {
 	}
 }
 
+func TestStartLinksTheToolCatalog(t *testing.T) {
+	e := newEnv(t)
+	img := e.cfg.Images["base"]
+	img.Tools = filepath.Join(filepath.Dir(img.RootFS), "tools.ext4")
+	if err := os.WriteFile(img.Tools, []byte("catalog"), 0o644); err != nil { //nolint:gosec // images are world-readable, root-writable
+		t.Fatal(err)
+	}
+	_ = os.Chmod(img.Tools, 0o644) //nolint:gosec // as above
+	e.cfg.Images["base"] = img
+	e.stageJob1(t)
+	if code, stderr := e.call(append(e.start, "--tools")...); code != 0 {
+		t.Fatalf("start: %s", stderr)
+	}
+	got, err := os.ReadFile(filepath.Join(firecracker.JailDir(e.base, "job-1"), "root", "tools.ext4"))
+	if err != nil || string(got) != "catalog" {
+		t.Errorf("tools.ext4 = %q, %v", got, err)
+	}
+}
+
+func TestToolsNeedACatalog(t *testing.T) {
+	e := newEnv(t)
+	e.stageJob1(t)
+	if code, stderr := e.call(append(e.start, "--tools")...); code == 0 || !strings.Contains(stderr, "no tool catalog") {
+		t.Fatalf("start with --tools and no catalog: %d %s", code, stderr)
+	}
+	// Not root's: refused, like an image.
+	img := e.cfg.Images["base"]
+	img.Tools = filepath.Join(filepath.Dir(img.RootFS), "tools.ext4")
+	if err := os.WriteFile(img.Tools, []byte("catalog"), 0o666); err != nil { //nolint:gosec // the unsafe mode is the point
+		t.Fatal(err)
+	}
+	_ = os.Chmod(img.Tools, 0o666) //nolint:gosec // as above
+	e.cfg.Images["base"] = img
+	if code, _ := e.call(append(e.start, "--tools")...); code == 0 {
+		t.Error("start accepted a world-writable catalog")
+	}
+	if _, err := os.Stat(firecracker.JailDir(e.base, "job-1")); !os.IsNotExist(err) {
+		t.Error("jail left behind")
+	}
+}
+
 func TestStartWithoutDiskCreatesNone(t *testing.T) {
 	e := newEnv(t)
 	e.stageJob1(t)

@@ -33,6 +33,49 @@ hcc_network() {
 	export HTTPS_PROXY="http://$HCC_PROXY" https_proxy="http://$HCC_PROXY" HTTP_PROXY="http://$HCC_PROXY" http_proxy="http://$HCC_PROXY"
 }
 
+# Installs the task's tools (ADR-0010) before the agent starts, as root,
+# from the read-only tool catalog drive (hcc.tools) onto memory overlays
+# over the read-only system directories (nosuid: no package can hand the
+# agent root through a setuid binary). apk verifies every package's
+# signature against the image's keys, and there is no repository to
+# fetch anything else from. The drive is unmounted afterwards; its device
+# is root's, so the agent cannot read the catalog. Needs jq. Returns
+# non-zero if anything failed: then nothing may run.
+hcc_tools() {
+	task=$1
+	files=$(echo "$task" | jq -r '.tools.files[]? // empty') || return 1
+	[ -n "$files" ] || return 0
+	dev=$(hcc_arg hcc.tools)
+	case "$dev" in
+	vd[a-z]) ;;
+	*) echo "HCC-TOOLS-ERROR no tool catalog attached"; return 1 ;;
+	esac
+	set --
+	for f in $files; do
+		case "$f" in
+		*[!A-Za-z0-9._+-]*) echo "HCC-TOOLS-ERROR invalid file name"; return 1 ;;
+		[A-Za-z0-9]*.apk) set -- "$@" "/tmp/hcc-tools/$f" ;;
+		*) echo "HCC-TOOLS-ERROR invalid file name"; return 1 ;;
+		esac
+	done
+	mkdir -m 0700 /tmp/hcc-ov /tmp/hcc-tools || return 1
+	mount -t tmpfs -o mode=0700,size=50% tmpfs /tmp/hcc-ov || return 1
+	for d in bin sbin lib usr etc var; do
+		mkdir -p "/tmp/hcc-ov/$d/upper" "/tmp/hcc-ov/$d/work" &&
+			mount -t overlay overlay -o "nosuid,nodev,lowerdir=/$d,upperdir=/tmp/hcc-ov/$d/upper,workdir=/tmp/hcc-ov/$d/work" "/$d" ||
+			{ echo "HCC-TOOLS-ERROR cannot make /$d writable"; return 1; }
+	done
+	mount -t ext4 -o ro,nodev,nosuid,noexec "/dev/$dev" /tmp/hcc-tools || { echo "HCC-TOOLS-ERROR cannot mount the catalog"; return 1; }
+	apk add --no-network --no-cache --quiet --repositories-file /dev/null "$@" >/tmp/hcc-apk.log 2>&1
+	rc=$?
+	umount /tmp/hcc-tools && rmdir /tmp/hcc-tools || { echo "HCC-TOOLS-ERROR cannot unmount the catalog"; return 1; }
+	if [ "$rc" -ne 0 ]; then
+		echo "HCC-TOOLS-ERROR apk failed: $(tail -n 3 /tmp/hcc-apk.log | tr -d '\000-\037')"
+		return 1
+	fi
+	echo "HCC-TOOLS installed: $(echo "$task" | jq -r '.tools.packages | join(" ")')"
+}
+
 # The task (JSON, read-only drive vdb), zero padding removed.
 hcc_task() { [ -b /dev/vdb ] && tr -d '\000' </dev/vdb; }
 

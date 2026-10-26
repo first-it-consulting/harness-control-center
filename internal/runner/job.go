@@ -74,6 +74,9 @@ type Status struct {
 	Killed    bool   `json:"killed"`
 	Schedules int    `json:"schedules"`
 	Version   string `json:"version,omitempty"`
+	// Tools are the tools each image offers ("name@version"), for images
+	// with a tool catalog.
+	Tools map[string][]string `json:"tools,omitempty"`
 }
 
 // Store persists jobs. Save is called with the runner's lock held, so it

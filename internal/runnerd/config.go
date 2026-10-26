@@ -21,6 +21,7 @@ import (
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox/firecracker"
+	"github.com/first-it-consulting/harness-control-center/internal/tools"
 )
 
 // DefaultSocket is where the daemon listens unless configured otherwise.
@@ -145,10 +146,41 @@ type FirecrackerConfig struct {
 	GID int `yaml:"gid"`
 }
 
+// Catalogs loads the images' tool catalogs, by image name.
+func (c *Config) Catalogs() (map[string]*tools.Catalog, error) {
+	out := map[string]*tools.Catalog{}
+	for name, img := range c.Images {
+		if img.Tools == nil {
+			continue
+		}
+		f, err := os.Open(img.Tools.Packages)
+		if err != nil {
+			return nil, fmt.Errorf("runnerd: image %s: %w", name, err)
+		}
+		cat, err := tools.Parse(f)
+		_ = f.Close() // read-only
+		if err != nil {
+			return nil, fmt.Errorf("runnerd: image %s: %w", name, err)
+		}
+		out[name] = cat
+	}
+	return out, nil
+}
+
 // ImageConfig is one bootable image.
 type ImageConfig struct {
 	Kernel string `yaml:"kernel"`
 	RootFS string `yaml:"rootfs"`
+	// Tools, if set, is the image's tool catalog (ADR-0010).
+	Tools *ToolsConfig `yaml:"tools"`
+}
+
+// ToolsConfig is an image's tool catalog, built by install-runner.sh.
+type ToolsConfig struct {
+	// Drive is the read-only ext4 image holding the package files.
+	Drive string `yaml:"drive"`
+	// Packages is the package list (see internal/tools).
+	Packages string `yaml:"packages"`
 }
 
 var (
@@ -243,7 +275,11 @@ func (c *Config) Validate() error {
 		if !imageNameRe.MatchString(name) {
 			add("invalid image name %q", name)
 		}
-		for what, p := range map[string]string{"kernel": img.Kernel, "rootfs": img.RootFS} {
+		files := map[string]string{"kernel": img.Kernel, "rootfs": img.RootFS}
+		if img.Tools != nil {
+			files["tools.drive"], files["tools.packages"] = img.Tools.Drive, img.Tools.Packages
+		}
+		for what, p := range files {
 			if !cleanAbs(p) || !within(c.Firecracker.ImageRoot, p) {
 				add("images.%s.%s must be an absolute path inside firecracker.imageRoot, got %q", name, what, p)
 			}
@@ -297,6 +333,16 @@ func (c *Config) CheckFiles() error {
 	for _, p := range []string{c.Firecracker.Helper, c.Firecracker.Jailer, c.Firecracker.Firecracker} {
 		if err := checkRootOwned(p); err != nil {
 			errs = append(errs, err)
+		}
+	}
+	// What an image offers as tools is root's decision.
+	for _, img := range c.Images {
+		if img.Tools != nil {
+			for _, p := range []string{img.Tools.Drive, img.Tools.Packages} {
+				if err := checkRootOwned(p); err != nil {
+					errs = append(errs, err)
+				}
+			}
 		}
 	}
 	// The runner must not be able to change where secrets go, and nobody

@@ -4,9 +4,10 @@
 //
 // It boots the harness's image and treats a clean guest shutdown as
 // success. Network access and credentials go through a per-job egress
-// proxy (Config.Egress). Agent runtimes and schedules are not wired in
-// yet: harnesses that need them are rejected (fail closed) rather than
-// run with different behaviour than the user approved.
+// proxy (Config.Egress); tools come from the image's catalog
+// (Config.Tools). Harnesses that need something the runner cannot
+// enforce are rejected (fail closed) rather than run with different
+// behaviour than the user approved.
 package runner
 
 import (
@@ -29,6 +30,7 @@ import (
 	"github.com/first-it-consulting/harness-control-center/internal/results"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
+	"github.com/first-it-consulting/harness-control-center/internal/tools"
 )
 
 // Errors returned by the runner.
@@ -51,6 +53,9 @@ type Config struct {
 	// Images are the spec.sandbox.image names the provider can boot.
 	// Unknown names are rejected.
 	Images []string
+	// Tools are the tool catalogs by image name (ADR-0010). A harness may
+	// only install tools its image's catalog offers.
+	Tools map[string]*tools.Catalog
 	// MaxConcurrent bounds running jobs (default 1).
 	MaxConcurrent int
 	// Console returns where a job's console output goes (default:
@@ -271,10 +276,29 @@ func (r *Runner) check(h *spec.Harness) error {
 	if !slices.Contains(r.cfg.Images, h.Spec.Sandbox.Image) {
 		return fmt.Errorf("runner: unknown image %q", h.Spec.Sandbox.Image)
 	}
+	if _, _, err := r.resolveTools(h); err != nil {
+		return err
+	}
 	if r.cfg.Results != nil && h.Spec.Sandbox.DiskMiB > r.cfg.MaxDiskMiB {
 		return fmt.Errorf("runner: spec.sandbox.diskMiB %d exceeds this runner's limit of %d", h.Spec.Sandbox.DiskMiB, r.cfg.MaxDiskMiB)
 	}
 	return nil
+}
+
+// resolveTools returns the packages h installs and their files.
+func (r *Runner) resolveTools(h *spec.Harness) (pkgs, files []string, err error) {
+	grants := h.Spec.Permissions.Tools.Install
+	if len(grants) == 0 {
+		return nil, nil, nil
+	}
+	cat := r.cfg.Tools[h.Spec.Sandbox.Image]
+	if cat == nil {
+		return nil, nil, fmt.Errorf("runner: image %q offers no tools on this runner", h.Spec.Sandbox.Image)
+	}
+	if pkgs, files, err = cat.Resolve(grants); err != nil {
+		return nil, nil, fmt.Errorf("runner: %w", err)
+	}
+	return pkgs, files, nil
 }
 
 func needsNetwork(h *spec.Harness) bool {
@@ -292,7 +316,15 @@ func (r *Runner) enqueue(h *spec.Harness, scheduleID string, loop *TaskLoop) (st
 	if r.cfg.Results != nil {
 		diskMiB = h.Spec.Sandbox.DiskMiB
 	}
-	task, err := taskFor(h, loop)
+	pkgs, files, err := r.resolveTools(h)
+	if err != nil {
+		return "", err
+	}
+	var taskTools *TaskTools
+	if len(files) > 0 {
+		taskTools = &TaskTools{Packages: pkgs, Files: files}
+	}
+	task, err := taskFor(h, loop, taskTools)
 	if err != nil {
 		return "", err
 	}
@@ -340,6 +372,7 @@ func (r *Runner) enqueue(h *spec.Harness, scheduleID string, loop *TaskLoop) (st
 			Timeout:   h.Spec.Sandbox.Timeout.Duration,
 			Network:   network,
 			DiskMiB:   diskMiB,
+			Tools:     taskTools != nil,
 		},
 		meter: meter,
 	}
@@ -569,9 +602,18 @@ func (r *Runner) Status() Status {
 	defer r.mu.Unlock()
 	images := slices.Clone(r.cfg.Images)
 	slices.Sort(images)
+	var offered map[string][]string
+	for name, cat := range r.cfg.Tools {
+		if cat != nil && slices.Contains(images, name) {
+			if offered == nil {
+				offered = map[string][]string{}
+			}
+			offered[name] = cat.Packages()
+		}
+	}
 	return Status{
 		Target: r.cfg.Target, Images: images, MaxConcurrent: r.cfg.MaxConcurrent, MaxDiskMiB: r.cfg.MaxDiskMiB,
-		Running: r.running, Queued: len(r.queue), Killed: r.killed, Schedules: len(r.schedules),
+		Running: r.running, Queued: len(r.queue), Killed: r.killed, Schedules: len(r.schedules), Tools: offered,
 	}
 }
 
@@ -709,9 +751,6 @@ func checkSupported(h *spec.Harness) error {
 	notYet := func(what string) {
 		errs = append(errs, fmt.Errorf("%s is not supported by this runner yet", what))
 	}
-	if len(p.Tools.Install) > 0 {
-		notYet("installing tools")
-	}
 	if p.Subagents.Max > 0 {
 		notYet("subagents")
 	}
@@ -795,6 +834,15 @@ type Task struct {
 	Prompt  string     `json:"prompt"`
 	Model   *TaskModel `json:"model,omitempty"`
 	Loop    *TaskLoop  `json:"loop,omitempty"`
+	Tools   *TaskTools `json:"tools,omitempty"`
+}
+
+// TaskTools tells the guest's init what to install from the tool
+// catalog drive before the agent starts: Files, all of them from the
+// catalog (it checks their names again).
+type TaskTools struct {
+	Packages []string `json:"packages"`
+	Files    []string `json:"files"`
 }
 
 // TaskLoop tells a looping harness's runtime where it is. The runtime
@@ -810,8 +858,8 @@ type TaskModel struct {
 	Endpoint string `json:"endpoint"`
 }
 
-func taskFor(h *spec.Harness, loop *TaskLoop) ([]byte, error) {
-	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt, Loop: loop}
+func taskFor(h *spec.Harness, loop *TaskLoop, tools *TaskTools) ([]byte, error) {
+	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt, Loop: loop, Tools: tools}
 	if m := h.Spec.Model; m != nil {
 		t.Model = &TaskModel{Name: m.Name, Endpoint: m.Endpoint}
 	}

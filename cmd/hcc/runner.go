@@ -97,11 +97,16 @@ func serve(configPath string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	catalogs, err := cfg.Catalogs()
+	if err != nil {
+		return err
+	}
 	store := runnerd.NewFileStore(cfg.StateDir, log)
 	rcfg := runner.Config{
 		Provider:      provider,
 		Target:        cfg.Target,
 		Images:        images,
+		Tools:         catalogs,
 		MaxConcurrent: cfg.MaxConcurrent,
 		Console:       runnerd.ConsoleFunc(cfg.StateDir, log),
 		Pricing:       cfg.Pricing,

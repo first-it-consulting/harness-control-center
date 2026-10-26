@@ -40,15 +40,17 @@ Risk: high
   because it can reach the internet
   because it can act with your credentials
   because it combines network access with credentials
+  because it runs again and again without anyone watching
 
 • Runs the claude-code agent on server homelab-01.
-• Stops after 2h0m0s per run, or once it has spent $5.00 or 2,000,000 tokens.
-• Starts automatically on the schedule "0 2 * * *".
+• Stops after 2h0m0s per run, or once its model has used 2,000,000 tokens (or cost $5.00, for models the runner has a price for).
+• When it finishes, it can hand back up to 4,096 MiB of files (plain files and folders only; nothing else is kept).
+• Starts automatically on the cron schedule "0 2 * * *" (times in UTC), without anyone watching, until you pause or delete the schedule. A run is skipped while the previous one is still going. Every run has the limits above.
 • Can connect only to: gitlab.com, registry.npmjs.org.
 • Can act as you using: gitlab-my-team. The agent never sees these secrets.
-• May install: node@22, git.
+• Gets these tools installed before it starts: nodejs, npm. They come from the runner's own catalog of signed packages. The agent cannot install system packages itself; what it can download is limited by its network access.
 • Cannot start other agents.
-• Asks you before: git.push.default-branch, delete.*.
+• Asks you before: git.push, http.delete. To catch these, every connection it makes is inspected (only HTTPS works then). While it waits, the job pauses but its time limit keeps running; if nobody decides in time (30 minutes by default), the action is refused.
 ```
 
 ## Run it on your own server

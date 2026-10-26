@@ -14,6 +14,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -40,6 +41,7 @@ type e2eEnv struct {
 	base, staging string
 	provider      *firecracker.Provider
 	network       *firecracker.NetworkConfig
+	cfg           *runnerd.Config
 }
 
 func setupE2E(t *testing.T) *e2eEnv {
@@ -83,7 +85,7 @@ func setupHelperE2E(t *testing.T, cfgPath string) *e2eEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &e2eEnv{base: cfg.Firecracker.ChrootBase, staging: cfg.Firecracker.StagingDir, provider: p, network: netCfg}
+	return &e2eEnv{base: cfg.Firecracker.ChrootBase, staging: cfg.Firecracker.StagingDir, provider: p, network: netCfg, cfg: cfg}
 }
 
 func (e *e2eEnv) spec(id string, timeout time.Duration, bootArgs ...string) sandbox.Spec {
@@ -387,6 +389,77 @@ func TestE2EResults(t *testing.T) {
 	}
 	if sum.Files != 1 || len(sum.Skipped) != 2 {
 		t.Errorf("summary = %+v (want 1 file; the link and the fifo skipped)", sum)
+	}
+	e.assertNoTrace(t, id)
+}
+
+// TestE2ETools installs a tool from the claude-code image's catalog: init
+// installs it offline, before the agent, and reports it. The agent then
+// starts (and is stopped here: it has no model to talk to).
+func TestE2ETools(t *testing.T) {
+	e := setupE2E(t)
+	cats, err := e.cfg.Catalogs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat := cats["claude-code"]
+	if cat == nil {
+		t.Skip("the claude-code image has no tool catalog")
+	}
+	pkgs, files, err := cat.Resolve([]string{"make"})
+	if err != nil {
+		t.Skipf("catalog offers no make: %v", err)
+	}
+	task, err := json.Marshal(map[string]any{
+		"runtime": "claude-code", "prompt": "hi",
+		"tools": map[string]any{"packages": pkgs, "files": files},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := fmt.Sprintf("e2e-tools-%d", time.Now().UnixNano())
+	s := sandbox.Spec{ID: id, Image: "claude-code", CPUs: 1, MemoryMiB: 1024, Timeout: 2 * time.Minute, Task: task, Tools: true}
+	var c console
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := e.provider.Run(ctx, s, &c); done <- err }()
+	ok := c.waitFor("HCC-TOOLS installed: make", 90*time.Second)
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
+	if !ok {
+		t.Fatalf("make was not installed:\n%s", c.String())
+	}
+	if strings.Contains(c.String(), "HCC-TOOLS-ERROR") {
+		t.Errorf("tool errors:\n%s", c.String())
+	}
+	e.assertNoTrace(t, id)
+}
+
+// TestE2EToolsUnknownFile: a file whose name the runner did not
+// resolve is refused by init, and nothing starts.
+func TestE2EToolsUnknownFile(t *testing.T) {
+	e := setupE2E(t)
+	cats, err := e.cfg.Catalogs()
+	if err != nil || cats["claude-code"] == nil {
+		t.Skip("the claude-code image has no tool catalog")
+	}
+	task, _ := json.Marshal(map[string]any{
+		"runtime": "claude-code", "prompt": "hi",
+		"tools": map[string]any{"packages": []string{"x"}, "files": []string{"../../etc/shadow"}},
+	})
+	id := fmt.Sprintf("e2e-tools-bad-%d", time.Now().UnixNano())
+	s := sandbox.Spec{ID: id, Image: "claude-code", CPUs: 1, MemoryMiB: 512, Timeout: time.Minute, Task: task, Tools: true}
+	var c console
+	res, err := e.provider.Run(context.Background(), s, &c)
+	if err != nil || res.Outcome != sandbox.OutcomeExited {
+		t.Fatalf("Run = %v, %v\n%s", res.Outcome, err, c.String())
+	}
+	out := c.String()
+	if !strings.Contains(out, "HCC-TOOLS-ERROR invalid file name") || !strings.Contains(out, "HCC-RESULT-END exit=1") || strings.Contains(out, "HCC-RESULT-BEGIN") {
+		t.Errorf("init did not refuse the file:\n%s", out)
 	}
 	e.assertNoTrace(t, id)
 }

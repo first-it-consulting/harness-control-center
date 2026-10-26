@@ -630,6 +630,7 @@ function runnerCard(r) {
       h("dt", {}, "Jobs"), h("dd", {}, st.running + " running, " + st.queued + " queued (at most " + st.maxConcurrent + " at once)"),
       h("dt", {}, "Schedules"), h("dd", {}, String(st.schedules)),
       h("dt", {}, "Images"), h("dd", {}, st.images.join(", ")),
+      h("dt", {}, "Tools"), h("dd", {}, Object.entries(st.tools || {}).map(([img, list]) => img + ": " + list.join(", ")).join("; ") || "none"),
       h("dt", {}, "Version"), h("dd", {}, st.version || "–")),
     r.error && h("div", { class: "error-box" }, r.error),
     h("div", { class: "actions" },

@@ -40,7 +40,7 @@ func TestHelperHostCallFormat(t *testing.T) {
 	}
 	h := &HelperHost{HelperPath: helperPath}
 	var out lockedBuffer
-	p, err := h.StartVM(StartRequest{ID: "run-1", Image: "base", Slot: 1, CPUs: 2, MemoryMiB: 256}, &out)
+	p, err := h.StartVM(StartRequest{ID: "run-1", Image: "base", Slot: 1, CPUs: 2, MemoryMiB: 256, Tools: true}, &out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestHelperHostCallFormat(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("helper did not stop on SIGTERM")
 	}
-	if want := "helper start --id run-1 --image base --slot 1 --cpus 2 --memory 256"; !strings.Contains(out.String(), want) {
+	if want := "helper start --id run-1 --image base --slot 1 --cpus 2 --memory 256 --disk 0 --tools"; !strings.Contains(out.String(), want) {
 		t.Errorf("helper got %q, want %q", out.String(), want)
 	}
 	if err := h.KillJail(context.Background(), "run-1"); err != nil {

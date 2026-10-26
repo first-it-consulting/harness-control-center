@@ -63,11 +63,15 @@ func (h *HelperHost) StartVM(req StartRequest, console io.Writer) (Process, erro
 	if err := sandbox.ValidateID(req.ID); err != nil {
 		return nil, err
 	}
-	return startProcess(h.Prefix, []string{h.HelperPath, "start",
+	args := []string{h.HelperPath, "start",
 		"--id", req.ID, "--image", req.Image, "--slot", strconv.Itoa(req.Slot),
 		"--cpus", strconv.Itoa(req.CPUs), "--memory", strconv.Itoa(req.MemoryMiB),
 		"--disk", strconv.Itoa(req.DiskMiB),
-	}, console)
+	}
+	if req.Tools {
+		args = append(args, "--tools")
+	}
+	return startProcess(h.Prefix, args, console)
 }
 
 // CollectDisk implements Host: the helper streams the disk's bytes (up

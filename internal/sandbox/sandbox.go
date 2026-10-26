@@ -53,6 +53,10 @@ type Spec struct {
 	// DiskMiB, if set, gives the guest a blank writable drive of this
 	// size, its only writable drive. This is how results get out.
 	DiskMiB int
+	// Tools, if set, attaches the image's tool catalog read-only, for the
+	// guest's init to install from before the agent starts (ADR-0010).
+	// The provider fails the run if the image has none.
+	Tools bool
 	// Collect, if set, gets the disk's raw contents after the guest shut
 	// itself down (not after a timeout or kill: a half-written disk is
 	// not worth reading). The guest wrote them, so they are hostile input.
@@ -89,7 +93,7 @@ var (
 	reservedBootArgs = map[string]bool{
 		"init": true, "rdinit": true, "console": true, "root": true, "rootfstype": true,
 		"rw": true, "ro": true, "reboot": true, "panic": true, "pci": true,
-		"ip": true, "hcc.ip": true, "hcc.proxy": true,
+		"ip": true, "hcc.ip": true, "hcc.proxy": true, "hcc.tools": true,
 	}
 )
 

@@ -131,6 +131,21 @@ The web UI shows them on every page. Unanswered requests are refused
 after `approvalTimeout` in `/etc/hcc/runner.yaml` (default `30m`). See
 ADR-0009.
 
+## Tools
+
+`install-runner.sh` gives the `claude-code` image a catalog of tools that
+harnesses may ask for in `spec.permissions.tools.install`. Choose them with
+`HCC_TOOLS` (Alpine package names; `""` for none) when installing:
+
+```sh
+HCC_TOOLS="python3 py3-pip nodejs npm make gcc musl-dev curl go" ./install-runner.sh ...
+```
+
+The runner rejects harnesses asking for anything else. Packages and their
+dependencies are fetched once, as signed Alpine packages, test-installed
+offline, and installed into each VM before its agent starts. The Control
+Center's Runners page lists what each image offers. See ADR-0010.
+
 ## Job history
 
 Each job is kept in `/var/lib/hcc/state/jobs/<id>/` (owner-only): its
@@ -157,7 +172,7 @@ The daemon's own log goes to journald, which rotates it.
 | Image | Contents | Use |
 |---|---|---|
 | `base` | Alpine minirootfs | tests (boot, stop, network guard) |
-| `claude-code` | Alpine, Claude Code (native musl build, pinned version and sha512), bash, git, jq, ripgrep | `runtime: claude-code` harnesses with `sandbox.image: claude-code` |
+| `claude-code` | Alpine, Claude Code (native musl build, pinned version and sha512), bash, git, jq, ripgrep; a tool catalog | `runtime: claude-code` harnesses with `sandbox.image: claude-code` |
 
 Claude Code runs as the unprivileged user `agent` with its home and
 workspace in memory, and prints its result between `HCC-RESULT-BEGIN` and

@@ -199,6 +199,7 @@ func (p *Provider) Run(ctx context.Context, spec sandbox.Spec, console io.Writer
 
 	proc, err := p.cfg.Host.StartVM(StartRequest{
 		ID: spec.ID, Image: spec.Image, Slot: slot, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB, DiskMiB: spec.DiskMiB,
+		Tools: spec.Tools,
 	}, console)
 	if err != nil {
 		return res, err
@@ -330,12 +331,16 @@ func vmConfig(spec *sandbox.Spec, link *NetInfo) map[string]any {
 		args = append(args, "hcc.ip="+link.Guest.String(),
 			"hcc.proxy="+netip.AddrPortFrom(link.Host, uint16(link.ProxyPort)).String()) //nolint:gosec // port validated by NetInfo.Valid
 	}
+	d, toolsDev := drives(spec)
+	if toolsDev != "" {
+		args = append(args, "hcc.tools="+toolsDev)
+	}
 	cfg := map[string]any{
 		"boot-source": map[string]any{
 			"kernel_image_path": "vmlinux",
 			"boot_args":         strings.Join(args, " "),
 		},
-		"drives": drives(spec),
+		"drives": d,
 		"machine-config": map[string]any{
 			"vcpu_count":   spec.CPUs,
 			"mem_size_mib": spec.MemoryMiB,
@@ -429,8 +434,10 @@ func (l *peerListener) Accept() (net.Conn, error) {
 	}
 }
 
-func drives(spec *sandbox.Spec) []map[string]any {
-	d := []map[string]any{{
+// drives lists the VM's drives in the order the guest sees them (vda,
+// vdb, ...) and names the tool catalog's device, if attached.
+func drives(spec *sandbox.Spec) (d []map[string]any, toolsDev string) {
+	d = []map[string]any{{
 		"drive_id":       "rootfs",
 		"path_on_host":   "rootfs.ext4",
 		"is_root_device": true,
@@ -445,9 +452,20 @@ func drives(spec *sandbox.Spec) []map[string]any {
 			"is_read_only":   true,
 		})
 	}
+	if spec.Tools {
+		// Linked into the jail by the helper from the image's
+		// configuration; the guest's init installs from it and unmounts it.
+		toolsDev = "vd" + "abc"[len(d):len(d)+1] // after rootfs and at most the task
+		d = append(d, map[string]any{
+			"drive_id":       "tools",
+			"path_on_host":   "tools.ext4",
+			"is_root_device": false,
+			"is_read_only":   true,
+		})
+	}
 	if spec.DiskMiB > 0 {
-		// The guest's only writable drive (vdb or vdc); the helper creates
-		// disk.img in the jail.
+		// The guest's only writable drive (the last one); the helper
+		// creates disk.img in the jail.
 		d = append(d, map[string]any{
 			"drive_id":       "disk",
 			"path_on_host":   "disk.img",
@@ -455,7 +473,7 @@ func drives(spec *sandbox.Spec) []map[string]any {
 			"is_read_only":   false,
 		})
 	}
-	return d
+	return d, toolsDev
 }
 
 // taskImage pads the task to whole sectors with zero bytes; the guest

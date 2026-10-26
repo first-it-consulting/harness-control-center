@@ -87,6 +87,8 @@ func TestLoadConfigRejects(t *testing.T) {
 		"retention too short": {"maxConcurrent: 2", "maxConcurrent: 2\nretention: {maxAge: 5m}", "retention.maxAge"},
 		"retention garbage":   {"maxConcurrent: 2", "maxConcurrent: 2\nretention: {maxAge: forever}", "retention.maxAge"},
 		"retention no jobs":   {"maxConcurrent: 2", "maxConcurrent: 2\nretention: {maxJobs: -3}", "retention.maxJobs"},
+		"tools outside root":  {"rootfs.ext4\n", "rootfs.ext4\n    tools: {drive: /tmp/tools.ext4, packages: /var/lib/hcc/images/base/tools.txt}\n", "tools.drive"},
+		"tools half set":      {"rootfs.ext4\n", "rootfs.ext4\n    tools: {drive: /var/lib/hcc/images/base/tools.ext4}\n", "tools.packages"},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -123,5 +125,36 @@ func TestCheckFilesRequiresRootOwnedBinaries(t *testing.T) {
 	c = &Config{Firecracker: FirecrackerConfig{Helper: "/bin/sh", Jailer: "/bin/sh", Firecracker: "/bin/sh"}}
 	if err := c.CheckFiles(); err != nil {
 		t.Errorf("CheckFiles(/bin/sh) = %v", err)
+	}
+}
+
+func TestCatalogs(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.txt")
+	bad := filepath.Join(dir, "bad.txt")
+	if err := os.WriteFile(good, []byte("make 4.4.1-r2 make-4.4.1-r2.apk\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bad, []byte("make 4.4.1-r2 ../make.apk\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &Config{Images: map[string]ImageConfig{
+		"base":        {},
+		"claude-code": {Tools: &ToolsConfig{Drive: "/x/tools.ext4", Packages: good}},
+	}}
+	cats, err := c.Catalogs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cats) != 1 || cats["base"] != nil || len(cats["claude-code"].Packages()) != 1 {
+		t.Errorf("catalogs = %v", cats)
+	}
+	c.Images["claude-code"] = ImageConfig{Tools: &ToolsConfig{Drive: "/x/tools.ext4", Packages: bad}}
+	if _, err := c.Catalogs(); err == nil {
+		t.Error("a malformed package list was loaded")
+	}
+	c.Images["claude-code"] = ImageConfig{Tools: &ToolsConfig{Drive: "/x/tools.ext4", Packages: filepath.Join(dir, "missing")}}
+	if _, err := c.Catalogs(); err == nil {
+		t.Error("a missing package list was ignored")
 	}
 }

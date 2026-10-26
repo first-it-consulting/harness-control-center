@@ -740,6 +740,41 @@ func TestRunCollectFailureFailsTheRun(t *testing.T) {
 	f.assertCleanedUp(t)
 }
 
+func TestToolsDriveIsReadOnlyAndNamedToTheGuest(t *testing.T) {
+	f := newFixture(t, exitsCleanly)
+	f.spec.Tools = true
+	f.spec.DiskMiB = 64
+	if _, _, err := f.run(context.Background(), t); err != nil {
+		t.Fatal(err)
+	}
+	if !f.host.reqs[0].Tools {
+		t.Error("start request without tools")
+	}
+	drives, _ := f.host.config["drives"].([]any)
+	var ids []string
+	for _, d := range drives {
+		m, _ := d.(map[string]any)
+		ids = append(ids, m["drive_id"].(string))
+		if m["drive_id"] == "tools" && (m["is_read_only"] != true || m["path_on_host"] != "tools.ext4") {
+			t.Errorf("tools drive = %v", m)
+		}
+	}
+	// rootfs vda, task vdb, tools vdc, disk last.
+	if !slices.Equal(ids, []string{"rootfs", "task", "tools", "disk"}) {
+		t.Errorf("drives = %v", ids)
+	}
+	if args := f.host.config["boot-source"].(map[string]any)["boot_args"].(string); !strings.Contains(args, " hcc.tools=vdc") {
+		t.Errorf("boot args = %q", args)
+	}
+}
+
+func TestToolsBootArgIsReserved(t *testing.T) {
+	s := sandbox.Spec{ID: "a", Image: "base", CPUs: 1, MemoryMiB: 128, Timeout: time.Second, BootArgs: []string{"hcc.tools=vda"}}
+	if err := s.Validate(); err == nil {
+		t.Error("a caller could point init at another drive")
+	}
+}
+
 func TestNoDiskNoDrive(t *testing.T) {
 	f := newFixture(t, exitsCleanly)
 	if _, _, err := f.run(context.Background(), t); err != nil {

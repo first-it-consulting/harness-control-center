@@ -10,6 +10,9 @@
 # alpine-minirootfs.tar.gz, checksum-verified by hack/firecracker-poc/run.sh.
 # <target> is this runner's name as harnesses address it, e.g.
 # server:hcc-dev-1.
+#
+# HCC_TOOLS lists the Alpine packages the claude-code image offers as
+# tools (ADR-0010); set it to "" for none.
 set -euo pipefail
 
 HCC_BIN=$1
@@ -17,6 +20,7 @@ HELPER_BIN=$2
 ASSETS=$3
 TARGET=$4
 ADMIN_USER=$(id -un)
+TOOLS=${HCC_TOOLS-python3 py3-pip nodejs npm make gcc musl-dev curl go}
 RUN_USER=hcc-runner
 GROUP=hcc
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -25,6 +29,9 @@ IMAGES=$LIB/images
 
 [[ $TARGET =~ ^server:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { echo "invalid target: $TARGET" >&2; exit 1; }
 [[ $(id -u) -ne 0 ]] || { echo "run as an admin user with sudo, not as root" >&2; exit 1; }
+for p in $TOOLS; do
+	[[ $p =~ ^[a-z0-9][a-z0-9._+-]{0,127}$ ]] || { echo "invalid tool package name: $p" >&2; exit 1; }
+done
 for tool in /usr/sbin/ip /usr/sbin/nft /usr/bin/openssl; do
 	[[ -x $tool ]] || { echo "missing $tool (iproute2, nftables)" >&2; exit 1; }
 done
@@ -71,8 +78,8 @@ CC_URL="https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64-musl/-/cl
 
 build=$(mktemp -d)
 cleanup() {
-	for m in proc dev; do sudo umount "$build/cc-tree/$m" 2>/dev/null || true; done
-	sudo rm -rf "$build"
+	for m in catalog/test/root/dev catalog/test/root/hcc-catalog catalog/test/root cc-tree/proc cc-tree/dev; do sudo umount "$build/$m" 2>/dev/null || true; done
+	sudo rm -rf --one-file-system "$build"
 }
 trap cleanup EXIT
 
@@ -82,6 +89,64 @@ install_image() {
 	sudo install -d -o root -g root -m 0755 "$IMAGES/$1"
 	sudo install -o root -g root -m 0644 "$ASSETS/vmlinux" "$IMAGES/$1/vmlinux"
 	sudo install -o root -g root -m 0644 "$3" "$IMAGES/$1/rootfs.ext4"
+}
+
+# build_catalog TREE OUT: the tool catalog of the image in TREE (whose
+# chroot has /proc, /dev and DNS): for each package in $TOOLS, its signed
+# package file and those of the dependencies the image lacks, fetched now
+# from the image's own Alpine release. OUT gets tools.ext4 (the files,
+# for the guest) and tools.txt (the package list, for the runner). Every
+# package is test-installed offline, from the files alone, in a throwaway
+# copy of the image, just as the guest will.
+build_catalog() {
+	local tree=$1 out=$2 installed p dir own version files
+	mkdir -p "$out/files"
+	installed=$(sudo chroot "$tree" /sbin/apk info -v 2>/dev/null)
+	echo "# name version file... (built by install-runner.sh)" >"$out/tools.txt"
+	for p in $TOOLS; do
+		dir=hcc-fetch-$p
+		sudo mkdir "$tree/$dir"
+		sudo chroot "$tree" /sbin/apk fetch --no-cache --recursive --quiet -o "/$dir" "$p"
+		own=$(cd "$tree/$dir" && ls | grep -E "^${p//+/\\+}-[0-9][^-]*-r[0-9]+\.apk\$" || true)
+		[[ $(wc -w <<<"$own") -eq 1 ]] || { echo "tool $p: cannot tell its package file" >&2; exit 1; }
+		version=${own#"$p"-}
+		version=${version%.apk}
+		files=""
+		for f in $(cd "$tree/$dir" && ls); do
+			grep -qxF "${f%.apk}" <<<"$installed" || files="$files $f"
+		done
+		echo "$p $version$files" >>"$out/tools.txt"
+		sudo cp -f "$tree/$dir"/*.apk "$out/files/" # same name, same signed package
+		sudo rm -rf "$tree/$dir"
+	done
+	# The test install: the image's apk, its keys, no network, no
+	# repository. Overlays keep the image itself unchanged.
+	local scratch=$out/test
+	mkdir -p "$scratch/upper" "$scratch/work" "$scratch/root"
+	sudo mount -t overlay overlay -o "lowerdir=$tree,upperdir=$scratch/upper,workdir=$scratch/work" "$scratch/root"
+	sudo mkdir -p "$scratch/root/hcc-catalog"
+	sudo mount --bind -o ro "$out/files" "$scratch/root/hcc-catalog"
+	sudo mount --bind /dev "$scratch/root/dev"
+	local ok=1
+	while read -r p version files; do
+		[[ -z $p || $p == "#"* ]] && continue
+		# shellcheck disable=SC2086 # file names are checked by the runner and contain no spaces
+		set -- $files
+		# apk reports some problems without failing: any ERROR counts.
+		if ! log=$(sudo chroot "$scratch/root" /sbin/apk add --no-network --no-cache --simulate \
+			--repositories-file /dev/null "${@/#//hcc-catalog/}" 2>&1) || grep -q ERROR <<<"$log"; then
+			echo "tool $p does not install offline:" >&2
+			echo "$log" >&2
+			ok=0
+		fi
+	done <"$out/tools.txt"
+	sudo umount "$scratch/root/dev" "$scratch/root/hcc-catalog" "$scratch/root"
+	sudo rm -rf "$scratch"
+	[[ $ok -eq 1 ]] || exit 1
+	local mib
+	mib=$(( $(sudo du -sm "$out/files" | cut -f1) * 5 / 4 + 32 ))
+	sudo mkfs.ext4 -q -F -d "$out/files" -E root_owner=0:0 -L hcc-tools "$out/tools.ext4" "${mib}M"
+	echo "   tool catalog: $(grep -vc '^#' "$out/tools.txt") packages, $mib MiB"
 }
 
 # Images are rebuilt only when their inputs change.
@@ -104,7 +169,7 @@ else
 fi
 
 echo "== image 'claude-code' (Claude Code $CC_VERSION)"
-cc_inputs=$(echo "$CC_VERSION $CC_INTEGRITY" | cat - "$HERE/images/common.sh" "$HERE/images/claude-code/init" "$ASSETS/alpine-minirootfs.tar.gz" "$ASSETS/vmlinux" | sha256sum | cut -d' ' -f1)
+cc_inputs=$(echo "$CC_VERSION $CC_INTEGRITY tools: $TOOLS" | cat - "$0" "$HERE/images/common.sh" "$HERE/images/claude-code/init" "$ASSETS/alpine-minirootfs.tar.gz" "$ASSETS/vmlinux" | sha256sum | cut -d' ' -f1)
 if uptodate claude-code "$cc_inputs"; then
 	echo "   up to date"
 else
@@ -126,10 +191,17 @@ else
 	sudo chroot "$tree" /sbin/apk add --no-cache bash git jq ripgrep libgcc libstdc++ ca-certificates >/dev/null
 	sudo chroot "$tree" /usr/sbin/adduser -D -u 1000 -s /bin/bash -h /home/agent agent
 	sudo chroot "$tree" /usr/local/bin/claude --version
+	if [[ -n $TOOLS ]]; then
+		build_catalog "$tree" "$build/catalog"
+	fi
 	sudo umount "$tree/proc" "$tree/dev"
 	sudo rm -f "$tree/etc/resolv.conf"
 	sudo mkfs.ext4 -q -F -d "$tree" -L hcc-claude "$build/cc.ext4" 1G
 	install_image claude-code "$tree" "$build/cc.ext4"
+	sudo rm -f "$IMAGES/claude-code/tools.ext4" "$IMAGES/claude-code/tools.txt"
+	if [[ -n $TOOLS ]]; then
+		sudo install -o root -g root -m 0644 "$build/catalog/tools.ext4" "$build/catalog/tools.txt" "$IMAGES/claude-code/"
+	fi
 	record claude-code "$cc_inputs"
 fi
 
@@ -167,6 +239,7 @@ images:
   claude-code:
     kernel: $IMAGES/claude-code/vmlinux
     rootfs: $IMAGES/claude-code/rootfs.ext4
+$(if sudo test -f "$IMAGES/claude-code/tools.txt"; then printf '    tools:\n      drive: %s\n      packages: %s\n' "$IMAGES/claude-code/tools.ext4" "$IMAGES/claude-code/tools.txt"; fi)
 # Credential broker store (root:$RUN_USER 0640).
 credentials: /etc/hcc/credentials.yaml
 # Sandbox links: one /30 per VM; must not overlap any real network.

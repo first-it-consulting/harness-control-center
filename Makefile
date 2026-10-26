@@ -20,6 +20,7 @@ fuzz:
 	$(GO) test ./internal/policy -run='^$$' -fuzz=FuzzCheckEgress -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/results -run='^$$' -fuzz=FuzzSanitize -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/cron -run='^$$' -fuzz=FuzzNext -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/tools -run='^$$' -fuzz=FuzzParse -fuzztime=$(FUZZTIME)
 
 lint:
 	golangci-lint run

@@ -18,6 +18,7 @@ import (
 	"github.com/first-it-consulting/harness-control-center/internal/results"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
+	"github.com/first-it-consulting/harness-control-center/internal/tools"
 )
 
 // fakeProvider runs "sandboxes" that end as configured. With block set,
@@ -201,7 +202,6 @@ func TestOutcomesMapToStates(t *testing.T) {
 
 func TestFailClosedOnUnenforceablePermissions(t *testing.T) {
 	tests := map[string]string{
-		"tools":     "  permissions: {tools: {install: [git]}}\n",
 		"subagents": "  permissions: {subagents: {max: 1}}\n",
 	}
 	for name, extra := range tests {
@@ -216,6 +216,81 @@ func TestFailClosedOnUnenforceablePermissions(t *testing.T) {
 				t.Error("rejected harness created a job")
 			}
 		})
+	}
+}
+
+func toolsRunner(t *testing.T, p *fakeProvider) *Runner {
+	t.Helper()
+	cat, err := tools.Parse(strings.NewReader("python3 3.12.8-r1 python3-3.12.8-r1.apk libffi-3.4.6-r0.apk\nmake 4.4.1-r2 make-4.4.1-r2.apk\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(Config{Provider: p, Images: []string{"base", "plain"}, Tools: map[string]*tools.Catalog{"base": cat}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = r.Shutdown(ctx)
+	})
+	return r
+}
+
+func TestToolsComeFromTheImageCatalog(t *testing.T) {
+	p := newFakeProvider()
+	r := toolsRunner(t, p)
+	id, err := r.Submit(harness(t, "  permissions: {tools: {install: [python3, make@4.4.1-r2]}}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, r, id, StateSucceeded)
+	s := p.startedSpecs()[0]
+	if !s.Tools {
+		t.Error("the catalog drive is not attached")
+	}
+	var task Task
+	if err := json.Unmarshal(s.Task, &task); err != nil {
+		t.Fatal(err)
+	}
+	want := TaskTools{Packages: []string{"make", "python3"}, Files: []string{"libffi-3.4.6-r0.apk", "make-4.4.1-r2.apk", "python3-3.12.8-r1.apk"}}
+	if task.Tools == nil || !slices.Equal(task.Tools.Packages, want.Packages) || !slices.Equal(task.Tools.Files, want.Files) {
+		t.Errorf("task tools = %+v, want %+v", task.Tools, want)
+	}
+	if got := r.Status().Tools; !slices.Equal(got["base"], []string{"make@4.4.1-r2", "python3@3.12.8-r1"}) || len(got) != 1 {
+		t.Errorf("status tools = %v", got)
+	}
+
+	// Without tools: no drive, no tools in the task.
+	id, err = r.Submit(harness(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, r, id, StateSucceeded)
+	if s := p.startedSpecs()[1]; s.Tools || strings.Contains(string(s.Task), `"tools"`) {
+		t.Errorf("a harness without tools got them: %s", s.Task)
+	}
+}
+
+func TestToolsNotOfferedAreRejected(t *testing.T) {
+	p := newFakeProvider()
+	r := toolsRunner(t, p)
+	for name, extra := range map[string]string{
+		"unknown tool":     "  permissions: {tools: {install: [nmap]}}\n",
+		"other version":    "  permissions: {tools: {install: [python3@3.11.0-r0]}}\n",
+		"image without":    "  permissions: {tools: {install: [make]}}\n",
+		"one of two wrong": "  permissions: {tools: {install: [make, nmap]}}\n",
+	} {
+		h := harness(t, extra)
+		if name == "image without" {
+			h.Spec.Sandbox.Image = "plain"
+		}
+		if _, err := r.Submit(h); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if len(r.List()) != 0 || len(p.startedSpecs()) != 0 {
+		t.Error("a rejected harness created a job")
 	}
 }
 
