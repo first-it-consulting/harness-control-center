@@ -588,29 +588,42 @@ function scheduleRow(s) {
 function runnerFields(ref) {
   const name = h("input", { required: true, placeholder: "hcc-dev", pattern: "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?" });
   const kind = h("select", {}, h("option", { value: "ssh" }, "over ssh"), h("option", { value: "socket" }, "on this computer"));
-  // A combo box: pick a host from your ssh configuration, or type any.
-  const listId = "where-" + Math.random().toString(36).slice(2);
-  const where = h("input", { required: true, list: listId, autocomplete: "off" });
-  const options = h("datalist", { id: listId });
-  const hint = () => {
-    where.placeholder = kind.value === "ssh" ? "ssh host, e.g. hcc-dev" : "/run/hcc/runner.sock";
-    set(options, ...(kind.value === "ssh" ? sshHosts : ["/run/hcc/runner.sock"]).map((v) => h("option", { value: v })));
+  // Over ssh, a host from your ssh configuration, or any other you type.
+  const other = ""; // no ssh alias is empty
+  const host = h("select", {}, ...sshHosts.map((v) => h("option", { value: v }, v)), h("option", { value: other }, "Other host…"));
+  const where = h("input", { autocomplete: "off" });
+  const sync = () => {
+    const ssh = kind.value === "ssh";
+    host.hidden = !ssh || sshHosts.length === 0;
+    where.hidden = ssh && !host.hidden && host.value !== other;
+    where.required = !where.hidden;
+    where.placeholder = ssh ? "ssh host, e.g. user@10.0.0.5" : "/run/hcc/runner.sock";
   };
-  kind.addEventListener("change", hint);
+  kind.addEventListener("change", () => {
+    where.value = kind.value === "socket" ? "/run/hcc/runner.sock" : "";
+    sync();
+  });
+  host.addEventListener("change", () => {
+    sync();
+    if (!where.hidden) where.focus();
+  });
   if (ref) {
     name.value = ref.name;
     kind.value = ref.socket ? "socket" : "ssh";
     where.value = ref.socket || ref.ssh;
+    host.value = sshHosts.includes(ref.ssh) ? ref.ssh : other;
+  } else if (sshHosts.length > 0) {
+    host.value = sshHosts[0];
   }
-  hint();
+  sync();
   const read = () => {
     const out = { name: name.value };
-    out[kind.value] = where.value;
+    out[kind.value] = kind.value === "ssh" && !host.hidden && host.value !== other ? host.value : where.value;
     // Kept as it was: the UI does not show it.
     if (kind.value === "ssh" && ref && ref.remoteSocket) out.remoteSocket = ref.remoteSocket;
     return out;
   };
-  return { labels: [h("label", {}, "Name", name), h("label", {}, "Reached", kind), h("label", {}, "Where", where, options)], read };
+  return { labels: [h("label", {}, "Name", name), h("label", {}, "Reached", kind), h("label", {}, "Where", host, where)], read };
 }
 
 // Host aliases from ~/.ssh/config, loaded with the runners page.
