@@ -88,3 +88,6 @@ changelog:
 
 release:
   mode: keep-existing
+  # A hand-run rebuild of a release (reproducible: the same bytes) may
+  # replace what an earlier, partly failed run uploaded.
+  replace_existing_artifacts: true
