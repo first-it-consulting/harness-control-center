@@ -364,6 +364,12 @@ func (r *Runner) fire(s *schedule, now time.Time) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.recordRunLocked(s, id, err, now)
+}
+
+// recordRunLocked notes that s started job id (or failed to: err) and
+// plans its next run.
+func (r *Runner) recordRunLocked(s *schedule, id string, err error, now time.Time) {
 	if r.schedules[s.ID] != s {
 		return // deleted meanwhile; its job (if any) runs on
 	}
@@ -376,8 +382,9 @@ func (r *Runner) fire(s *schedule, now time.Time) {
 		s.Runs++
 		s.LastJob, s.Message = id, ""
 		// A quick run may have ended before it was recorded here; its end
-		// was not counted yet.
-		if j := r.jobs[id]; j != nil && j.State.Terminal() {
+		// was not counted yet. That plans a loop's next run; a cron
+		// schedule's is planned below, as for any run.
+		if j := r.jobs[id]; j != nil && j.State.Terminal() && s.loop() {
 			r.runEndedLocked(j)
 			return
 		}

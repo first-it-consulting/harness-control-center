@@ -497,21 +497,23 @@ func TestRunnerOneByOne(t *testing.T) {
 
 func TestEditRunner(t *testing.T) {
 	ts := newTestServer(t)
+	dir := t.TempDir()
+	sock := func(name string) string { return filepath.Join(dir, name) } // absolute on every OS
 	var out map[string]any
-	for _, ref := range []RunnerRef{{Name: "a", SSH: "host-a"}, {Name: "b", SSH: "host-b", RemoteSocket: "/run/hcc/other.sock"}, {Name: "c", Socket: "/run/c.sock"}} {
+	for _, ref := range []RunnerRef{{Name: "a", SSH: "host-a"}, {Name: "b", SSH: "host-b", RemoteSocket: "/run/hcc/other.sock"}, {Name: "c", Socket: sock("c.sock")}} {
 		if code := ts.do(http.MethodPost, "/api/runners", ref, &out); code != http.StatusCreated {
 			t.Fatalf("add %s: %d %v", ref.Name, code, out)
 		}
 	}
 	// Rename and change how it is reached; its place in the list stays.
-	if code := ts.do(http.MethodPut, "/api/runners/b", RunnerRef{Name: "b2", Socket: "/run/b.sock"}, &out); code != http.StatusOK {
+	if code := ts.do(http.MethodPut, "/api/runners/b", RunnerRef{Name: "b2", Socket: sock("b.sock")}, &out); code != http.StatusOK {
 		t.Fatalf("edit: %d %v", code, out)
 	}
 	cfg, err := LoadConfig(ts.s.cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []RunnerRef{{Name: "a", SSH: "host-a"}, {Name: "b2", Socket: "/run/b.sock"}, {Name: "c", Socket: "/run/c.sock"}}
+	want := []RunnerRef{{Name: "a", SSH: "host-a"}, {Name: "b2", Socket: sock("b.sock")}, {Name: "c", Socket: sock("c.sock")}}
 	if !slices.Equal(cfg.Runners, want) {
 		t.Errorf("saved runners = %+v, want %+v", cfg.Runners, want)
 	}
@@ -520,10 +522,10 @@ func TestEditRunner(t *testing.T) {
 		ref  RunnerRef
 		code int
 	}{
-		{"/api/runners/a", RunnerRef{Name: "c", SSH: "host-a"}, http.StatusConflict},            // takes another's name
-		{"/api/runners/nope", RunnerRef{Name: "nope", SSH: "x"}, http.StatusNotFound},           // no such runner
-		{"/api/runners/a", RunnerRef{Name: "a", SSH: "x", Socket: "/y"}, http.StatusBadRequest}, // both ways
-		{"/api/runners/a", RunnerRef{Name: "A!", SSH: "x"}, http.StatusBadRequest},              // bad name
+		{"/api/runners/a", RunnerRef{Name: "c", SSH: "host-a"}, http.StatusConflict},                 // takes another's name
+		{"/api/runners/nope", RunnerRef{Name: "nope", SSH: "x"}, http.StatusNotFound},                // no such runner
+		{"/api/runners/a", RunnerRef{Name: "a", SSH: "x", Socket: sock("y")}, http.StatusBadRequest}, // both ways
+		{"/api/runners/a", RunnerRef{Name: "A!", SSH: "x"}, http.StatusBadRequest},                   // bad name
 		{"/api/runners/a", RunnerRef{Name: "a", SSH: "-oProxyCommand=x"}, http.StatusBadRequest},
 	} {
 		if code := ts.do(http.MethodPut, tc.path, tc.ref, &out); code != tc.code {

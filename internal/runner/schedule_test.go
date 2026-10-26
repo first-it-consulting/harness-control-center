@@ -372,3 +372,24 @@ func TestSchedulesAreRecheckedAgainstTheCurrentConfig(t *testing.T) {
 		t.Errorf("loaded schedule = %+v", got)
 	}
 }
+
+// A cron run that ended before the scheduler recorded its start (a run
+// that fails at once can) must not leave the schedule without a next run.
+// It used to: the schedule then silently never ran again.
+func TestQuickRunKeepsCronSchedulePlanned(t *testing.T) {
+	e := defaultSchedEnv(t)
+	s, err := e.r.AddSchedule(scheduleDoc("{schedule: '0 * * * *'}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now, _ := time.Parse("2006-01-02 15:04", "2026-10-25 11:00")
+	e.r.mu.Lock()
+	sc := e.r.schedules[s.ID]
+	sc.NextRun = time.Time{} // as fire leaves it while the run starts
+	e.r.jobs["job-quick"] = &job{Job: Job{ID: "job-quick", State: StateFailed, Schedule: s.ID}}
+	e.r.recordRunLocked(sc, "job-quick", nil, now)
+	e.r.mu.Unlock()
+	if got := e.sched(s.ID); got.State != ScheduleActive || got.NextRun.IsZero() || got.LastJob != "job-quick" {
+		t.Errorf("schedule = %+v", got)
+	}
+}
