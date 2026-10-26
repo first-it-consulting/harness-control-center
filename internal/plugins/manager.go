@@ -172,7 +172,7 @@ func (m *Manager) Run(ctx context.Context, r Runner) {
 			paused = now
 		case <-flush:
 			flush = nil
-			if r.Status().Killed || m.dispatch() {
+			if m.dispatch(r) {
 				flush = time.After(batchDelay) // killed, or some had to wait for a slot
 			}
 		case <-m.wake:
@@ -255,10 +255,16 @@ func (m *Manager) kill() {
 }
 
 // dispatch starts a run for every notifier with events that is not
-// running yet, while slots are free. It reports whether some are left.
-func (m *Manager) dispatch() bool {
+// running yet, while slots are free and the kill switch is not engaged.
+// It reports whether some are left. The kill switch is checked under the
+// same lock kill takes: either it is seen here, or kill cancels the runs
+// started here.
+func (m *Manager) dispatch(r Runner) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if r.Status().Killed {
+		return true
+	}
 	ctx := m.runs
 	left := false
 	names := make([]string, 0, len(m.queues))
