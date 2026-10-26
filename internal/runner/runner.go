@@ -125,6 +125,7 @@ type Runner struct {
 	cancelRoot context.CancelFunc
 
 	approvals     map[string]*pendingApproval
+	firing        int // schedule runs being started
 	schedules     map[string]*schedule
 	wake          chan struct{}
 	stopScheduler chan struct{}

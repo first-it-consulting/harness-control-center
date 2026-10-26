@@ -334,7 +334,13 @@ func (r *Runner) fire(s *schedule, now time.Time) {
 	}
 	s.NextRun = time.Time{} // not due again while this run starts
 	h := s.h
+	r.firing++
 	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.firing--
+		r.mu.Unlock()
+	}()
 
 	// Checked again for every run: the runner's configuration may have
 	// changed since the schedule was added.
@@ -364,6 +370,12 @@ func (r *Runner) fire(s *schedule, now time.Time) {
 	} else {
 		s.Runs++
 		s.LastJob, s.Message = id, ""
+		// A quick run may have ended before it was recorded here; its end
+		// was not counted yet.
+		if j := r.jobs[id]; j != nil && j.State.Terminal() {
+			r.runEndedLocked(j)
+			return
+		}
 	}
 	r.planLocked(s, now)
 	r.saveScheduleLocked(s)

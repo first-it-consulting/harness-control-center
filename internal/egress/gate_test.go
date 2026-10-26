@@ -171,7 +171,8 @@ func TestGateWithoutDeciderFailsClosed(t *testing.T) {
 }
 
 func TestPushCommandsOnGarbage(t *testing.T) {
-	for _, body := range []string{"", "zzzz", "0003", pkt("not a ref update"), strings.Repeat("ffff", 10)} {
+	long := pkt(strings.Repeat("a", 40) + " " + strings.Repeat("b", 40) + " refs/heads/" + strings.Repeat("x", maxRefName) + "\n")
+	for _, body := range []string{"", "zzzz", "0003", pkt("not a ref update"), strings.Repeat("ffff", 10), long + "0000"} {
 		_, rest, err := pushCommands(io.NopCloser(strings.NewReader(body)))
 		got, _ := io.ReadAll(rest)
 		if err == nil || string(got) != body {
@@ -216,5 +217,24 @@ func TestCAWildcards(t *testing.T) {
 				t.Errorf("%s does not verify: %v", host, err)
 			}
 		}
+	}
+}
+
+func TestGateRefusesLongPathsAndUpgrades(t *testing.T) {
+	env := startGate(t, true)
+	resp := env.do(t, "DELETE /"+strings.Repeat("a", maxGatePath)+" HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || len(env.asked) != 0 {
+		t.Errorf("long path: %d, asked %d", resp.StatusCode, len(env.asked))
+	}
+	resp = env.do(t, "GET /ws HTTP/1.1\r\nHost: example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("upgrade: %d", resp.StatusCode)
+	}
+	select {
+	case <-env.body:
+		t.Error("a refused request reached the upstream")
+	default:
 	}
 }

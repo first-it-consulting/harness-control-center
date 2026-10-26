@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -57,11 +58,20 @@ func (t *gatedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.host == t.p.ModelHost && t.port == t.p.ModelPort {
 		return t.base.RoundTrip(req)
 	}
+	// An upgraded connection (e.g. WebSocket) would carry requests no
+	// gate sees: none while gates are on.
+	if t.p.Inspect && req.Header.Get("Upgrade") != "" {
+		return plainResponse(req, http.StatusForbidden, "connection upgrades are not allowed for a job with approval gates"), nil
+	}
 	actions := policy.HTTPActions(req.Method, req.URL.Path)
 	if !t.p.Policy.RequiresApprovalAny(actions) {
 		return t.base.RoundTrip(req)
 	}
-	gr := GateRequest{Actions: actions, Method: req.Method, Host: t.host, Path: truncate(req.URL.RequestURI(), maxGatePath)}
+	uri := req.URL.RequestURI()
+	if len(uri) > maxGatePath { // never ask about what cannot be shown in full
+		return plainResponse(req, http.StatusForbidden, fmt.Sprintf("this request cannot be approved: its path is longer than %d bytes", maxGatePath)), nil
+	}
+	gr := GateRequest{Actions: actions, Method: req.Method, Host: t.host, Path: uri}
 	if req.Body != nil && req.Body != http.NoBody && strings.HasSuffix(req.URL.Path, "/git-receive-pack") {
 		cmds, rest, err := pushCommands(req.Body)
 		if err != nil {
@@ -87,13 +97,6 @@ func (t *gatedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	t.p.Log.Info("egress: approved", "job", t.p.JobID, "host", t.host, "method", req.Method, "path", gr.Path)
 	return t.base.RoundTrip(req)
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }
 
 // pushCommands reads the ref updates at the start of a git-receive-pack
@@ -132,7 +135,12 @@ func pushCommands(body io.ReadCloser) ([]string, io.ReadCloser, error) {
 			err = fmt.Errorf("its ref updates end early or exceed %d bytes", maxPushPreamble)
 			break
 		}
-		cmds = append(cmds, describeRefUpdate(line))
+		cmd, derr := describeRefUpdate(line)
+		if derr != nil {
+			err = derr
+			break
+		}
+		cmds = append(cmds, cmd)
 	}
 	// What bufio read ahead (but we did not consume) goes back too.
 	ahead, _ := br.Peek(br.Buffered())
@@ -144,23 +152,30 @@ func pushCommands(body io.ReadCloser) ([]string, io.ReadCloser, error) {
 	return cmds, rest, err
 }
 
-// describeRefUpdate turns "old new ref\0caps" into "ref: old → new".
-func describeRefUpdate(line []byte) string {
+// maxRefName bounds a ref name shown for approval.
+const maxRefName = 256
+
+// describeRefUpdate turns "old new ref\0caps" into "ref: old → new". It
+// fails for anything it cannot show in full.
+func describeRefUpdate(line []byte) (string, error) {
 	if i := bytes.IndexByte(line, 0); i >= 0 {
 		line = line[:i]
 	}
 	f := strings.Fields(string(line))
-	if len(f) != 3 {
-		return truncate(string(line), 200)
+	if len(f) != 3 || len(f[0]) != 40 && len(f[0]) != 64 || len(f[1]) != len(f[0]) {
+		return "", errors.New("it contains a ref update that is not in the expected form")
 	}
-	old, nw, ref := f[0], f[1], truncate(f[2], 200)
+	old, nw, ref := f[0], f[1], f[2]
+	if len(ref) > maxRefName {
+		return "", fmt.Errorf("it updates a ref whose name is longer than %d bytes", maxRefName)
+	}
 	switch {
 	case strings.Trim(nw, "0") == "":
-		return ref + ": delete (was " + short(old) + ")"
+		return ref + ": delete (was " + short(old) + ")", nil
 	case strings.Trim(old, "0") == "":
-		return ref + ": create at " + short(nw)
+		return ref + ": create at " + short(nw), nil
 	default:
-		return ref + ": " + short(old) + " → " + short(nw)
+		return ref + ": " + short(old) + " → " + short(nw), nil
 	}
 }
 

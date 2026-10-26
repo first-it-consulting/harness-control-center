@@ -97,10 +97,26 @@ func scheduleDoc(trigger string) []byte {
 	return []byte(baseHarness + "  trigger: " + trigger + "\n")
 }
 
-// at moves the clock and starts whatever is due.
+// at moves the clock and starts whatever is due (here, or in the
+// background scheduler, which may win the race).
 func (e *schedEnv) at(when string) {
 	e.clock.set(when)
 	e.r.fireDue()
+	e.settle()
+}
+
+// settle waits until no schedule run is being started.
+func (e *schedEnv) settle() {
+	for range 1000 {
+		e.r.mu.Lock()
+		n := e.r.firing
+		e.r.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	e.t.Fatal("a schedule run did not finish starting")
 }
 
 func (e *schedEnv) sched(id string) Schedule {
