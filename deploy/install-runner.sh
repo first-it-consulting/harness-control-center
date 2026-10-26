@@ -169,7 +169,7 @@ else
 fi
 
 echo "== image 'claude-code' (Claude Code $CC_VERSION)"
-cc_inputs=$(echo "$CC_VERSION $CC_INTEGRITY tools: $TOOLS" | cat - "$0" "$HERE/images/common.sh" "$HERE/images/claude-code/init" "$ASSETS/alpine-minirootfs.tar.gz" "$ASSETS/vmlinux" | sha256sum | cut -d' ' -f1)
+cc_inputs=$(echo "$CC_VERSION $CC_INTEGRITY tools: $TOOLS" | cat - "$0" "$HERE/images/common.sh" "$HERE/images/claude-code/init" "$HERE/images/claude-code/hcc-subagent" "$ASSETS/alpine-minirootfs.tar.gz" "$ASSETS/vmlinux" | sha256sum | cut -d' ' -f1)
 if uptodate claude-code "$cc_inputs"; then
 	echo "   up to date"
 else
@@ -183,6 +183,7 @@ else
 	sudo install -m 0755 "$build/package/claude" "$tree/usr/local/bin/claude"
 	sudo install -D -m 0644 "$HERE/images/common.sh" "$tree/usr/lib/hcc/common.sh"
 	sudo install -m 0755 "$HERE/images/claude-code/init" "$tree/init"
+	sudo install -m 0755 "$HERE/images/claude-code/hcc-subagent" "$tree/usr/local/bin/hcc-subagent"
 	# Signed Alpine packages (apk verifies them against the keys in the
 	# minirootfs). The chroot gets /proc, /dev and DNS for the build only.
 	sudo cp -L /etc/resolv.conf "$tree/etc/resolv.conf"

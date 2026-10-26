@@ -27,6 +27,14 @@ if [ -n "$ITER" ]; then
 	printf '\n\n(This task runs in a loop: this is run %s of at most %s, and each run starts with an empty working directory. When the whole task is complete, create the file .hcc-done in the current directory. Otherwise do the next part of the work and stop.)\n' \
 		"$ITER" "$MAXITER" >>/tmp/prompt.txt
 fi
+# A harness with subagents (ADR-0011): the agent may start helpers with
+# hcc-subagent, through its proxy.
+SUBAGENTS=$(echo "$TASK" | jq -r '.subagents.max // empty | tonumber? // empty')
+if [ -n "$SUBAGENTS" ] && [ -n "$HCC_PROXY" ]; then
+	export HCC_AGENT_API="$HCC_PROXY"
+	printf '\n\n(You can hand parts of this task to helper agents with the command hcc-subagent; run "hcc-subagent help" first. Each helper runs in its own sandbox with only the permissions you give it, never more than yours, and shares your budget. At most %s helpers can be started in total, including helpers of helpers. Helpers stop when you finish, so wait for those whose work you need.)\n' \
+		"$SUBAGENTS" >>/tmp/prompt.txt
+fi
 ENDPOINT=$(echo "$TASK" | jq -r '.model.endpoint // empty')
 
 # Writable home and workspace in memory, owned by the agent. The
@@ -35,6 +43,10 @@ mount -t tmpfs -o size=512m,uid=1000,gid=1000,mode=0700 tmpfs /home/agent
 mkdir -p /tmp/workspace
 mount -t tmpfs -o size=50%,uid=1000,gid=1000,mode=0755 tmpfs /tmp/workspace
 chown agent:agent /tmp/prompt.txt
+
+# The agent needs no user namespaces; without them, less of the guest
+# kernel is within its reach.
+echo 0 >/proc/sys/user/max_user_namespaces
 
 export HOME=/home/agent USER=agent SHELL=/bin/bash TERM=dumb PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 # A placeholder: the egress proxy replaces it with the real credential.

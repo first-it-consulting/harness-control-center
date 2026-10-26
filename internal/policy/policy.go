@@ -114,11 +114,12 @@ func (e *Engine) CheckToolInstall(pkg string) Decision {
 }
 
 // CheckSpawnSubagent decides whether another subagent may start, given how
-// many are currently running in this harness's tree.
-func (e *Engine) CheckSpawnSubagent(running int) Decision {
+// many this harness's job and its subagents have started so far (the
+// limit covers its whole subtree, over its whole run).
+func (e *Engine) CheckSpawnSubagent(started int) Decision {
 	limit := e.h.Spec.Permissions.Subagents.Max
-	if running < limit {
-		return allow("subagent %d of %d", running+1, limit)
+	if started < limit {
+		return allow("subagent %d of %d", started+1, limit)
 	}
 	if limit == 0 {
 		return deny("subagents are not allowed")

@@ -470,9 +470,15 @@ func printJobs(w io.Writer, jobs []runner.Job) {
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "JOB\tHARNESS\tSTATE\tCREATED\tTOKENS\tDETAIL")
+	fmt.Fprintln(tw, "JOB\tHARNESS\tSTARTED BY\tSTATE\tCREATED\tTOKENS\tDETAIL")
 	for _, j := range jobs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", j.ID, j.Harness, j.State, j.Created.Local().Format("2006-01-02 15:04:05"), formatUsage(j), safetext.Line(j.Error))
+		by := "-"
+		if j.Parent != "" {
+			by = j.Parent
+		} else if j.Schedule != "" {
+			by = j.Schedule
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", j.ID, j.Harness, by, j.State, j.Created.Local().Format("2006-01-02 15:04:05"), formatUsage(j), safetext.Line(j.Error))
 	}
 	_ = tw.Flush()
 }

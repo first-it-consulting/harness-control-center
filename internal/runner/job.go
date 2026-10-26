@@ -60,6 +60,9 @@ type Job struct {
 	Schedule string `json:"schedule,omitempty"`
 	// LoopDone: the run reported that its loop's task is complete.
 	LoopDone bool `json:"loopDone,omitempty"`
+	// Parent is the job whose agent started this one (a subagent). Its
+	// Usage is the whole tree's: they share one budget.
+	Parent string `json:"parent,omitempty"`
 }
 
 // Status describes a runner.

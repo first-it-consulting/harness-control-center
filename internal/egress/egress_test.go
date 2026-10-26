@@ -408,3 +408,72 @@ func TestNoCAMeansQuiet404(t *testing.T) {
 		t.Errorf("status %d, want 404", resp.StatusCode)
 	}
 }
+
+func rawRequest(t *testing.T, proxy, req string) (int, string, http.Header) {
+	t.Helper()
+	c, err := net.Dial("tcp", proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprint(c, req)
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body), resp.Header
+}
+
+func TestSubagentAPIIsServedToTheGuest(t *testing.T) {
+	var got []string
+	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = append(got, r.Method+" "+r.URL.Path+" "+string(b))
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "999") // must not survive: the body is close-delimited
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"job-2"}`)
+	})
+	proxy, _, _ := startProxy(t, func(p *Proxy) { p.Agents = api })
+	code, body, h := rawRequest(t, proxy, "POST /hcc/v1/agents HTTP/1.1\r\nHost: proxy\r\nContent-Length: 13\r\n\r\n{\"prompt\":1}\n")
+	if code != http.StatusCreated || body != `{"id":"job-2"}` || h.Get("Content-Length") != "" || h.Get("Content-Type") != "application/json" {
+		t.Errorf("response = %d %q %v", code, body, h)
+	}
+	if len(got) != 1 || got[0] != "POST /hcc/v1/agents {\"prompt\":1}\n" {
+		t.Errorf("handler saw %q", got)
+	}
+	// Only under /hcc/v1/agents, and never as a proxied (absolute) URL.
+	for _, req := range []string{
+		"GET /hcc/v1/agentsx HTTP/1.1\r\nHost: proxy\r\n\r\n",
+		"GET http://proxy/hcc/v1/agents HTTP/1.1\r\nHost: proxy\r\n\r\n",
+	} {
+		if code, _, _ := rawRequest(t, proxy, req); code < 400 {
+			t.Errorf("%q = %d", req, code)
+		}
+	}
+	if len(got) != 1 {
+		t.Errorf("handler saw %q", got)
+	}
+}
+
+func TestNoSubagentAPIWithoutSubagents(t *testing.T) {
+	proxy, _, _ := startProxy(t, nil)
+	if code, _, _ := rawRequest(t, proxy, "GET /hcc/v1/agents HTTP/1.1\r\nHost: proxy\r\n\r\n"); code != http.StatusNotFound {
+		t.Errorf("status %d, want 404", code)
+	}
+}
+
+func TestSubagentAPIPanicIsContained(t *testing.T) {
+	proxy, _, _ := startProxy(t, func(p *Proxy) {
+		p.Agents = http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("bug") })
+	})
+	if code, _, _ := rawRequest(t, proxy, "GET /hcc/v1/agents HTTP/1.1\r\nHost: proxy\r\n\r\n"); code != http.StatusInternalServerError {
+		t.Errorf("status %d, want 500", code)
+	}
+	// The proxy still serves.
+	if code, _, _ := rawRequest(t, proxy, "GET /hcc/ca.pem HTTP/1.1\r\nHost: proxy\r\n\r\n"); code != http.StatusNotFound {
+		t.Errorf("after a panic: %d", code)
+	}
+}

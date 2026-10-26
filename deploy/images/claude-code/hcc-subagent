@@ -1,0 +1,135 @@
+#!/bin/bash
+# hcc-subagent: start and follow helper agents (ADR-0011). Each helper
+# runs in its own sandbox, with only the permissions it is given (never
+# more than this agent has), and shares this agent's budget. The runner
+# enforces all of that; this is only a client for its API, which this
+# sandbox's proxy serves.
+set -euo pipefail
+
+usage() {
+	cat <<'EOF'
+usage:
+  hcc-subagent start [options] < prompt.txt   start a helper, print its id
+      --name NAME            a label (lowercase letters, digits and '-')
+      --egress HOST[:PORT]   a host it may connect to (repeatable; port 443 by default)
+      --private              it may reach private network hosts (only if you can)
+      --credential NAME      a credential it may use (repeatable)
+      --tool PACKAGE         a tool to install for it (repeatable)
+      --subagents N          how many helpers it may start itself
+      --cpus N  --memory MIB  --disk MIB  --timeout DURATION (e.g. 10m)
+  hcc-subagent list                  your helpers (JSON)
+  hcc-subagent status ID             state, error and the end of its output (JSON)
+  hcc-subagent wait ID               wait until it has finished, then print its status
+  hcc-subagent output ID             the end of its output (text)
+  hcc-subagent results ID FILE       save the files it handed back (a tar archive)
+  hcc-subagent stop ID
+
+A helper gets access to your model and what you list, nothing else; its
+sandbox and time are at most yours. Helpers stop when you finish, so wait
+for the ones whose work you need.
+EOF
+}
+
+API=${HCC_AGENT_API:-}
+[[ -n $API ]] || { echo "hcc-subagent: this agent may not start helper agents" >&2; exit 1; }
+
+# req METHOD PATH [BODYFILE]: one request to the runner's API through the
+# proxy (a plain connection to the proxy itself). The response body goes
+# to stdout; fails unless the status is 2xx.
+req() {
+	local host=${API%:*} port=${API##*:} len=0 status line
+	[[ -n ${3:-} ]] && len=$(wc -c <"$3")
+	exec 3<>"/dev/tcp/$host/$port"
+	printf '%s %s HTTP/1.1\r\nHost: hcc\r\nContent-Type: application/json\r\nContent-Length: %s\r\nConnection: close\r\n\r\n' "$1" "$2" "$len" >&3
+	[[ -n ${3:-} ]] && cat "$3" >&3
+	read -r _ status _ <&3 || status=000
+	while IFS= read -r line <&3 && [[ -n ${line%$'\r'} ]]; do :; done
+	cat <&3
+	exec 3<&-
+	[[ $status == 2* ]]
+}
+
+# call METHOD PATH [BODYFILE]: req for JSON answers; errors go to stderr.
+call() {
+	local out
+	if ! out=$(req "$@"); then
+		echo "hcc-subagent: $(jq -r '.error // .' <<<"$out" 2>/dev/null || echo "$out")" >&2
+		return 1
+	fi
+	printf '%s\n' "$out"
+}
+
+valid_id() { [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "hcc-subagent: invalid id $1" >&2; exit 2; }; }
+number() { [[ $2 =~ ^[0-9]+$ ]] || { echo "hcc-subagent: $1 needs a number" >&2; exit 2; }; }
+
+start() {
+	local name="" private=false subagents=0 cpus=0 memory=0 disk=0 timeout=""
+	local egress='[]' creds='[]' tools='[]' host port
+	while [[ $# -gt 0 ]]; do
+		case $1 in
+		--name) name=$2; shift 2 ;;
+		--egress)
+			host=${2%%:*} port=443
+			[[ $2 == *:* ]] && port=${2##*:}
+			number --egress "$port"
+			egress=$(jq -c --arg h "$host" --argjson p "$port" '. + [{host: $h, ports: [$p]}]' <<<"$egress")
+			shift 2 ;;
+		--private) private=true; shift ;;
+		--credential) creds=$(jq -c --arg c "$2" '. + [$c]' <<<"$creds"); shift 2 ;;
+		--tool) tools=$(jq -c --arg t "$2" '. + [$t]' <<<"$tools"); shift 2 ;;
+		--subagents) number "$1" "$2"; subagents=$2; shift 2 ;;
+		--cpus) number "$1" "$2"; cpus=$2; shift 2 ;;
+		--memory) number "$1" "$2"; memory=$2; shift 2 ;;
+		--disk) number "$1" "$2"; disk=$2; shift 2 ;;
+		--timeout) timeout=$2; shift 2 ;;
+		*) echo "hcc-subagent: unknown option $1" >&2; usage >&2; exit 2 ;;
+		esac
+	done
+	local body prompt
+	body=$(mktemp)
+	prompt=$(mktemp)
+	cat >"$prompt"
+	jq -n --rawfile prompt "$prompt" --arg name "$name" --arg timeout "$timeout" \
+		--argjson egress "$egress" --argjson creds "$creds" --argjson tools "$tools" --argjson private "$private" \
+		--argjson subagents "$subagents" --argjson cpus "$cpus" --argjson memory "$memory" --argjson disk "$disk" '
+		{prompt: $prompt,
+		 sandbox: (({cpus: $cpus, memoryMiB: $memory, diskMiB: $disk} | with_entries(select(.value > 0)))
+		   + (if $timeout == "" then {} else {timeout: $timeout} end)),
+		 permissions: {network: {egress: $egress, allowPrivateNetworks: $private}, credentials: $creds,
+		   tools: {install: $tools}, subagents: {max: $subagents}}}
+		+ (if $name == "" then {} else {name: $name} end)' >"$body"
+	rm -f "$prompt"
+	local out
+	out=$(call POST /hcc/v1/agents "$body") || { rm -f "$body"; exit 1; }
+	rm -f "$body"
+	jq -r .id <<<"$out"
+}
+
+cmd=${1:-help}
+[[ $# -gt 0 ]] && shift
+case $cmd in
+start) start "$@" ;;
+list) call GET /hcc/v1/agents ;;
+status) valid_id "${1:?id}"; call GET "/hcc/v1/agents/$1" ;;
+output) valid_id "${1:?id}"; call GET "/hcc/v1/agents/$1" | jq -r '.output // ""' ;;
+wait)
+	valid_id "${1:?id}"
+	while :; do
+		out=$(call GET "/hcc/v1/agents/$1") || exit 1
+		case $(jq -r .state <<<"$out") in
+		succeeded | failed | timed_out | cancelled | over_budget) printf '%s\n' "$out"; break ;;
+		esac
+		sleep 5
+	done ;;
+results)
+	valid_id "${1:?id}"
+	file=${2:?file}
+	if ! req GET "/hcc/v1/agents/$1/results" >"$file"; then
+		echo "hcc-subagent: $(jq -r '.error // .' <"$file" 2>/dev/null)" >&2
+		rm -f "$file"
+		exit 1
+	fi ;;
+stop) valid_id "${1:?id}"; call POST "/hcc/v1/agents/$1/stop" >/dev/null ;;
+help | -h | --help) usage ;;
+*) echo "hcc-subagent: unknown command $cmd" >&2; usage >&2; exit 2 ;;
+esac

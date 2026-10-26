@@ -23,6 +23,18 @@ func resultsPath(stateDir, id string) (string, error) {
 	return filepath.Join(stateDir, "jobs", id, "results.tar"), nil
 }
 
+// OpenResultsFunc returns a runner.Config.ReadResults that opens a job's
+// stored results archive.
+func OpenResultsFunc(stateDir string) func(id string) (io.ReadCloser, error) {
+	return func(id string) (io.ReadCloser, error) {
+		p, err := resultsPath(stateDir, id)
+		if err != nil {
+			return nil, err
+		}
+		return os.Open(p) //nolint:gosec // path built from a validated id
+	}
+}
+
 // ResultsFunc returns a runner.Config.Results that sanitizes a job's disk
 // (internal/results) into <stateDir>/jobs/<id>/results.tar. Only a
 // complete, clean archive is kept: on any error, or if it holds no files,

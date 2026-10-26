@@ -17,10 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/first-it-consulting/harness-control-center/internal/budget"
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
-	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
 
 // testProvider prints to the console and exits, except for harnesses
@@ -258,8 +256,8 @@ func TestAPIRejectsBadInput(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.Status != 400 {
 		t.Errorf("invalid harness: %v", err)
 	}
-	_, err = d.client.Submit(ctx, []byte(harnessDoc+"  permissions: {subagents: {max: 1}}\n"))
-	if !errors.As(err, &apiErr) || !strings.Contains(apiErr.Message, "not supported") {
+	_, err = d.client.Submit(ctx, []byte(harnessDoc+"  approvals: {requireFor: [shell.rm]}\n"))
+	if !errors.As(err, &apiErr) || !strings.Contains(apiErr.Message, "shell.rm") {
 		t.Errorf("unsupported harness: %v", err)
 	}
 	if _, err := d.client.Get(ctx, "job-missing"); !errors.As(err, &apiErr) || apiErr.Status != 404 {
@@ -603,8 +601,8 @@ func TestApprovalAPI(t *testing.T) {
 	approvers := make(chan runner.Approver, 1)
 	r, err := runner.New(runner.Config{
 		Provider: testProvider{}, Images: []string{"base"},
-		Egress: func(_ *spec.Harness, _ string, _ *budget.Meter, a runner.Approver) (sandbox.Proxy, error) {
-			approvers <- a
+		Egress: func(ej runner.EgressJob) (sandbox.Proxy, error) {
+			approvers <- ej.Approve
 			return nopProxy{}, nil
 		},
 	})

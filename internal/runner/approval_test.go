@@ -7,9 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/first-it-consulting/harness-control-center/internal/budget"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
-	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
 
 func newApprovalRunner(t *testing.T, timeout time.Duration) (*Runner, chan Approver) {
@@ -19,8 +17,8 @@ func newApprovalRunner(t *testing.T, timeout time.Duration) (*Runner, chan Appro
 	p.block = true
 	r, err := New(Config{
 		Provider: p, Images: []string{"base"}, ApprovalTimeout: timeout,
-		Egress: func(_ *spec.Harness, _ string, _ *budget.Meter, approve Approver) (sandbox.Proxy, error) {
-			got <- approve
+		Egress: func(ej EgressJob) (sandbox.Proxy, error) {
+			got <- ej.Approve
 			return nopProxy{}, nil
 		},
 	})

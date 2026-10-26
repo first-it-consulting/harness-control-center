@@ -156,8 +156,13 @@ func (e *Engine) Explain() []string {
 	if p.Subagents.Max == 0 {
 		lines = append(lines, "Cannot start other agents.")
 	} else {
-		lines = append(lines, fmt.Sprintf("May start up to %d helper agents, which get at most these permissions and share this budget.",
-			p.Subagents.Max))
+		helpers := fmt.Sprintf("up to %d helper agents", p.Subagents.Max)
+		if p.Subagents.Max == 1 {
+			helpers = "one helper agent"
+		}
+		lines = append(lines, "May start "+helpers+" in total (helpers of helpers included). Each runs in its own sandbox "+
+			"with at most these permissions, no bigger sandbox and no more time, asks you before the same actions, "+
+			"shares this budget, and stops when this agent ends.")
 	}
 
 	if len(s.Approvals.RequireFor) > 0 {

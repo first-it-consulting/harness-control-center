@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -63,10 +64,12 @@ type Config struct {
 	// job ends.
 	Console func(jobID string) io.Writer
 	// Egress returns the egress proxy for a job whose harness grants
-	// network access; the proxy enforces meter (the job's budget) for the
-	// model traffic it brokers. Without it, such harnesses are rejected.
-	// approve decides the requests its approval gates hold.
-	Egress func(h *spec.Harness, jobID string, meter *budget.Meter, approve Approver) (sandbox.Proxy, error)
+	// network access (or subagents, whose API the proxy serves). Without
+	// it, such harnesses are rejected.
+	Egress func(EgressJob) (sandbox.Proxy, error)
+	// ReadResults opens a finished job's stored results archive, for its
+	// parent agent (subagents). Without it, parents cannot fetch them.
+	ReadResults func(jobID string) (io.ReadCloser, error)
 	// ApprovalTimeout bounds how long a gated request waits for a
 	// decision (default DefaultApprovalTimeout).
 	ApprovalTimeout time.Duration
@@ -101,15 +104,37 @@ type Config struct {
 	NewID func() string
 }
 
+// EgressJob is what an egress proxy is built for.
+type EgressJob struct {
+	Harness *spec.Harness
+	JobID   string
+	// Meter is the job's budget: the proxy enforces it on the model
+	// traffic it brokers. Subagents share their parent's.
+	Meter *budget.Meter
+	// Approve decides the requests the job's approval gates hold.
+	Approve Approver
+	// Agents, if set, is the subagent API the proxy serves to the guest
+	// (ADR-0011).
+	Agents http.Handler
+}
+
 type job struct {
 	Job
 	ctx     context.Context
 	cancel  context.CancelFunc
+	harness *spec.Harness // checked; nil for jobs loaded from the store
 	spec    sandbox.Spec
 	history []Event // every event of this job, oldest first (at most one per state)
 	meter   *budget.Meter
 	// overBudget is why the meter stopped the job, if it did.
 	overBudget string
+	// watch reads the guest console (exit status, loop marker, output).
+	watch *resultWatcher
+	// parent started this job (subagents); children are the jobs it
+	// started, and spawned counts every subagent started in its subtree.
+	parent   *job
+	children []*job
+	spawned  int
 }
 
 // Runner runs jobs. It is safe for concurrent use.
@@ -247,7 +272,7 @@ func (r *Runner) Submit(h *spec.Harness) (string, error) {
 	if triggered(h) {
 		return "", ErrTriggered
 	}
-	return r.enqueue(h, "", nil)
+	return r.enqueue(h, enqueueOpts{})
 }
 
 func triggered(h *spec.Harness) bool {
@@ -301,13 +326,23 @@ func (r *Runner) resolveTools(h *spec.Harness) (pkgs, files []string, err error)
 	return pkgs, files, nil
 }
 
+// needsNetwork: credentials only ever travel through the egress proxy,
+// and the subagent API is served by it.
 func needsNetwork(h *spec.Harness) bool {
-	return len(h.Spec.Permissions.Network.Egress) > 0 || len(h.Spec.Permissions.Credentials) > 0
+	p := h.Spec.Permissions
+	return len(p.Network.Egress) > 0 || len(p.Credentials) > 0 || p.Subagents.Max > 0
 }
 
-// enqueue queues a checked harness as a job; scheduleID and loop are set
-// for runs started by a schedule.
-func (r *Runner) enqueue(h *spec.Harness, scheduleID string, loop *TaskLoop) (string, error) {
+// enqueueOpts: scheduleID and loop are set for runs started by a
+// schedule, parent for subagents.
+type enqueueOpts struct {
+	scheduleID string
+	loop       *TaskLoop
+	parent     *job
+}
+
+// enqueue queues a checked harness as a job.
+func (r *Runner) enqueue(h *spec.Harness, o enqueueOpts) (string, error) {
 	needsNet := needsNetwork(h)
 	if needsNet && r.cfg.Egress == nil { // check does this too; never call a missing factory
 		return "", errors.New("runner: network access is not configured on this runner")
@@ -324,7 +359,7 @@ func (r *Runner) enqueue(h *spec.Harness, scheduleID string, loop *TaskLoop) (st
 	if len(files) > 0 {
 		taskTools = &TaskTools{Packages: pkgs, Files: files}
 	}
-	task, err := taskFor(h, loop, taskTools)
+	task, err := taskFor(h, o.loop, taskTools)
 	if err != nil {
 		return "", err
 	}
@@ -338,6 +373,12 @@ func (r *Runner) enqueue(h *spec.Harness, scheduleID string, loop *TaskLoop) (st
 		r.mu.Unlock()
 		return "", ErrKilled
 	}
+	if p := o.parent; p != nil {
+		if err := r.reserveSubagentLocked(p); err != nil {
+			r.mu.Unlock()
+			return "", err
+		}
+	}
 	id := r.cfg.NewID()
 	for r.jobs[id] != nil { // a stored job may hold it
 		id = r.cfg.NewID()
@@ -346,23 +387,41 @@ func (r *Runner) enqueue(h *spec.Harness, scheduleID string, loop *TaskLoop) (st
 		network *sandbox.Network
 		meter   *budget.Meter
 		j       *job
+		api     *agentAPI
 	)
 	if needsNet {
-		meter = budget.New(budget.Limits{MaxTokens: h.Spec.Budget.MaxTokens, MaxCostUSD: h.Spec.Budget.MaxCostUSD},
-			r.price(h), func(reason string) { r.stopOverBudget(j, reason) })
-		approve := func(ctx context.Context, req ApprovalRequest) error { return r.awaitApproval(ctx, j, req) }
-		proxy, err := r.cfg.Egress(h, id, meter, approve)
+		if o.parent != nil {
+			meter = o.parent.meter // one budget for the whole tree
+		} else {
+			meter = budget.New(budget.Limits{MaxTokens: h.Spec.Budget.MaxTokens, MaxCostUSD: h.Spec.Budget.MaxCostUSD},
+				r.price(h), func(reason string) { r.stopOverBudget(j, reason) })
+		}
+		ej := EgressJob{Harness: h, JobID: id, Meter: meter,
+			Approve: func(ctx context.Context, req ApprovalRequest) error { return r.awaitApproval(ctx, j, req) }}
+		if h.Spec.Permissions.Subagents.Max > 0 {
+			api = &agentAPI{r: r}
+			ej.Agents = api
+		}
+		proxy, err := r.cfg.Egress(ej)
 		if err != nil {
+			r.releaseSubagentLocked(o.parent)
 			r.mu.Unlock()
 			return "", fmt.Errorf("runner: egress proxy: %w", err)
 		}
 		network = &sandbox.Network{Proxy: proxy}
 	}
-	ctx, cancel := context.WithCancel(r.root)
+	// A subagent ends with its parent: its context is the parent's.
+	base := r.root
+	if o.parent != nil {
+		base = o.parent.ctx
+	}
+	ctx, cancel := context.WithCancel(base)
 	j = &job{
-		Job:    Job{ID: id, Harness: h.Metadata.Name, State: StateQueued, Created: r.cfg.Now(), Schedule: scheduleID},
-		ctx:    ctx,
-		cancel: cancel,
+		Job:     Job{ID: id, Harness: h.Metadata.Name, State: StateQueued, Created: r.cfg.Now(), Schedule: o.scheduleID},
+		ctx:     ctx,
+		cancel:  cancel,
+		harness: h,
+		parent:  o.parent,
 		spec: sandbox.Spec{
 			ID:        id,
 			Image:     h.Spec.Sandbox.Image,
@@ -379,8 +438,23 @@ func (r *Runner) enqueue(h *spec.Harness, scheduleID string, loop *TaskLoop) (st
 	if diskMiB > 0 {
 		j.spec.Collect = func(disk io.Reader) error { return r.collect(j, disk) }
 	}
+	if api != nil {
+		api.parent = j // before the guest exists, under r.mu
+	}
 	r.jobs[id] = j
-	r.queue = append(r.queue, j)
+	if p := o.parent; p != nil {
+		j.Parent = p.ID
+		p.children = append(p.children, j)
+		// Ahead of jobs that are not subagents: a parent holds a slot
+		// while it waits for its helpers.
+		i := slices.IndexFunc(r.queue, func(q *job) bool { return q.parent == nil })
+		if i < 0 {
+			i = len(r.queue)
+		}
+		r.queue = slices.Insert(r.queue, i, j)
+	} else {
+		r.queue = append(r.queue, j)
+	}
 	r.wg.Add(1)
 	r.emitLocked(j, Event{JobID: id, Harness: j.Harness, To: StateQueued, At: j.Created})
 	r.save(j.snapshot())
@@ -418,12 +492,19 @@ func (r *Runner) execute(j *job) {
 
 	r.transition(j, StateProvisioning, "")
 	if j.ctx.Err() != nil {
-		r.transition(j, StateCancelled, "cancelled before start")
+		msg := "cancelled before start"
+		if parentEnded(j) {
+			msg = "cancelled: its parent agent ended"
+		}
+		r.transition(j, StateCancelled, msg)
 		return
 	}
 	r.transition(j, StateRunning, "")
 
 	result := &resultWatcher{}
+	r.mu.Lock()
+	j.watch = result
+	r.mu.Unlock()
 	console := r.cfg.Console(j.ID)
 	res, err := r.cfg.Provider.Run(j.ctx, j.spec, io.MultiWriter(console, result))
 	if c, ok := console.(io.Closer); ok {
@@ -445,6 +526,8 @@ func (r *Runner) execute(j *job) {
 		r.transition(j, StateTimedOut, fmt.Sprintf("stopped after %s", j.spec.Timeout))
 	case res.Outcome == sandbox.OutcomeKilled && r.overBudgetReason(j) != "":
 		r.transition(j, StateOverBudget, "budget exceeded: "+r.overBudgetReason(j))
+	case res.Outcome == sandbox.OutcomeKilled && parentEnded(j):
+		r.transition(j, StateCancelled, "stopped: its parent agent ended")
 	case res.Outcome == sandbox.OutcomeKilled:
 		r.transition(j, StateCancelled, "stopped")
 	default:
@@ -482,6 +565,25 @@ func (r *Runner) transitionLocked(j *job, to State, msg string) {
 	if to.Terminal() && j.Schedule != "" {
 		r.runEndedLocked(j)
 	}
+	if to.Terminal() && len(j.children) > 0 {
+		r.endChildrenLocked(j)
+	}
+}
+
+// endChildrenLocked stops a finished job's subagents: queued ones never
+// start, running ones are stopped (their contexts derive from the
+// parent's, cancelled here at the latest).
+func (r *Runner) endChildrenLocked(j *job) {
+	j.cancel()
+	// Queued jobs have no children, so this does not recurse into
+	// cancelQueuedLocked while it walks the queue.
+	r.cancelQueuedLocked(func(q *job) bool { return q.parent == j }, "cancelled: its parent agent ended")
+}
+
+// parentEnded reports whether j is a subagent whose parent ended (or is
+// ending: its context is cancelled before its state changes).
+func parentEnded(j *job) bool {
+	return j.parent != nil && j.parent.ctx.Err() != nil
 }
 
 // Prune forgets finished jobs, oldest first, that finished more than
@@ -745,20 +847,8 @@ func (r *Runner) emitLocked(j *job, e Event) {
 // cannot enforce yet. Running them anyway would mean running something
 // other than what the user approved.
 func checkSupported(h *spec.Harness) error {
-	s := h.Spec
-	p := s.Permissions
-	var errs []error
-	notYet := func(what string) {
-		errs = append(errs, fmt.Errorf("%s is not supported by this runner yet", what))
-	}
-	if p.Subagents.Max > 0 {
-		notYet("subagents")
-	}
-	if err := policy.CheckApprovalPatterns(s.Approvals.RequireFor); err != nil {
-		errs = append(errs, err)
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("runner: %w", errors.Join(errs...))
+	if err := policy.CheckApprovalPatterns(h.Spec.Approvals.RequireFor); err != nil {
+		return fmt.Errorf("runner: %w", err)
 	}
 	return nil
 }
@@ -775,8 +865,20 @@ const resultMarker = "HCC-RESULT-END exit="
 // agent exited).
 const LoopDoneMarker = "HCC-LOOP-DONE"
 
-// resultWatcher reads the agent's exit status from the console. It
-// keeps only the current line, so memory stays bounded.
+// resultBegin is printed by an image's init right before the agent's
+// own output.
+const resultBegin = "HCC-RESULT-BEGIN"
+
+// maxOutput bounds the agent output kept for a parent agent (the end of
+// it, where the answer usually is).
+const maxOutput = 64 << 10
+
+// maxLine bounds a console line the watcher keeps.
+const maxLine = 4096
+
+// resultWatcher reads the agent's exit status from the console, and
+// keeps the end of the agent's output (what follows resultBegin until
+// init's next marker) for a parent agent. Memory stays bounded.
 type resultWatcher struct {
 	mu   sync.Mutex
 	line []byte
@@ -785,6 +887,9 @@ type resultWatcher struct {
 	// doneLine: the previous line was LoopDoneMarker; done: it was
 	// directly followed by the result marker.
 	doneLine, done bool
+	// inOutput: between resultBegin and the end of the agent's output.
+	inOutput, outputEnded bool
+	output                []byte
 }
 
 func (w *resultWatcher) Write(p []byte) (int, error) {
@@ -792,13 +897,15 @@ func (w *resultWatcher) Write(p []byte) (int, error) {
 	defer w.mu.Unlock()
 	for _, b := range p {
 		if b != '\n' {
-			if len(w.line) < 256 {
+			if len(w.line) < maxLine {
 				w.line = append(w.line, b)
 			}
 			continue
 		}
-		line := strings.TrimSpace(strings.TrimRight(string(w.line), "\r"))
+		raw := strings.TrimRight(string(w.line), "\r")
+		line := strings.TrimSpace(raw)
 		w.line = w.line[:0]
+		w.captureLine(line, raw)
 		if rest, ok := strings.CutPrefix(line, resultMarker); ok {
 			if n, err := strconv.Atoi(rest); err == nil {
 				w.code, w.seen = n, true
@@ -808,6 +915,32 @@ func (w *resultWatcher) Write(p []byte) (int, error) {
 		w.doneLine = line == LoopDoneMarker
 	}
 	return len(p), nil
+}
+
+// captureLine keeps the agent's output lines (raw, cut at maxLine bytes).
+// The agent could print a marker to end it early; that only shortens its
+// own output.
+func (w *resultWatcher) captureLine(line, raw string) {
+	switch {
+	case w.outputEnded:
+	case !w.inOutput:
+		w.inOutput = line == resultBegin
+	case strings.Contains(line, "HCC-RESULT") || strings.Contains(line, LoopDoneMarker):
+		w.outputEnded = true
+	default:
+		w.output = append(w.output, raw...)
+		w.output = append(w.output, '\n')
+		if over := len(w.output) - maxOutput; over > 0 {
+			w.output = append(w.output[:0], w.output[over:]...)
+		}
+	}
+}
+
+// agentOutput is the end of the agent's output so far.
+func (w *resultWatcher) agentOutput() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return string(w.output)
 }
 
 // loopDone reports whether init said the loop's task is done.
@@ -835,6 +968,14 @@ type Task struct {
 	Model   *TaskModel `json:"model,omitempty"`
 	Loop    *TaskLoop  `json:"loop,omitempty"`
 	Tools   *TaskTools `json:"tools,omitempty"`
+	// Subagents tells the runtime it may start helper agents (ADR-0011).
+	Subagents *TaskSubagents `json:"subagents,omitempty"`
+}
+
+// TaskSubagents tells the runtime how many helpers its whole subtree may
+// start (Max).
+type TaskSubagents struct {
+	Max int `json:"max"`
 }
 
 // TaskTools tells the guest's init what to install from the tool
@@ -860,6 +1001,9 @@ type TaskModel struct {
 
 func taskFor(h *spec.Harness, loop *TaskLoop, tools *TaskTools) ([]byte, error) {
 	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt, Loop: loop, Tools: tools}
+	if n := h.Spec.Permissions.Subagents.Max; n > 0 {
+		t.Subagents = &TaskSubagents{Max: n}
+	}
 	if m := h.Spec.Model; m != nil {
 		t.Model = &TaskModel{Name: m.Name, Endpoint: m.Endpoint}
 	}

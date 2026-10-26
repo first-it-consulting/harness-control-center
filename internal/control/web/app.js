@@ -229,7 +229,7 @@ async function jobsView() {
         const href = "#/job/" + encodeURIComponent(j.runner) + "/" + encodeURIComponent(j.id);
         return h("tr", { class: "link", onclick: () => { location.hash = href; } },
           h("td", {}, badge(j.state)),
-          h("td", {}, h("a", { href }, j.harness)),
+          h("td", {}, h("a", { href }, j.harness), j.parent && h("div", { class: "muted" }, "helper of " + j.parent)),
           h("td", {}, j.runner),
           h("td", {}, fmtTime(j.started || j.created)),
           h("td", {}, fmtDuration(j.started, j.finished)),
@@ -249,8 +249,9 @@ async function jobView(runner, id) {
   const head = h("div", { class: "head" });
   const facts = h("dl", { class: "facts" });
   const results = h("div");
+  const helpers = h("div");
   const consoleText = h("pre", { class: "console" }, "Loading…");
-  show(head, h("div", { class: "card" }, facts), results, h("h2", {}, "Console"),
+  show(head, h("div", { class: "card" }, facts), helpers, results, h("h2", {}, "Console"),
     h("p", { class: "muted" }, "What the agent printed. Control characters are shown visibly."), consoleText);
   const jobPath = "/api/runners/" + encodeURIComponent(runner) + "/jobs/" + encodeURIComponent(id);
 
@@ -275,12 +276,27 @@ async function jobView(runner, id) {
       h("dt", {}, "Duration"), h("dd", {}, fmtDuration(j.started, j.finished)),
       h("dt", {}, "Model usage"), h("dd", {}, j.usage
         ? j.usage.inputTokens.toLocaleString() + " in / " + j.usage.outputTokens.toLocaleString() + " out" +
-          (j.usage.costKnown ? " ($" + j.usage.costUSD.toFixed(4) + ")" : "")
+          (j.usage.costKnown ? " ($" + j.usage.costUSD.toFixed(4) + ")" : "") +
+          (j.parent ? " (the whole group of agents: they share one budget)" : "")
         : "–"),
       j.schedule && h("dt", {}, "Started by"), j.schedule && h("dd", {}, h("a", { href: "#/schedules" }, "schedule " + j.schedule)),
+      j.parent && h("dt", {}, "Started by"), j.parent && h("dd", {}, "the agent of ",
+        h("a", { href: "#/job/" + encodeURIComponent(runner) + "/" + encodeURIComponent(j.parent) }, "job " + j.parent),
+        " (a helper: at most its permissions, and it stops when that job ends)"),
       j.loopDone && h("dt", {}, "Loop"), j.loopDone && h("dd", {}, "This run reported the task complete."),
       j.error && h("dt", {}, "Why it ended"), j.error && h("dd", {}, j.error));
     set(results, ...resultsBlock(j, jobPath));
+    try {
+      const all = await api("GET", "/api/jobs");
+      const kids = all.jobs.filter((k) => k.runner === runner && k.parent === j.id);
+      set(helpers, ...(kids.length === 0 ? [] : [
+        h("h2", {}, "Helper agents it started"),
+        h("ul", {}, kids.map((k) => h("li", {},
+          h("a", { href: "#/job/" + encodeURIComponent(runner) + "/" + encodeURIComponent(k.id) }, k.harness + " (" + k.id + ")"),
+          " ", badge(k.state))))]));
+    } catch (err) {
+      set(helpers);
+    }
     try {
       const c = await api("GET", jobPath + "/console");
       const atBottom = consoleText.scrollTop + consoleText.clientHeight >= consoleText.scrollHeight - 8;

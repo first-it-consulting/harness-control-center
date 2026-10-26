@@ -27,6 +27,7 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,6 +80,9 @@ type Proxy struct {
 	// Gate decides on requests whose actions need approval
 	// (Policy.RequiresApproval); without it they are refused.
 	Gate Gate
+	// Agents, if set, serves the subagent API (ADR-0011) to the guest:
+	// plain HTTP requests to the proxy itself under /hcc/v1/agents.
+	Agents http.Handler
 	// Resolve, Dial and LocalAddrs are replaceable for tests.
 	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 	Dial    func(ctx context.Context, addr netip.AddrPort) (net.Conn, error)
@@ -175,6 +179,10 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 	if req.Method != http.MethodConnect {
 		if req.Method == http.MethodGet && req.URL.Path == caPath && !req.URL.IsAbs() {
 			p.serveCA(conn) // 404 when the job has no CA: the guest's init asks anyway
+			return
+		}
+		if !req.URL.IsAbs() && (req.URL.Path == agentsPath || strings.HasPrefix(req.URL.Path, agentsPath+"/")) {
+			p.serveAgents(conn, req)
 			return
 		}
 		if req.URL.IsAbs() && req.URL.Scheme == "http" {
@@ -280,6 +288,72 @@ func (p *Proxy) resolveChecked(ctx context.Context, conn net.Conn, host string, 
 // caPath is where a guest fetches the job CA to trust (plain HTTP from
 // the proxy itself; the certificate is public).
 const caPath = "/hcc/ca.pem"
+
+// agentsPath is the subagent API's root (plain HTTP to the proxy itself).
+const agentsPath = "/hcc/v1/agents"
+
+// agentAPITimeout bounds one subagent API exchange, including
+// downloading a subagent's results.
+const agentAPITimeout = 10 * time.Minute
+
+// serveAgents answers one subagent API request; the connection closes
+// after it. The listener only accepts this sandbox's guest, so the
+// request is the job's own.
+func (p *Proxy) serveAgents(conn net.Conn, req *http.Request) {
+	if p.Agents == nil {
+		p.refuse(conn, http.StatusNotFound, "this job may not start subagents", "", 0, nil)
+		return
+	}
+	_ = conn.SetDeadline(time.Now().Add(agentAPITimeout))
+	w := &connResponse{conn: conn, header: http.Header{}}
+	defer func() {
+		// Nothing a guest sends may take the runner down.
+		if v := recover(); v != nil {
+			p.Log.Error("egress: subagent API failed", "job", p.JobID, "panic", fmt.Sprint(v))
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}()
+	p.Agents.ServeHTTP(w, req)
+	w.finish()
+	p.Log.Info("egress: subagent API", "job", p.JobID, "method", req.Method, "path", req.URL.Path, "status", w.code)
+}
+
+// connResponse writes one HTTP/1.1 response straight to a connection;
+// its body ends when the connection closes.
+type connResponse struct {
+	conn   net.Conn
+	header http.Header
+	code   int
+	err    error
+}
+
+func (w *connResponse) Header() http.Header { return w.header }
+
+func (w *connResponse) WriteHeader(code int) {
+	if w.code != 0 {
+		return
+	}
+	w.code = code
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\n", code, http.StatusText(code))
+	w.header.Del("Content-Length") // the body is close-delimited
+	w.header.Set("Connection", "close")
+	_ = w.header.Write(&b)
+	b.WriteString("\r\n")
+	_, w.err = w.conn.Write(b.Bytes())
+}
+
+func (w *connResponse) Write(b []byte) (int, error) {
+	w.WriteHeader(http.StatusOK)
+	if w.err != nil {
+		return 0, w.err
+	}
+	n, err := w.conn.Write(b)
+	w.err = err
+	return n, err
+}
+
+func (w *connResponse) finish() { w.WriteHeader(http.StatusOK) }
 
 func (p *Proxy) serveCA(conn net.Conn) {
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))

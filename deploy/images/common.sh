@@ -10,6 +10,11 @@ hcc_mounts() {
 	mount -t proc proc /proc
 	mount -t sysfs sys /sys
 	mount -t devtmpfs dev /dev 2>/dev/null || true
+	# What a full system's device manager would add.
+	ln -sf /proc/self/fd /dev/fd
+	ln -sf /proc/self/fd/0 /dev/stdin
+	ln -sf /proc/self/fd/1 /dev/stdout
+	ln -sf /proc/self/fd/2 /dev/stderr
 	mount -t tmpfs -o mode=1777,size=64m tmpfs /tmp
 }
 

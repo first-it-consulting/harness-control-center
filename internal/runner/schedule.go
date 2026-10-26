@@ -355,7 +355,7 @@ func (r *Runner) fire(s *schedule, now time.Time) {
 		}
 		return
 	}
-	id, err := r.enqueue(h, s.ID, loop)
+	id, err := r.enqueue(h, enqueueOpts{scheduleID: s.ID, loop: loop})
 
 	r.mu.Lock()
 	defer r.mu.Unlock()

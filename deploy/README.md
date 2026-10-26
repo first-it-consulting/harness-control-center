@@ -146,6 +146,21 @@ dependencies are fetched once, as signed Alpine packages, test-installed
 offline, and installed into each VM before its agent starts. The Control
 Center's Runners page lists what each image offers. See ADR-0010.
 
+## Subagents
+
+A harness with `spec.permissions.subagents.max` may start helper agents,
+each an ordinary job in its own VM with at most its parent's permissions
+and the parent's budget and approval gates (ADR-0011). Inside the
+`claude-code` image the agent uses `hcc-subagent`:
+
+```sh
+echo "write the tests" | hcc-subagent start --egress registry.npmjs.org --timeout 10m
+hcc-subagent wait <id>; hcc-subagent results <id> out.tar
+```
+
+Helpers need a free slot (`maxConcurrent`), queue ahead of other jobs and
+stop when their parent ends. `hcc jobs` shows who started each job.
+
 ## Job history
 
 Each job is kept in `/var/lib/hcc/state/jobs/<id>/` (owner-only): its

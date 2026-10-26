@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/first-it-consulting/harness-control-center/internal/budget"
 	"github.com/first-it-consulting/harness-control-center/internal/credentials"
 	"github.com/first-it-consulting/harness-control-center/internal/egress"
 	"github.com/first-it-consulting/harness-control-center/internal/policy"
@@ -111,6 +110,7 @@ func serve(configPath string, log *slog.Logger) error {
 		Console:       runnerd.ConsoleFunc(cfg.StateDir, log),
 		Pricing:       cfg.Pricing,
 		Results:       runnerd.ResultsFunc(cfg.StateDir),
+		ReadResults:   runnerd.OpenResultsFunc(cfg.StateDir),
 		MaxDiskMiB:    cfg.MaxDiskMiB,
 		Store:         store,
 		Recover: func(ctx context.Context, ids []string) error {
@@ -178,8 +178,9 @@ func pruneJobs(ctx context.Context, r *runner.Runner, store *runnerd.FileStore, 
 //
 // With approval gates, every allowed host is brokered (inspected), so
 // that no request bypasses a gate.
-func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slog.Logger) func(*spec.Harness, string, *budget.Meter, runner.Approver) (sandbox.Proxy, error) {
-	return func(h *spec.Harness, jobID string, meter *budget.Meter, approve runner.Approver) (sandbox.Proxy, error) {
+func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slog.Logger) func(runner.EgressJob) (sandbox.Proxy, error) {
+	return func(ej runner.EgressJob) (sandbox.Proxy, error) {
+		h, jobID := ej.Harness, ej.JobID
 		engine, err := policy.New(h)
 		if err != nil {
 			return nil, err
@@ -190,7 +191,8 @@ func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slo
 			Blocked:      []netip.Prefix{netCfg.Subnet},
 			JobID:        jobID,
 			Log:          log,
-			Meter:        meter,
+			Meter:        ej.Meter,
+			Agents:       ej.Agents,
 		}
 		byHost := map[string]credentials.Credential{}
 		if len(h.Spec.Permissions.Credentials) > 0 {
@@ -231,7 +233,7 @@ func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slo
 				}
 			}
 			p.Gate = func(ctx context.Context, g egress.GateRequest) error {
-				return approve(ctx, runner.ApprovalRequest{Actions: g.Actions, Method: g.Method, Host: g.Host, Path: g.Path, Details: g.Details})
+				return ej.Approve(ctx, runner.ApprovalRequest{Actions: g.Actions, Method: g.Method, Host: g.Host, Path: g.Path, Details: g.Details})
 			}
 		}
 		if len(tlsHosts) > 0 { // plain-http hosts need no CA
