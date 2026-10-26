@@ -258,8 +258,9 @@ func errNotFound(msg string) error { return notFound(msg) }
 // RunnerView is a runner as the UI shows it.
 type RunnerView struct {
 	RunnerRef
-	Status *runner.Status `json:"status,omitempty"`
-	Error  string         `json:"error,omitempty"`
+	Status  *runner.Status       `json:"status,omitempty"`
+	Plugins []runnerd.PluginView `json:"plugins,omitempty"`
+	Error   string               `json:"error,omitempty"`
 }
 
 // eachRunner calls fn for every configured runner concurrently.
@@ -288,18 +289,25 @@ func (s *Server) eachRunner(ctx context.Context, fn func(ctx context.Context, c 
 func (s *Server) runners(w http.ResponseWriter, r *http.Request) {
 	var mu sync.Mutex
 	statuses := map[string]runner.Status{}
+	plugs := map[string][]runnerd.PluginView{}
 	views := s.eachRunner(r.Context(), func(ctx context.Context, c *runnerd.Client, ref RunnerRef) error {
 		st, err := c.Info(ctx)
-		if err == nil {
-			mu.Lock()
-			statuses[ref.Name] = st
-			mu.Unlock()
+		if err != nil {
+			return err
 		}
-		return err
+		pl, perr := c.Plugins(ctx) // an older runner has none
+		mu.Lock()
+		statuses[ref.Name] = st
+		if perr == nil {
+			plugs[ref.Name] = pl
+		}
+		mu.Unlock()
+		return nil
 	})
 	for i := range views {
 		if st, ok := statuses[views[i].Name]; ok {
 			views[i].Status = &st
+			views[i].Plugins = plugs[views[i].Name]
 		}
 	}
 	writeJSON(w, http.StatusOK, views)

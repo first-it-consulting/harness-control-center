@@ -53,6 +53,9 @@ type Spec struct {
 	// DiskMiB, if set, gives the guest a blank writable drive of this
 	// size, its only writable drive. This is how results get out.
 	DiskMiB int
+	// Bundle, if set, is given to the guest read-only (a plugin's files,
+	// a tar archive), at most MaxBundleBytes.
+	Bundle []byte
 	// Tools, if set, attaches the image's tool catalog read-only, for the
 	// guest's init to install from before the agent starts (ADR-0010).
 	// The provider fails the run if the image has none.
@@ -81,7 +84,9 @@ const (
 	MaxMemoryMiB = 64 * 1024
 	MaxTimeout   = 24 * time.Hour
 	MaxTaskBytes = 1 << 20
-	MaxDiskMiB   = 256 * 1024
+	// MaxBundleBytes bounds Spec.Bundle.
+	MaxBundleBytes = 33 << 20
+	MaxDiskMiB     = 256 * 1024
 )
 
 var (
@@ -93,7 +98,7 @@ var (
 	reservedBootArgs = map[string]bool{
 		"init": true, "rdinit": true, "console": true, "root": true, "rootfstype": true,
 		"rw": true, "ro": true, "reboot": true, "panic": true, "pci": true,
-		"ip": true, "hcc.ip": true, "hcc.proxy": true, "hcc.tools": true,
+		"ip": true, "hcc.ip": true, "hcc.proxy": true, "hcc.tools": true, "hcc.bundle": true,
 	}
 )
 
@@ -116,6 +121,9 @@ func (s *Spec) Validate() error {
 	}
 	if len(s.Task) > MaxTaskBytes {
 		errs = append(errs, fmt.Errorf("sandbox: task is %d bytes; the limit is %d", len(s.Task), MaxTaskBytes))
+	}
+	if len(s.Bundle) > MaxBundleBytes {
+		errs = append(errs, fmt.Errorf("sandbox: bundle is %d bytes; the limit is %d", len(s.Bundle), MaxBundleBytes))
 	}
 	if s.CPUs < 1 || s.CPUs > MaxCPUs {
 		errs = append(errs, fmt.Errorf("sandbox: cpus must be between 1 and %d", MaxCPUs))

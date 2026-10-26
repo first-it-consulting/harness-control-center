@@ -166,6 +166,21 @@ hcc-subagent wait <id>; hcc-subagent results <id> out.tar
 Helpers need a free slot (`maxConcurrent`), queue ahead of other jobs and
 stop when their parent ends. `hcc jobs` shows who started each job.
 
+## Plugins
+
+Plugins run on the runner, each run in a VM of its own with exactly the
+permissions of its manifest (ADR-0013). Install one from its directory:
+
+```sh
+hcc plugin install examples/plugins/webhook --ssh <host>   # shows what it may do, asks
+hcc plugins --ssh <host>
+hcc plugin logs webhook --ssh <host>
+hcc plugin remove webhook --ssh <host>
+```
+
+At most `maxPluginVMs` (default 2) plugin VMs run at once, on VM identities
+of their own (`uid` up to `uid+maxConcurrent+maxPluginVMs-1`).
+
 ## Job history
 
 Each job is kept in `/var/lib/hcc/state/jobs/<id>/` (owner-only): its

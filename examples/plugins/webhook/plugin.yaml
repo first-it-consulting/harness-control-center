@@ -1,0 +1,22 @@
+# A notifier that posts every event, as JSON, to one webhook URL.
+# Install with: hcc plugin install examples/plugins/webhook --ssh <host>
+apiVersion: hcc/v1alpha1
+kind: Plugin
+metadata:
+  name: webhook
+  version: 0.1.0
+  description: Posts runner events as JSON to a webhook.
+spec:
+  type: notifier
+  # The URL's host must be in the egress allowlist below.
+  command: [./notify.sh, "https://hooks.example.com/hcc"]
+  events: [job.ended, job.awaiting_approval, schedule.paused]
+  sandbox:
+    memoryMiB: 512
+    timeout: 2m
+  permissions:
+    tools:
+      install: [curl]
+    network:
+      egress:
+        - host: hooks.example.com

@@ -11,12 +11,14 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"path/filepath"
 	"slices"
 	"syscall"
 	"time"
 
 	"github.com/first-it-consulting/harness-control-center/internal/credentials"
 	"github.com/first-it-consulting/harness-control-center/internal/egress"
+	"github.com/first-it-consulting/harness-control-center/internal/plugins"
 	"github.com/first-it-consulting/harness-control-center/internal/policy"
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
 	"github.com/first-it-consulting/harness-control-center/internal/runnerd"
@@ -81,8 +83,9 @@ func serve(configPath string, log *slog.Logger) error {
 	}
 	provider, err := firecracker.New(firecracker.Config{
 		StagingBase: cfg.Firecracker.StagingDir,
-		// One UID/GID per concurrently running VM: uid..uid+maxConcurrent-1.
-		Identities: cfg.MaxConcurrent,
+		// One UID/GID per concurrently running VM (jobs and plugins):
+		// uid..uid+maxConcurrent+maxPluginVMs-1.
+		Identities: cfg.VMSlots(),
 		Host:       firecracker.NewHelperHost(cfg.Firecracker.Helper),
 	})
 	if err != nil {
@@ -148,10 +151,28 @@ func serve(configPath string, log *slog.Logger) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	go pruneJobs(ctx, r, store, cfg.Retention, log)
+
+	// Plugins (ADR-0013): each run in a sandbox of its own, with its own
+	// share of the VM identities.
+	pluginStore := plugins.NewStore(filepath.Join(cfg.StateDir, "plugins"))
+	mgr := plugins.NewManager(plugins.Config{
+		Store: pluginStore, Provider: provider, Egress: rcfg.Egress, Images: images, Tools: catalogs,
+		Target: cfg.Target, MaxVMs: cfg.PluginVMs(), Console: runnerd.ConsoleFunc(cfg.StateDir, log), Log: log,
+	})
+	pluginsDone := make(chan struct{})
+	if cfg.PluginVMs() > 0 {
+		go func() { mgr.Run(ctx, r); close(pluginsDone) }()
+	} else {
+		close(pluginsDone)
+	}
+
 	log.Info("runner started", "version", version.Version, "target", cfg.Target, "socket", cfg.Socket,
-		"maxConcurrent", cfg.MaxConcurrent, "network", netCfg != nil)
-	err = runnerd.NewServer(r, cfg.StateDir, log).Serve(ctx, l)
-	log.Info("runner stopped; all jobs were stopped")
+		"maxConcurrent", cfg.MaxConcurrent, "maxPluginVMs", cfg.PluginVMs(), "network", netCfg != nil)
+	srv := runnerd.NewServer(r, cfg.StateDir, log)
+	srv.EnablePlugins(pluginStore, mgr)
+	err = srv.Serve(ctx, l)
+	<-pluginsDone
+	log.Info("runner stopped; all jobs and plugins were stopped")
 	return err
 }
 

@@ -88,7 +88,7 @@ func setup() (helper.Config, int, error) {
 			ChrootBase:      c.Firecracker.ChrootBase,
 			UID:             c.Firecracker.UID,
 			GID:             c.Firecracker.GID,
-			Identities:      c.MaxConcurrent,
+			Identities:      c.VMSlots(),
 			ForbiddenIDs:    []int{0, uid, gid},
 		},
 		StagingBase: c.Firecracker.StagingDir,

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/plugins"
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 )
@@ -116,7 +117,10 @@ func startDaemonIn(t *testing.T, dir string) *testDaemon {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &testDaemon{socket: sock, client: NewUnixClient(sock), cancel: cancel, done: make(chan error, 1), state: state}
-	go func() { d.done <- NewServer(r, state, log).Serve(ctx, l) }()
+	srv := NewServer(r, state, log)
+	store := plugins.NewStore(filepath.Join(state, "plugins"))
+	srv.EnablePlugins(store, plugins.NewManager(plugins.Config{Store: store}))
+	go func() { d.done <- srv.Serve(ctx, l) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -692,5 +696,46 @@ func TestEveryRequestIsContact(t *testing.T) {
 	// Persisted, for the next start.
 	if got := NewFileStore(d.state, slog.New(slog.DiscardHandler)).LoadContact(); got.IsZero() {
 		t.Error("contact not saved")
+	}
+}
+
+func TestPluginInstallNeedsTheConfirmedChecksum(t *testing.T) {
+	d := startDaemon(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	manifest := "apiVersion: hcc/v1alpha1\nkind: Plugin\nmetadata: {name: echo, version: 1.0.0}\nspec:\n  type: notifier\n  command: [cat]\n  events: [job.ended]\n"
+	if err := os.WriteFile(filepath.Join(dir, "plugin.yaml"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := plugins.Pack(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pv, err := d.client.PreviewPlugin(ctx, bundle)
+	if err != nil || pv.Name != "echo" || pv.Risk == "" {
+		t.Fatalf("preview = %+v, %v", pv, err)
+	}
+	if list, _ := d.client.Plugins(ctx); len(list) != 0 {
+		t.Fatal("a preview installed the plugin")
+	}
+	var apiErr *APIError
+	if _, err := d.client.InstallPlugin(ctx, bundle, strings.Repeat("a", 64)); !errors.As(err, &apiErr) || apiErr.Status != 400 {
+		t.Errorf("install with another checksum: %v", err)
+	}
+	if _, err := d.client.InstallPlugin(ctx, bundle, pv.SHA256); err != nil {
+		t.Fatal(err)
+	}
+	list, err := d.client.Plugins(ctx)
+	if err != nil || len(list) != 1 || list[0].Name != "echo" || list[0].Status.Name != "echo" {
+		t.Fatalf("plugins = %+v, %v", list, err)
+	}
+	if err := d.client.PluginLog(ctx, "echo", io.Discard); err == nil {
+		t.Error("log of a plugin that never ran")
+	}
+	if err := d.client.RemovePlugin(ctx, "echo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.client.RemovePlugin(ctx, "echo"); !errors.As(err, &apiErr) || apiErr.Status != 404 {
+		t.Errorf("second remove: %v", err)
 	}
 }

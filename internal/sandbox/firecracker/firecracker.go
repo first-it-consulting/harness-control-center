@@ -313,6 +313,11 @@ func (p *Provider) stage(dir string, spec *sandbox.Spec, link *NetInfo) error {
 			return err
 		}
 	}
+	if len(spec.Bundle) > 0 {
+		if err := writeStaged(bytes.NewReader(taskImage(spec.Bundle)), "bundle.img", filepath.Join(dir, "bundle.img")); err != nil {
+			return err
+		}
+	}
 	cfg, err := json.MarshalIndent(vmConfig(spec, link), "", "  ")
 	if err != nil {
 		return fmt.Errorf("firecracker: %w", err)
@@ -331,9 +336,12 @@ func vmConfig(spec *sandbox.Spec, link *NetInfo) map[string]any {
 		args = append(args, "hcc.ip="+link.Guest.String(),
 			"hcc.proxy="+netip.AddrPortFrom(link.Host, uint16(link.ProxyPort)).String()) //nolint:gosec // port validated by NetInfo.Valid
 	}
-	d, toolsDev := drives(spec)
+	d, toolsDev, bundleDev := drives(spec)
 	if toolsDev != "" {
 		args = append(args, "hcc.tools="+toolsDev)
+	}
+	if bundleDev != "" {
+		args = append(args, "hcc.bundle="+bundleDev)
 	}
 	cfg := map[string]any{
 		"boot-source": map[string]any{
@@ -435,8 +443,9 @@ func (l *peerListener) Accept() (net.Conn, error) {
 }
 
 // drives lists the VM's drives in the order the guest sees them (vda,
-// vdb, ...) and names the tool catalog's device, if attached.
-func drives(spec *sandbox.Spec) (d []map[string]any, toolsDev string) {
+// vdb, ...) and names the tool catalog's and the bundle's devices, if
+// attached.
+func drives(spec *sandbox.Spec) (d []map[string]any, toolsDev, bundleDev string) {
 	d = []map[string]any{{
 		"drive_id":       "rootfs",
 		"path_on_host":   "rootfs.ext4",
@@ -455,10 +464,19 @@ func drives(spec *sandbox.Spec) (d []map[string]any, toolsDev string) {
 	if spec.Tools {
 		// Linked into the jail by the helper from the image's
 		// configuration; the guest's init installs from it and unmounts it.
-		toolsDev = "vd" + "abc"[len(d):len(d)+1] // after rootfs and at most the task
+		toolsDev = devName(len(d))
 		d = append(d, map[string]any{
 			"drive_id":       "tools",
 			"path_on_host":   "tools.ext4",
+			"is_root_device": false,
+			"is_read_only":   true,
+		})
+	}
+	if len(spec.Bundle) > 0 {
+		bundleDev = devName(len(d))
+		d = append(d, map[string]any{
+			"drive_id":       "bundle",
+			"path_on_host":   "bundle.img",
 			"is_root_device": false,
 			"is_read_only":   true,
 		})
@@ -473,8 +491,11 @@ func drives(spec *sandbox.Spec) (d []map[string]any, toolsDev string) {
 			"is_read_only":   false,
 		})
 	}
-	return d, toolsDev
+	return d, toolsDev, bundleDev
 }
+
+// devName is the guest's name of drive i (at most 5 drives).
+func devName(i int) string { return "vd" + "abcde"[i:i+1] }
 
 // taskImage pads the task to whole sectors with zero bytes; the guest
 // strips them.

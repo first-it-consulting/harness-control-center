@@ -90,6 +90,7 @@ type Image struct {
 const (
 	MaxConfigBytes = 1 << 20
 	MaxTaskBytes   = sandbox.MaxTaskBytes + 512 // padded to whole sectors
+	MaxBundleBytes = sandbox.MaxBundleBytes + 512
 )
 
 // Deps are the side effects, replaceable in tests.
@@ -252,6 +253,7 @@ var stagedFiles = []struct {
 }{
 	{"config.json", MaxConfigBytes, false},
 	{"task.img", MaxTaskBytes, true},
+	{"bundle.img", MaxBundleBytes, true},
 }
 
 // MinFreeBytes must remain free on the jail filesystem after a jail is

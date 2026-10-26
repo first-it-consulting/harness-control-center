@@ -15,7 +15,7 @@ Living document. Update it in the same PR as any change that affects it.
 | Adversary | Assumption |
 |---|---|
 | **The agent itself** | The primary threat. It may be confused, wrong, or fully controlled through **prompt injection** by any content it reads (web pages, issues, READMEs, package metadata). We assume the agent is hostile and design the system to contain it. |
-| Malicious or buggy plugin | Runs out of process with declared permissions; treated as untrusted ([ADR-0002](adr/0002-plugin-system.md)). |
+| Malicious or buggy plugin | Runs in a sandbox of its own with exactly its manifest's permissions; treated as untrusted ([ADR-0013](adr/0013-plugins-in-sandboxes.md)). |
 | Network attacker | Between the Control Center and runners, and between the sandbox and the internet. |
 | Supply-chain attacker | Targets our dependencies, CI or release artifacts. |
 | Other local users on a runner host | Must not reach other users' agents, secrets or logs. |
@@ -46,7 +46,7 @@ Living document. Update it in the same PR as any change that affects it.
 | Destructive actions | Approval gates hold matching HTTP requests (e.g. `git.push`, `http.delete`) at the egress proxy, before they leave, until a human approves; with gates every allowed host is inspected, so nothing bypasses them; unenforceable actions are rejected; unanswered requests are refused. See ADR-0009. | done (tested; approved and denied for real on hcc-dev-1) |
 | The agent hides what it asks to do (escape sequences in a path, more ref updates than shown) | Request details are shown as inert text in CLI and UI; a push whose ref updates cannot all be read is refused, never offered. | done |
 | User misunderstands permissions | Plain-language `explain` and a risk rating before every start. The spec is strict (unknown fields are errors, single document, size-limited). | done |
-| Malicious plugin | Out-of-process plugins with a permission manifest approved by the user. Official plugins are signed. | planned |
+| Malicious plugin | Every plugin run is a Firecracker VM built from its manifest's permissions (egress proxy, credential broker, tools), as an unprivileged user; the operator sees what it may do and confirms the bundle's SHA-256, which is checked before every run; bundles hold only plain files; plugin VMs have their own identities. Signing of official plugins is planned. See ADR-0013. | done (tested; real notifier and enforcement checks on hcc-dev-1) |
 | A web page or local process drives the Control Center (CSRF, DNS rebinding, a session cookie collected by another local port) | Loopback only; a session exists only through the secret login link printed at start, and is no cookie: it travels in a header from the page's sessionStorage (port-scoped), handed over in the URL fragment; the Host header must be the server's; changes need a same-origin Origin and a JSON body; downloads use single-use, one-minute tickets. See ADR-0007. | done (tested) |
 | Agent output attacks the user through the UI (HTML or script injection, bidi tricks) | The UI builds the DOM only with textContent (a test forbids HTML parsing), the CSP allows no inline or foreign script, the console is neutralized server-side, results are downloads only. | done (tested) |
 | User starts a harness without understanding it | The UI shows the explanation and risk of exactly that document; starting needs an explicit confirmation, which the API also requires. | done |

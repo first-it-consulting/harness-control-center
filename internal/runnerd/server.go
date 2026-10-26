@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/plugins"
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
@@ -42,6 +43,10 @@ import (
 //	GET  /v1/events[?job=ID]    NDJSON event stream
 //	POST /v1/kill               kill switch
 //	POST /v1/resume             accept jobs again
+//	GET  /v1/plugins            installed plugins and their activity
+//	POST /v1/plugins[?confirm=SHA256]  preview a plugin bundle (tar), or install it
+//	DELETE /v1/plugins/{name}
+//	GET  /v1/plugins/{name}/log the plugin's last run's console
 //
 // Every request counts as contact (runner.Runner.Contact).
 
@@ -51,13 +56,16 @@ type Server struct {
 	stateDir string
 	log      *slog.Logger
 	http     *http.Server
+	mux      *http.ServeMux
+	plugins  *plugins.Store
+	manager  *plugins.Manager
 }
 
 // NewServer returns a server for r. Console logs are read from stateDir
 // (see ConsoleFunc).
 func NewServer(r *runner.Runner, stateDir string, log *slog.Logger) *Server {
-	s := &Server{r: r, stateDir: stateDir, log: log}
 	mux := http.NewServeMux()
+	s := &Server{r: r, stateDir: stateDir, log: log, mux: mux}
 	mux.HandleFunc("GET /v1/info", s.info)
 	mux.HandleFunc("POST /v1/jobs", s.submit)
 	mux.HandleFunc("GET /v1/jobs", s.list)

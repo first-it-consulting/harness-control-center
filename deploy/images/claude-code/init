@@ -18,6 +18,39 @@ if ! hcc_tools "$TASK"; then
 	echo "HCC-RESULT-END exit=1"
 	reboot -f
 fi
+
+# A plugin (ADR-0013): its files from the bundle drive, its command run in
+# its directory as the unprivileged user "agent". A notifier gets its
+# events as JSON lines on stdin.
+run_plugin() {
+	ptask=$1
+	dev=$(hcc_arg hcc.bundle)
+	case "$dev" in
+	vd[a-z]) ;;
+	*) echo "HCC-PLUGIN-ERROR no bundle attached"; return 1 ;;
+	esac
+	mount -t tmpfs -o size=512m,uid=1000,gid=1000,mode=0700 tmpfs /home/agent
+	mkdir /home/agent/plugin
+	tar -xf "/dev/$dev" -C /home/agent/plugin || { echo "HCC-PLUGIN-ERROR cannot unpack the plugin"; return 1; }
+	chown -R agent:agent /home/agent/plugin
+	echo "$ptask" | jq -c '.events[]?' >/tmp/events.jsonl
+	chown agent:agent /tmp/events.jsonl
+	echo "$ptask" | jq -r '.plugin.command[]' >/tmp/command.txt
+	set --
+	while IFS= read -r a; do set -- "$@" "$a"; done </tmp/command.txt
+	echo 0 >/proc/sys/user/max_user_namespaces
+	export HOME=/home/agent USER=agent SHELL=/bin/sh TERM=dumb PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+	echo "HCC-PLUGIN-START $(echo "$ptask" | jq -r '.plugin.name') ($(echo "$ptask" | jq -r '.plugin.type'))"
+	case $(echo "$ptask" | jq -r '.plugin.type') in
+	notifier) su -s /bin/sh agent -c 'cd /home/agent/plugin && exec "$0" "$@" </tmp/events.jsonl' "$@" ;;
+	*) echo "HCC-PLUGIN-ERROR unknown plugin type"; return 1 ;;
+	esac
+}
+if [ "$(echo "$TASK" | jq -r .runtime)" = plugin ]; then
+	run_plugin "$TASK"
+	echo "HCC-RESULT-END exit=$?"
+	reboot -f
+fi
 echo "$TASK" | jq -r .prompt >/tmp/prompt.txt
 MODEL=$(echo "$TASK" | jq -r '.model.name // empty')
 # A looping harness: tell the agent where it is and how to say it is done.

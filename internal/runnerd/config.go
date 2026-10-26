@@ -70,7 +70,23 @@ type Config struct {
 	// runner for that long (a Go duration between "1h" and "8760h",
 	// default "72h"; "off" never pauses).
 	ContactTimeout string `yaml:"contactTimeout"`
+	// MaxPluginVMs bounds the plugin sandboxes running at once
+	// (ADR-0013; default 2, 0..64). They have VM identities of their own,
+	// so plugins never take a job's slot.
+	MaxPluginVMs *int `yaml:"maxPluginVMs"`
 }
+
+// PluginVMs is MaxPluginVMs with its default.
+func (c *Config) PluginVMs() int {
+	if c.MaxPluginVMs == nil {
+		return 2
+	}
+	return *c.MaxPluginVMs
+}
+
+// VMSlots is the number of VM identities (and sandbox links): one per
+// job that may run at once and one per plugin sandbox.
+func (c *Config) VMSlots() int { return c.MaxConcurrent + c.PluginVMs() }
 
 // ContactWait is ContactTimeout parsed (valid after LoadConfig; 0 for
 // "off").
@@ -132,7 +148,7 @@ func (c *Config) NetworkConfig() (*firecracker.NetworkConfig, error) {
 	if nc.ProxyPort == 0 {
 		nc.ProxyPort = 3128
 	}
-	if err := nc.Validate(c.MaxConcurrent); err != nil {
+	if err := nc.Validate(c.VMSlots()); err != nil {
 		return nil, fmt.Errorf("runnerd: %w", err)
 	}
 	return nc, nil
@@ -307,6 +323,9 @@ func (c *Config) Validate() error {
 	}
 	if d, err := time.ParseDuration(c.ApprovalTimeout); err != nil || d < time.Minute || d > 24*time.Hour {
 		add("approvalTimeout must be a duration between 1m and 24h, got %q", c.ApprovalTimeout)
+	}
+	if n := c.PluginVMs(); n < 0 || n > 64 {
+		add("maxPluginVMs must be between 0 and 64")
 	}
 	if d, err := time.ParseDuration(c.ContactTimeout); c.ContactTimeout != "off" && (err != nil || d < time.Hour || d > 8760*time.Hour) {
 		add("contactTimeout must be \"off\" or a duration between 1h and 8760h, got %q", c.ContactTimeout)

@@ -254,6 +254,9 @@ func ValidateHostName(name string) error {
 	return nil
 }
 
+// ValidName reports whether s is a valid name (metadata.name rules).
+func ValidName(s string) bool { return nameRe.MatchString(s) }
+
 // ValidPackage reports whether pkg is a well-formed package reference
 // ("name" or "name@version"), using the same rules as the spec.
 func ValidPackage(pkg string) bool {

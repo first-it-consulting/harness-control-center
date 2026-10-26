@@ -648,6 +648,9 @@ function runnerCard(r) {
         ? " (paused if nobody contacts this runner for " + st.contactTimeout + "; this Control Center does every 5 minutes while it runs)"
         : "")),
       h("dt", {}, "Last contact"), h("dd", {}, fmtTime(st.lastContact)),
+      h("dt", {}, "Plugins"), h("dd", {}, (r.plugins || []).length === 0 ? "none" : h("ul", { class: "explain" },
+        r.plugins.map((p) => h("li", {}, p.name + " " + p.version + " (" + p.type + ", risk " + p.risk + ")",
+          p.status && p.status.lastResult ? " – last run " + fmtTime(p.status.lastRun) + ": " + p.status.lastResult : "")))),
       h("dt", {}, "Images"), h("dd", {}, st.images.join(", ")),
       h("dt", {}, "Tools"), h("dd", {}, Object.entries(st.tools || {}).map(([img, list]) => img + ": " + list.join(", ")).join("; ") || "none"),
       h("dt", {}, "Version"), h("dd", {}, st.version || "–")),

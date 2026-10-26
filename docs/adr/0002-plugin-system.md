@@ -1,6 +1,6 @@
 # ADR-0002: Out-of-process plugins over gRPC
 
-- Status: accepted
+- Status: superseded by [ADR-0013](0013-plugins-in-sandboxes.md)
 - Date: 2026-10-25
 
 ## Context

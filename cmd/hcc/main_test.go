@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/first-it-consulting/harness-control-center/internal/plugins"
 )
 
 func runCLI(args ...string) (code int, stdout, stderr string) {
@@ -36,6 +38,23 @@ func TestExamplesAreValid(t *testing.T) {
 	for _, f := range files {
 		if code, _, stderr := runCLI("validate", f); code != exitOK {
 			t.Errorf("%s: exit %d\n%s", f, code, stderr)
+		}
+	}
+}
+
+// So must the example plugins (as bundles, like an install sees them).
+func TestExamplePluginsAreValid(t *testing.T) {
+	dirs, err := filepath.Glob("../../examples/plugins/*")
+	if err != nil || len(dirs) == 0 {
+		t.Fatalf("no example plugins found: %v", err)
+	}
+	for _, d := range dirs {
+		b, err := plugins.Pack(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := plugins.Check(bytes.NewReader(b)); err != nil {
+			t.Errorf("%s: %v", d, err)
 		}
 	}
 }

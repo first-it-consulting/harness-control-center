@@ -219,6 +219,8 @@ sudo tee /etc/hcc/runner.yaml >/dev/null <<CONF
 # Managed by install-runner.sh.
 target: $TARGET
 maxConcurrent: 2
+# Plugin sandboxes running at once, besides the jobs (ADR-0013).
+maxPluginVMs: 2
 runnerUser: $RUN_USER
 socket: /run/hcc/runner.sock
 socketGroup: $GROUP
@@ -230,7 +232,7 @@ firecracker:
   chrootBase: /var/lib/hcc-jails
   stagingDir: /var/lib/hcc/staging
   imageRoot: $IMAGES
-  # Each running VM gets its own IDs: 64000..64000+maxConcurrent-1.
+  # Each running VM gets its own IDs: 64000..64000+maxConcurrent+maxPluginVMs-1.
   uid: 64000
   gid: 64000
 images:

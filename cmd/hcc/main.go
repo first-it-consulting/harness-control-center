@@ -40,6 +40,12 @@ Jobs (on a local runner, or a remote one with --ssh HOST):
   kill                     kill switch: stop all jobs and refuse new ones
   resume                   accept jobs again after kill
 
+Plugins (each runs in a sandbox of its own on the runner):
+  plugins                  list installed plugins and their last run
+  plugin install <dir>     show what a plugin may do, confirm, install it
+  plugin remove <name>
+  plugin logs <name>       its last run's console output
+
 Control Center:
   control serve [--listen 127.0.0.1:7878]   the web UI, on this computer only
 
@@ -75,6 +81,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdApprovals(cmd, rest, stdout, stderr)
 	case "schedules", "schedule":
 		return cmdSchedules(cmd, rest, stdout, stderr)
+	case "plugins", "plugin":
+		return cmdPlugins(cmd, rest, stdin, stdout, stderr)
 	case "runner":
 		return cmdRunner(rest, stdin, stdout, stderr)
 	case "control":

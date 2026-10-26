@@ -768,6 +768,38 @@ func TestToolsDriveIsReadOnlyAndNamedToTheGuest(t *testing.T) {
 	}
 }
 
+func TestBundleDrive(t *testing.T) {
+	f := newFixture(t, exitsCleanly)
+	f.spec.Tools = true
+	f.spec.Bundle = []byte("plugin files")
+	f.spec.DiskMiB = 64
+	var staged []byte
+	f.host.onStart = func(string) {
+		staged, _ = os.ReadFile(filepath.Join(f.base, f.spec.ID, "bundle.img"))
+	}
+	if _, _, err := f.run(context.Background(), t); err != nil {
+		t.Fatal(err)
+	}
+	if len(staged) != 512 || string(bytes.TrimRight(staged, "\x00")) != "plugin files" {
+		t.Errorf("bundle.img = %q", staged)
+	}
+	drives, _ := f.host.config["drives"].([]any)
+	var ids []string
+	for _, d := range drives {
+		m, _ := d.(map[string]any)
+		ids = append(ids, m["drive_id"].(string))
+		if m["drive_id"] == "bundle" && m["is_read_only"] != true {
+			t.Errorf("bundle drive = %v", m)
+		}
+	}
+	if !slices.Equal(ids, []string{"rootfs", "task", "tools", "bundle", "disk"}) {
+		t.Errorf("drives = %v", ids)
+	}
+	if args := f.host.config["boot-source"].(map[string]any)["boot_args"].(string); !strings.Contains(args, " hcc.bundle=vdd") {
+		t.Errorf("boot args = %q", args)
+	}
+}
+
 func TestToolsBootArgIsReserved(t *testing.T) {
 	s := sandbox.Spec{ID: "a", Image: "base", CPUs: 1, MemoryMiB: 128, Timeout: time.Second, BootArgs: []string{"hcc.tools=vda"}}
 	if err := s.Validate(); err == nil {
