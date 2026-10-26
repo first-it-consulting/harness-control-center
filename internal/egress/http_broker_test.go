@@ -263,3 +263,21 @@ func TestOnlyTheModelIsMetered(t *testing.T) {
 		t.Errorf("a non-model host was metered: %+v %q", u, meter.Exceeded())
 	}
 }
+
+// Once the budget is exhausted, no brokered host is reachable any more.
+func TestExhaustedBudgetStopsEveryBrokeredHost(t *testing.T) {
+	meter := budget.New(budget.Limits{MaxTokens: 100}, nil, nil)
+	meter.Fail("test")
+	proxy, _, _ := startHTTPBrokerModel(t, meter, "model.example")
+	c, err := net.Dial("tcp", proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	resp := send(t, c, bufio.NewReader(c), "GET http://llm.example:4000/api/things HTTP/1.1\r\nHost: llm.example:4000\r\n\r\n")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want 429", resp.StatusCode)
+	}
+}

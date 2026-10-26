@@ -79,7 +79,8 @@ func (b *broker) serve(ctx context.Context, conn net.Conn) {
 				pr.Out.Header.Set(b.cred.Header, b.cred.Value)
 			}
 		},
-		Transport:     &meteredTransport{base: transport, meter: b.p.meterFor(b.host, b.port)},
+		Transport: &gatedTransport{p: b.p, host: b.host, port: b.port,
+			base: &meteredTransport{base: transport, meter: b.p.meterFor(b.host, b.port)}},
 		FlushInterval: -1, // stream (e.g. server-sent events) as it arrives
 		ErrorLog:      log.New(io.Discard, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -236,7 +237,8 @@ func (p *Proxy) forwardHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader
 		IdleConnTimeout:     90 * time.Second,
 	}
 	defer transport.CloseIdleConnections()
-	metered := &meteredTransport{base: transport, meter: p.meterFor(host, port)}
+	metered := &gatedTransport{p: p, host: host, port: port,
+		base: &meteredTransport{base: transport, meter: p.meterFor(host, port)}}
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 

@@ -346,3 +346,32 @@ func TestExplainTriggers(t *testing.T) {
 		t.Errorf("schedule explanation:\n%s", text)
 	}
 }
+
+func TestApprovalVocabulary(t *testing.T) {
+	if err := CheckApprovalPatterns([]string{"git.push", "http.delete", "http.*", "git.*", "http.other"}); err != nil {
+		t.Errorf("supported patterns refused: %v", err)
+	}
+	for _, p := range []string{"git.push.default-branch", "delete.*", "shell.exec", "*", "http.connect", "gi.*"} {
+		if err := CheckApprovalPatterns([]string{p}); err == nil {
+			t.Errorf("%q accepted", p)
+		}
+	}
+	for _, tt := range []struct {
+		method, path string
+		want         []string
+	}{
+		{"GET", "/api/v4/projects", []string{"http.get"}},
+		{"POST", "/group/repo.git/git-receive-pack", []string{"http.post", "git.push"}},
+		{"POST", "/group/repo.git/git-upload-pack", []string{"http.post"}},
+		{"PROPFIND", "/", []string{"http.other"}},
+		{"delete", "/x", []string{"http.delete"}},
+	} {
+		if got := HTTPActions(tt.method, tt.path); !slices.Equal(got, tt.want) {
+			t.Errorf("HTTPActions(%s %s) = %v, want %v", tt.method, tt.path, got, tt.want)
+		}
+	}
+	e := mustEngine(t, base+"  approvals: {requireFor: [git.*]}\n")
+	if !e.RequiresApprovalAny(HTTPActions("POST", "/r.git/git-receive-pack")) || e.RequiresApprovalAny(HTTPActions("GET", "/r.git/info/refs")) {
+		t.Error("git.* gate misclassified")
+	}
+}

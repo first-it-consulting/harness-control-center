@@ -202,6 +202,9 @@ func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slo
 				return nil, err
 			}
 			_, p.ModelHost, p.ModelPort = m.EndpointHostPort()
+			if p.ModelHost == "" || p.ModelPort < 1 || p.ModelPort > 65535 {
+				return nil, fmt.Errorf("model endpoint %q has no host and port", m.Endpoint)
+			}
 		}
 		var hosts, tlsHosts []string
 		for host, c := range byHost {

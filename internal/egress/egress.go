@@ -72,6 +72,13 @@ type Proxy struct {
 	Meter     *budget.Meter
 	ModelHost string
 	ModelPort int
+	// Inspect brokers every CONNECT, not only credentialed hosts, so that
+	// approval gates see every request (CA must cover all allowed hosts).
+	// Anything but TLS-wrapped HTTP then fails: nothing goes unseen.
+	Inspect bool
+	// Gate decides on requests whose actions need approval
+	// (Policy.RequiresApproval); without it they are refused.
+	Gate Gate
 	// Resolve, Dial and LocalAddrs are replaceable for tests.
 	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 	Dial    func(ctx context.Context, addr netip.AddrPort) (net.Conn, error)
@@ -193,13 +200,22 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 	buffered, _ := br.Peek(br.Buffered())
-	if cred, ok := p.Credentials[spec.NormalizeHost(host)]; ok && cred.Scheme == "https" && port == cred.Port {
+	cred, ok := p.Credentials[spec.NormalizeHost(host)]
+	credentialed := ok && cred.Scheme == "https" && port == cred.Port
+	if credentialed || (p.Inspect && p.CA != nil) {
+		if !credentialed {
+			cred = credentials.Credential{} // inspected only: nothing is added
+		}
 		_ = conn.SetReadDeadline(time.Time{})
 		if _, err := io.WriteString(conn, connectedResponse); err != nil {
 			return
 		}
 		b := &broker{p: p, host: spec.NormalizeHost(host), port: port, target: target, cred: cred}
 		b.serve(ctx, &prefixConn{Conn: conn, prefix: bytes.Clone(buffered)})
+		return
+	}
+	if p.Inspect { // fail closed: an uninspected tunnel would bypass the gates
+		p.refuse(conn, http.StatusForbidden, "this job's connections must be inspected, but there is no CA", host, port, nil)
 		return
 	}
 
