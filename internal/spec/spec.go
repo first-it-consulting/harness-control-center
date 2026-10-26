@@ -53,6 +53,45 @@ type Spec struct {
 	Permissions Permissions `yaml:"permissions,omitempty"`
 	Budget      Budget      `yaml:"budget,omitempty"`
 	Approvals   Approvals   `yaml:"approvals,omitempty"`
+	// MCP lists the MCP servers the agent may use (ADR-0014).
+	MCP MCP `yaml:"mcp,omitempty"`
+}
+
+// MCP lists MCP servers.
+type MCP struct {
+	Servers []MCPServer `yaml:"servers,omitempty"`
+}
+
+// MCPServer is one MCP server an agent may use: remote (URL) or an
+// installed mcp-server plugin of the runner (Plugin).
+type MCPServer struct {
+	// Name is how the agent and approval actions (mcp.<name>.<tool>)
+	// refer to it.
+	Name string `yaml:"name"`
+	// URL is a remote server's endpoint (streamable HTTP, https). Its host
+	// and port must be in the egress allowlist; a credential for that host
+	// is added by the broker.
+	URL string `yaml:"url,omitempty"`
+	// Plugin is an installed mcp-server plugin, started for each job in a
+	// sandbox of its own, with its own permissions.
+	Plugin string `yaml:"plugin,omitempty"`
+}
+
+// EndpointHostPort returns a remote server's host and port.
+func (s MCPServer) EndpointHostPort() (host string, port int, path string) {
+	u, err := url.Parse(s.URL)
+	if err != nil {
+		return "", 0, ""
+	}
+	port = 443
+	if p := u.Port(); p != "" {
+		port, _ = strconv.Atoi(p)
+	}
+	path = u.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	return NormalizeHost(u.Hostname()), port, path
 }
 
 // Model is the model an agent runtime uses.

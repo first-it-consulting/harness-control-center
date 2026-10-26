@@ -1,0 +1,19 @@
+# An MCP server (stdio) that keeps notes for one job. Harnesses use it
+# with:
+#   mcp:
+#     servers: [{name: notes, plugin: notes-mcp}]
+# and can gate deleting with  approvals: {requireFor: [mcp.notes.delete_note]}
+apiVersion: hcc/v1alpha1
+kind: Plugin
+metadata:
+  name: notes-mcp
+  version: 0.1.0
+  description: A tiny MCP server with add, list and delete for notes.
+spec:
+  type: mcp-server
+  command: [python3, server.py]
+  sandbox:
+    memoryMiB: 256
+  permissions:
+    tools:
+      install: [python3]

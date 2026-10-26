@@ -37,6 +37,20 @@ builds:
       - -s -w
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+  # Runs inside sandboxes (the claude-code image); Linux only.
+  - id: hcc-guest
+    main: ./cmd/hcc-guest
+    binary: hcc-guest
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
 archives:
   - formats: [tar.gz]
     # hcc-helper exists only for Linux, so archives differ in content.

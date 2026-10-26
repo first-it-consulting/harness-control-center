@@ -348,13 +348,29 @@ func TestExplainTriggers(t *testing.T) {
 }
 
 func TestApprovalVocabulary(t *testing.T) {
-	if err := CheckApprovalPatterns([]string{"git.push", "http.delete", "http.*", "git.*", "http.other"}); err != nil {
+	patterns := func(mcp []string, p ...string) *spec.Spec {
+		s := &spec.Spec{Approvals: spec.Approvals{RequireFor: p}}
+		for _, m := range mcp {
+			s.MCP.Servers = append(s.MCP.Servers, spec.MCPServer{Name: m, Plugin: "x"})
+		}
+		return s
+	}
+	if err := CheckApprovalPatterns(patterns(nil, "git.push", "http.delete", "http.*", "git.*", "http.other")); err != nil {
 		t.Errorf("supported patterns refused: %v", err)
 	}
-	for _, p := range []string{"git.push.default-branch", "delete.*", "shell.exec", "*", "http.connect", "gi.*"} {
-		if err := CheckApprovalPatterns([]string{p}); err == nil {
+	if err := CheckApprovalPatterns(patterns([]string{"gitlab"}, "mcp.*", "mcp", "mcp.gitlab.*", "mcp.gitlab.create_issue")); err != nil {
+		t.Errorf("MCP patterns refused: %v", err)
+	}
+	for _, p := range []string{"git.push.default-branch", "delete.*", "shell.exec", "*", "http.connect", "gi.*", "mcp.*", "mcp.gitlab.x"} {
+		if err := CheckApprovalPatterns(patterns(nil, p)); err == nil {
 			t.Errorf("%q accepted", p)
 		}
+	}
+	if err := CheckApprovalPatterns(patterns([]string{"gitlab"}, "mcp.github.*")); err == nil {
+		t.Error("a pattern for an undeclared MCP server was accepted")
+	}
+	if got := MCPAction("gitlab", "Create_Issue"); got != "mcp.gitlab.create_issue" {
+		t.Errorf("MCPAction = %q", got)
 	}
 	for _, tt := range []struct {
 		method, path string

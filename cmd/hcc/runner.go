@@ -130,6 +130,17 @@ func serve(configPath string, log *slog.Logger) error {
 	if netCfg != nil {
 		rcfg.Egress = egressFactory(netCfg, cfg.Credentials, log)
 	}
+	// Plugins (ADR-0013): each run in a sandbox of its own, with its own
+	// share of the VM identities. MCP server plugins run for jobs
+	// (ADR-0014).
+	pluginStore := plugins.NewStore(filepath.Join(cfg.StateDir, "plugins"))
+	mgr := plugins.NewManager(plugins.Config{
+		Store: pluginStore, Provider: provider, Egress: rcfg.Egress, Images: images, Tools: catalogs,
+		Target: cfg.Target, MaxVMs: cfg.PluginVMs(), Console: runnerd.ConsoleFunc(cfg.StateDir, log), Log: log,
+	})
+	if cfg.PluginVMs() > 0 {
+		rcfg.MCP = mgr
+	}
 	r, err := runner.New(rcfg)
 	if err != nil {
 		return err
@@ -152,13 +163,6 @@ func serve(configPath string, log *slog.Logger) error {
 	defer cancel()
 	go pruneJobs(ctx, r, store, cfg.Retention, log)
 
-	// Plugins (ADR-0013): each run in a sandbox of its own, with its own
-	// share of the VM identities.
-	pluginStore := plugins.NewStore(filepath.Join(cfg.StateDir, "plugins"))
-	mgr := plugins.NewManager(plugins.Config{
-		Store: pluginStore, Provider: provider, Egress: rcfg.Egress, Images: images, Tools: catalogs,
-		Target: cfg.Target, MaxVMs: cfg.PluginVMs(), Console: runnerd.ConsoleFunc(cfg.StateDir, log), Log: log,
-	})
 	pluginsDone := make(chan struct{})
 	if cfg.PluginVMs() > 0 {
 		go func() { mgr.Run(ctx, r); close(pluginsDone) }()
@@ -217,6 +221,12 @@ func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slo
 			Log:          log,
 			Meter:        ej.Meter,
 			Local:        ej.Local,
+		}
+		for _, s := range h.Spec.MCP.Servers {
+			if s.URL != "" {
+				host, port, path := s.EndpointHostPort()
+				p.MCP = append(p.MCP, egress.MCPEndpoint{Name: s.Name, Host: host, Port: port, Path: path})
+			}
 		}
 		byHost := map[string]credentials.Credential{}
 		if len(h.Spec.Permissions.Credentials) > 0 {

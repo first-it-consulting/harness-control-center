@@ -21,6 +21,7 @@ fuzz:
 	$(GO) test ./internal/results -run='^$$' -fuzz=FuzzSanitize -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/cron -run='^$$' -fuzz=FuzzNext -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/tools -run='^$$' -fuzz=FuzzParse -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/mcp -run='^$$' -fuzz=FuzzToolCalls -fuzztime=$(FUZZTIME)
 
 lint:
 	golangci-lint run
@@ -56,9 +57,10 @@ deploy-runner:
 		-ldflags "-s -w -X $(VERSION_PKG).Version=$$(git describe --tags --always --dirty) -X $(VERSION_PKG).Commit=$$(git rev-parse --short HEAD)" \
 		-o bin/hcc-linux-amd64 ./cmd/hcc
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o bin/hcc-helper-linux-amd64 ./cmd/hcc-helper
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o bin/hcc-guest-linux-amd64 ./cmd/hcc-guest
 	ssh $(HOST) 'rm -rf hcc-install && mkdir -m 0700 hcc-install'
-	scp -q -r bin/hcc-linux-amd64 bin/hcc-helper-linux-amd64 deploy/install-runner.sh deploy/hcc-runner.service deploy/images $(HOST):hcc-install/
-	ssh $(HOST) 'cd hcc-install && ./install-runner.sh ./hcc-linux-amd64 ./hcc-helper-linux-amd64 $(E2E_ASSETS) $(TARGET); rc=$$?; cd && rm -rf hcc-install; exit $$rc'
+	scp -q -r bin/hcc-linux-amd64 bin/hcc-helper-linux-amd64 bin/hcc-guest-linux-amd64 deploy/install-runner.sh deploy/hcc-runner.service deploy/images $(HOST):hcc-install/
+	ssh $(HOST) 'cd hcc-install && ./install-runner.sh ./hcc-linux-amd64 ./hcc-helper-linux-amd64 ./hcc-guest-linux-amd64 $(E2E_ASSETS) $(TARGET); rc=$$?; cd && rm -rf hcc-install; exit $$rc'
 
 snapshot:
 	goreleaser release --snapshot --clean

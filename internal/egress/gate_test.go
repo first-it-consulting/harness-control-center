@@ -47,6 +47,11 @@ type gateEnv struct {
 // credentials at all.
 func startGate(t *testing.T, gate bool) *gateEnv {
 	t.Helper()
+	return startGateFor(t, gate, gateHarness, nil)
+}
+
+func startGateFor(t *testing.T, gate bool, doc string, mutate func(*Proxy)) *gateEnv {
+	t.Helper()
 	env := &gateEnv{brokerEnv: &brokerEnv{log: &lockedLog{}, seen: make(chan *http.Request, 16)}, body: make(chan []byte, 16)}
 	env.upstream = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -55,7 +60,7 @@ func startGate(t *testing.T, gate bool) *gateEnv {
 	}))
 	env.upstream.StartTLS()
 	t.Cleanup(env.upstream.Close)
-	h, err := spec.Parse([]byte(gateHarness))
+	h, err := spec.Parse([]byte(doc))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,6 +85,9 @@ func startGate(t *testing.T, gate bool) *gateEnv {
 			return d.DialContext(ctx, "tcp", addr)
 		},
 		LocalAddrs: func() ([]netip.Addr, error) { return nil, nil },
+	}
+	if mutate != nil {
+		mutate(p)
 	}
 	if gate {
 		p.Gate = func(_ context.Context, r GateRequest) error {
@@ -235,6 +243,60 @@ func TestGateRefusesLongPathsAndUpgrades(t *testing.T) {
 	select {
 	case <-env.body:
 		t.Error("a refused request reached the upstream")
+	default:
+	}
+}
+
+const mcpHarness = `
+apiVersion: hcc/v1alpha1
+kind: Harness
+metadata: {name: g}
+spec:
+  runtime: claude-code
+  prompt: p
+  approvals: {requireFor: [mcp.docs.delete_page]}
+  mcp:
+    servers: [{name: docs, url: "https://example.com/mcp"}]
+  permissions:
+    network:
+      egress:
+        - host: example.com
+`
+
+func TestGateHoldsMCPToolCalls(t *testing.T) {
+	env := startGateFor(t, true, mcpHarness, func(p *Proxy) {
+		p.MCP = []MCPEndpoint{{Name: "docs", Host: "example.com", Port: 443, Path: "/mcp"}}
+	})
+	post := func(body string) *http.Response {
+		return env.do(t, fmt.Sprintf("POST /mcp HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body))
+	}
+	// Another tool: not gated, forwarded unchanged.
+	search := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"q":"x"}}}`
+	resp := post(search)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || len(env.asked) != 0 || string(<-env.body) != search {
+		t.Fatalf("search: %d, asked %v", resp.StatusCode, env.asked)
+	}
+	// The gated tool: held, shown with its arguments, then forwarded.
+	del := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"Delete_Page","arguments":{"page":"home"}}}`
+	resp = post(del)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(<-env.body) != del {
+		t.Fatalf("approved delete: %d", resp.StatusCode)
+	}
+	if len(env.asked) != 1 || !strings.Contains(strings.Join(env.asked[0].Actions, ","), "mcp.docs.delete_page") ||
+		len(env.asked[0].Details) != 1 || env.asked[0].Details[0] != `docs: tool Delete_Page, arguments {"page":"home"}` {
+		t.Errorf("asked %+v", env.asked)
+	}
+	// A message that cannot be read is refused, never forwarded.
+	resp = post(`{"jsonrpc":"2.0","method":"tools/call"`)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("unreadable message: %d", resp.StatusCode)
+	}
+	select {
+	case <-env.body:
+		t.Error("an unreadable message reached the server")
 	default:
 	}
 }

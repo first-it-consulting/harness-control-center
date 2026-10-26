@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
 
 // ApprovalActions are the actions approval gates can enforce: what the
@@ -17,16 +19,40 @@ var ApprovalActions = []string{
 	"git.push",
 }
 
-// CheckApprovalPatterns reports the patterns no gate can enforce.
-func CheckApprovalPatterns(patterns []string) error {
+// CheckApprovalPatterns reports the patterns of s.approvals.requireFor no
+// gate can enforce. Besides ApprovalActions, MCP tool calls of the
+// harness's own servers can be gated: mcp.<server>.<tool> (tool names in
+// lower case), or groups like mcp.<server>.* and mcp.*.
+func CheckApprovalPatterns(s *spec.Spec) error {
 	var errs []error
-	for _, p := range patterns {
-		if !enforceable(p) {
-			errs = append(errs, fmt.Errorf("approval for %q cannot be enforced (supported: %s, or http.* and git.*)",
-				p, strings.Join(ApprovalActions, ", ")))
+	for _, p := range s.Approvals.RequireFor {
+		if !enforceable(p) && !enforceableMCP(p, s) {
+			errs = append(errs, fmt.Errorf("approval for %q cannot be enforced (supported: %s, http.* and git.*, "+
+				"and mcp.<server>.<tool> for the servers in spec.mcp)", p, strings.Join(ApprovalActions, ", ")))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// enforceableMCP: a pattern below "mcp" naming no server or one of s's.
+func enforceableMCP(p string, s *spec.Spec) bool {
+	parts := strings.Split(strings.TrimSuffix(p, ".*"), ".")
+	if parts[0] != "mcp" || len(s.MCP.Servers) == 0 {
+		return false
+	}
+	return len(parts) == 1 || slices.ContainsFunc(s.MCP.Servers, func(m spec.MCPServer) bool { return m.Name == parts[1] })
+}
+
+// GatesMCP reports whether some MCP tool calls need approval.
+func (e *Engine) GatesMCP() bool {
+	return slices.ContainsFunc(e.h.Spec.Approvals.RequireFor, func(p string) bool {
+		return p == "mcp" || strings.HasPrefix(p, "mcp.")
+	})
+}
+
+// MCPAction is the approval action of calling tool on MCP server.
+func MCPAction(server, tool string) string {
+	return "mcp." + server + "." + strings.ToLower(tool)
 }
 
 func enforceable(p string) bool {

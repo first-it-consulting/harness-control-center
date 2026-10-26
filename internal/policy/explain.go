@@ -166,6 +166,15 @@ func (e *Engine) Explain() []string {
 			"shares this budget, and stops when this agent ends.")
 	}
 
+	for _, m := range s.MCP.Servers {
+		if m.URL != "" {
+			lines = append(lines, fmt.Sprintf("Can use the MCP server %s at %s (through its network access above).", m.Name, m.URL))
+		} else {
+			lines = append(lines, fmt.Sprintf("Can use the MCP server %s: the runner's plugin %s, started for this job in a sandbox "+
+				"of its own with its own permissions (see \"hcc plugins\"). It sees what the agent sends it.", m.Name, m.Plugin))
+		}
+	}
+
 	if len(s.Approvals.RequireFor) > 0 {
 		lines = append(lines, "Asks you before: "+strings.Join(s.Approvals.RequireFor, ", ")+
 			". To catch these, every connection it makes is inspected (only HTTPS works then). While it waits, the job pauses but its time limit keeps running; "+

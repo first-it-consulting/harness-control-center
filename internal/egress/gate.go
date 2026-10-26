@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/first-it-consulting/harness-control-center/internal/mcp"
 	"github.com/first-it-consulting/harness-control-center/internal/policy"
 )
 
@@ -64,6 +65,14 @@ func (t *gatedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return plainResponse(req, http.StatusForbidden, "connection upgrades are not allowed for a job with approval gates"), nil
 	}
 	actions := policy.HTTPActions(req.Method, req.URL.Path)
+	var details []string
+	if ep, ok := t.p.mcpEndpoint(t.host, t.port, req.URL.Path); ok && req.Method == http.MethodPost && t.p.Policy.GatesMCP() {
+		var err error
+		if req, actions, details, err = t.inspectMCP(req, ep, actions); err != nil {
+			t.p.Log.Warn("egress: MCP request refused", "job", t.p.JobID, "server", ep.Name, "err", err)
+			return plainResponse(req, http.StatusForbidden, "this MCP request cannot be approved: "+err.Error()), nil
+		}
+	}
 	if !t.p.Policy.RequiresApprovalAny(actions) {
 		return t.base.RoundTrip(req)
 	}
@@ -71,7 +80,7 @@ func (t *gatedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if len(uri) > maxGatePath { // never ask about what cannot be shown in full
 		return plainResponse(req, http.StatusForbidden, fmt.Sprintf("this request cannot be approved: its path is longer than %d bytes", maxGatePath)), nil
 	}
-	gr := GateRequest{Actions: actions, Method: req.Method, Host: t.host, Path: uri}
+	gr := GateRequest{Actions: actions, Method: req.Method, Host: t.host, Path: uri, Details: details}
 	if req.Body != nil && req.Body != http.NoBody && strings.HasSuffix(req.URL.Path, "/git-receive-pack") {
 		cmds, rest, err := pushCommands(req.Body)
 		if err != nil {
@@ -184,4 +193,33 @@ func short(id string) string {
 		return id[:12]
 	}
 	return id
+}
+
+// inspectMCP reads a request to an MCP server and adds the actions of its
+// tool calls (mcp.<server>.<tool>), each described in full.
+func (t *gatedTransport) inspectMCP(req *http.Request, ep MCPEndpoint, actions []string) (*http.Request, []string, []string, error) {
+	if req.Body == nil || req.Body == http.NoBody {
+		return req, actions, nil, nil
+	}
+	body, err := readMCPBody(req.Body)
+	if err != nil {
+		return req, nil, nil, err
+	}
+	req = req.Clone(req.Context())
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	calls, err := mcp.ToolCalls(body)
+	if err != nil {
+		return req, nil, nil, err
+	}
+	var details []string
+	for _, c := range calls {
+		d, err := mcp.DescribeToolCall(c)
+		if err != nil {
+			return req, nil, nil, err
+		}
+		actions = append(actions, policy.MCPAction(ep.Name, c.Tool))
+		details = append(details, ep.Name+": "+d)
+	}
+	return req, actions, details, nil
 }

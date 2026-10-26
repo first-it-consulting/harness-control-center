@@ -51,6 +51,14 @@ func New(h *spec.Harness) (*Engine, error) {
 			return nil, fmt.Errorf("policy: model endpoint %s:%d is not in the egress allowlist", host, port)
 		}
 	}
+	for _, s := range h.Spec.MCP.Servers {
+		if s.URL == "" {
+			continue
+		}
+		if host, port, _ := s.EndpointHostPort(); !e.CheckEgress(host, port).Allowed {
+			return nil, fmt.Errorf("policy: MCP server %s (%s:%d) is not in the egress allowlist", s.Name, host, port)
+		}
+	}
 	return e, nil
 }
 

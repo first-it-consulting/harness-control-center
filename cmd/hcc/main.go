@@ -48,6 +48,7 @@ Plugins (each runs in a sandbox of its own on the runner):
 
 Control Center:
   control serve [--listen 127.0.0.1:7878]   the web UI, on this computer only
+  control mcp              a read-only MCP server on stdin/stdout, for your own assistant
 
 Runner:
   runner serve --config <file>   run the runner daemon
@@ -86,7 +87,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "runner":
 		return cmdRunner(rest, stdin, stdout, stderr)
 	case "control":
-		return cmdControl(rest, stdout, stderr)
+		return cmdControl(rest, stdin, stdout, stderr)
 	case "version", "--version":
 		fmt.Fprintln(stdout, "hcc", version.String())
 		return exitOK

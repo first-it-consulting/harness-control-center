@@ -51,7 +51,7 @@ func TestApprovalApproveAndDeny(t *testing.T) {
 		t.Fatal(err)
 	}
 	approve := <-got
-	waitState(t, r, id, StateRunning)
+	started := waitState(t, r, id, StateRunning).Started
 
 	result := make(chan error, 1)
 	go func() {
@@ -69,7 +69,9 @@ func TestApprovalApproveAndDeny(t *testing.T) {
 	if err := <-result; err != nil {
 		t.Errorf("approved request: %v", err)
 	}
-	waitState(t, r, id, StateRunning)
+	if j := waitState(t, r, id, StateRunning); !j.Started.Equal(started) {
+		t.Errorf("the start time moved from %v to %v after the approval", started, j.Started)
+	}
 	if err := r.Decide(pending[0].ID, true); !errors.Is(err, ErrNoApproval) {
 		t.Errorf("decided twice: %v", err)
 	}

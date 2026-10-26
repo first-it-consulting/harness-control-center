@@ -67,6 +67,9 @@ type Config struct {
 	// network access (or subagents, whose API the proxy serves). Without
 	// it, such harnesses are rejected.
 	Egress func(EgressJob) (sandbox.Proxy, error)
+	// MCP runs the mcp-server plugins that harnesses name in spec.mcp.
+	// Without it, such harnesses are rejected.
+	MCP MCPPlugins
 	// ReadResults opens a finished job's stored results archive, for its
 	// parent agent (subagents). Without it, parents cannot fetch them.
 	ReadResults func(jobID string) (io.ReadCloser, error)
@@ -321,6 +324,9 @@ func (r *Runner) check(h *spec.Harness) error {
 	if _, _, err := r.resolveTools(h); err != nil {
 		return err
 	}
+	if err := r.checkMCP(h); err != nil {
+		return err
+	}
 	if r.cfg.Results != nil && h.Spec.Sandbox.DiskMiB > r.cfg.MaxDiskMiB {
 		return fmt.Errorf("runner: spec.sandbox.diskMiB %d exceeds this runner's limit of %d", h.Spec.Sandbox.DiskMiB, r.cfg.MaxDiskMiB)
 	}
@@ -347,7 +353,7 @@ func (r *Runner) resolveTools(h *spec.Harness) (pkgs, files []string, err error)
 // and the subagent API is served by it.
 func needsNetwork(h *spec.Harness) bool {
 	p := h.Spec.Permissions
-	return len(p.Network.Egress) > 0 || len(p.Credentials) > 0 || p.Subagents.Max > 0
+	return len(p.Network.Egress) > 0 || len(p.Credentials) > 0 || p.Subagents.Max > 0 || len(h.Spec.MCP.Servers) > 0
 }
 
 // enqueueOpts: scheduleID and loop are set for runs started by a
@@ -405,6 +411,7 @@ func (r *Runner) enqueue(h *spec.Harness, o enqueueOpts) (string, error) {
 		meter   *budget.Meter
 		j       *job
 		api     *agentAPI
+		mcpAPIs *mcpAPI
 	)
 	if needsNet {
 		if o.parent != nil {
@@ -415,9 +422,18 @@ func (r *Runner) enqueue(h *spec.Harness, o enqueueOpts) (string, error) {
 		}
 		ej := EgressJob{Harness: h, JobID: id, Meter: meter,
 			Approve: func(ctx context.Context, req ApprovalRequest) error { return r.awaitApproval(ctx, j, req) }}
+		local := http.NewServeMux()
 		if h.Spec.Permissions.Subagents.Max > 0 {
 			api = &agentAPI{r: r}
-			ej.Local = api
+			local.Handle("/hcc/v1/agents", api)
+			local.Handle("/hcc/v1/agents/", api)
+		}
+		if servers := pluginServers(h); len(servers) > 0 {
+			mcpAPIs = &mcpAPI{r: r, servers: servers}
+			local.Handle("/hcc/v1/mcp/", mcpAPIs)
+		}
+		if api != nil || mcpAPIs != nil {
+			ej.Local = local
 		}
 		proxy, err := r.cfg.Egress(ej)
 		if err != nil {
@@ -457,6 +473,9 @@ func (r *Runner) enqueue(h *spec.Harness, o enqueueOpts) (string, error) {
 	}
 	if api != nil {
 		api.parent = j // before the guest exists, under r.mu
+	}
+	if mcpAPIs != nil {
+		mcpAPIs.job = j
 	}
 	r.jobs[id] = j
 	if p := o.parent; p != nil {
@@ -568,7 +587,7 @@ func (r *Runner) transitionLocked(j *job, to State, msg string) {
 	}
 	now := r.cfg.Now()
 	j.State = to
-	if to == StateRunning {
+	if to == StateRunning && j.Started.IsZero() { // not again after an approval
 		j.Started = now
 	}
 	if to.Terminal() {
@@ -877,7 +896,7 @@ func (r *Runner) emitLocked(j *job, e Event) {
 // cannot enforce yet. Running them anyway would mean running something
 // other than what the user approved.
 func checkSupported(h *spec.Harness) error {
-	if err := policy.CheckApprovalPatterns(h.Spec.Approvals.RequireFor); err != nil {
+	if err := policy.CheckApprovalPatterns(&h.Spec); err != nil {
 		return fmt.Errorf("runner: %w", err)
 	}
 	return nil
@@ -1000,6 +1019,16 @@ type Task struct {
 	Tools   *TaskTools `json:"tools,omitempty"`
 	// Subagents tells the runtime it may start helper agents (ADR-0011).
 	Subagents *TaskSubagents `json:"subagents,omitempty"`
+	// MCP are the MCP servers the runtime configures (ADR-0014).
+	MCP []TaskMCP `json:"mcp,omitempty"`
+}
+
+// TaskMCP is one MCP server: remote (URL), or a plugin served by the
+// sandbox's proxy at /hcc/v1/mcp/<name> (Local).
+type TaskMCP struct {
+	Name  string `json:"name"`
+	URL   string `json:"url,omitempty"`
+	Local bool   `json:"local,omitempty"`
 }
 
 // TaskSubagents tells the runtime how many helpers its whole subtree may
@@ -1033,6 +1062,9 @@ func taskFor(h *spec.Harness, loop *TaskLoop, tools *TaskTools) ([]byte, error) 
 	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt, Loop: loop, Tools: tools}
 	if n := h.Spec.Permissions.Subagents.Max; n > 0 {
 		t.Subagents = &TaskSubagents{Max: n}
+	}
+	for _, s := range h.Spec.MCP.Servers {
+		t.MCP = append(t.MCP, TaskMCP{Name: s.Name, URL: s.URL, Local: s.Plugin != ""})
 	}
 	if m := h.Spec.Model; m != nil {
 		t.Model = &TaskModel{Name: m.Name, Endpoint: m.Endpoint}

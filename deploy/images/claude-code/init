@@ -43,6 +43,10 @@ run_plugin() {
 	echo "HCC-PLUGIN-START $(echo "$ptask" | jq -r '.plugin.name') ($(echo "$ptask" | jq -r '.plugin.type'))"
 	case $(echo "$ptask" | jq -r '.plugin.type') in
 	notifier) su -s /bin/sh agent -c 'cd /home/agent/plugin && exec "$0" "$@" </tmp/events.jsonl' "$@" ;;
+	mcp-server)
+		[ -n "$HCC_PROXY" ] || { echo "HCC-PLUGIN-ERROR no network to reach the runner"; return 1; }
+		export HCC_PLUGIN_API="$HCC_PROXY"
+		su -s /bin/sh agent -c 'cd /home/agent/plugin && exec /usr/local/bin/hcc-guest plugin-shim -- "$0" "$@"' "$@" ;;
 	*) echo "HCC-PLUGIN-ERROR unknown plugin type"; return 1 ;;
 	esac
 }
@@ -68,6 +72,16 @@ if [ -n "$SUBAGENTS" ] && [ -n "$HCC_PROXY" ]; then
 	printf '\n\n(You can hand parts of this task to helper agents with the command hcc-subagent; run "hcc-subagent help" first. Each helper runs in its own sandbox with only the permissions you give it, never more than yours, and shares your budget. At most %s helpers can be started in total, including helpers of helpers. Helpers stop when you finish, so wait for those whose work you need.)\n' \
 		"$SUBAGENTS" >>/tmp/prompt.txt
 fi
+# MCP servers (ADR-0014): remote ones at their URL (through the proxy,
+# like everything), plugins at the proxy's own address.
+MCP_ARGS=""
+if [ "$(echo "$TASK" | jq '.mcp // [] | length')" -gt 0 ]; then
+	echo "$TASK" | jq --arg proxy "$HCC_PROXY" '{mcpServers: (.mcp | map({key: .name, value: {type: "http",
+		url: (if .local then "http://" + $proxy + "/hcc/v1/mcp/" + .name else .url end)}}) | from_entries)}' >/tmp/mcp.json
+	chmod 0644 /tmp/mcp.json
+	MCP_ARGS="--mcp-config /tmp/mcp.json --strict-mcp-config"
+	export NO_PROXY="${HCC_PROXY%:*}" no_proxy="${HCC_PROXY%:*}"
+fi
 ENDPOINT=$(echo "$TASK" | jq -r '.model.endpoint // empty')
 
 # Writable home and workspace in memory, owned by the agent. The
@@ -92,7 +106,7 @@ export DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 \
 	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 USE_BUILTIN_RIPGREP=0
 
 echo "HCC-RESULT-BEGIN"
-su -s /bin/sh agent -c 'cd /tmp/workspace && /usr/local/bin/claude -p --output-format text --dangerously-skip-permissions </tmp/prompt.txt' 2>&1
+su -s /bin/sh agent -c "cd /tmp/workspace && /usr/local/bin/claude -p --output-format text --dangerously-skip-permissions $MCP_ARGS </tmp/prompt.txt" 2>&1
 rc=$?
 hcc_save_results /tmp/workspace
 # Printed by init, right before the result line, after the agent exited:

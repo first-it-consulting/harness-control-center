@@ -181,6 +181,20 @@ hcc plugin remove webhook --ssh <host>
 At most `maxPluginVMs` (default 2) plugin VMs run at once, on VM identities
 of their own (`uid` up to `uid+maxConcurrent+maxPluginVMs-1`).
 
+## MCP
+
+Harnesses list MCP servers in `spec.mcp.servers`: remote ones by `url`
+(their host must be in the egress allowlist) or installed `mcp-server`
+plugins by `plugin`:
+
+```sh
+hcc plugin install examples/plugins/notes-mcp --ssh <host>
+```
+
+Tool calls can need approval: `approvals: {requireFor: [mcp.notes.delete_note]}`.
+For your own assistant, `hcc control mcp` is a read-only MCP server (stdio)
+over everything the Control Center sees. See ADR-0014.
+
 ## Job history
 
 Each job is kept in `/var/lib/hcc/state/jobs/<id>/` (owner-only): its

@@ -13,12 +13,13 @@ import (
 	"github.com/first-it-consulting/harness-control-center/internal/control"
 )
 
-func cmdControl(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "serve" {
-		fmt.Fprintf(stderr, "hcc control: expected serve\n\n%s", usage)
+func cmdControl(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 || (args[0] != "serve" && args[0] != "mcp") {
+		fmt.Fprintf(stderr, "hcc control: expected serve or mcp\n\n%s", usage)
 		return exitUsage
 	}
-	fs := flag.NewFlagSet("control serve", flag.ContinueOnError)
+	mcpMode := args[0] == "mcp"
+	fs := flag.NewFlagSet("control "+args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	listen := fs.String("listen", "127.0.0.1:7878", "loopback address and port to serve the web UI on")
 	dir := fs.String("dir", "", "directory for control.yaml and saved harnesses (default: <user config dir>/hcc)")
@@ -33,7 +34,7 @@ func cmdControl(args []string, stdout, stderr io.Writer) int {
 		}
 		*dir = d
 	}
-	if err := os.MkdirAll(*dir, 0o700); err != nil {
+	if err := os.MkdirAll(*dir, 0o700); err != nil { //nolint:gosec // the user's own directory
 		fmt.Fprintln(stderr, "hcc control:", err)
 		return exitInvalid
 	}
@@ -43,6 +44,16 @@ func cmdControl(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, "hcc control:", err)
 		return exitInvalid
+	}
+	if mcpMode {
+		// MCP over stdio: stdout carries the protocol, logs go to stderr.
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		if err := srv.ServeMCP(ctx, stdin, stdout); err != nil && ctx.Err() == nil {
+			fmt.Fprintln(stderr, "hcc control mcp:", err)
+			return exitInvalid
+		}
+		return exitOK
 	}
 	l, err := control.ListenLoopback(*listen)
 	if err != nil {

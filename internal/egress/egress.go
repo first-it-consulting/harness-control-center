@@ -80,6 +80,9 @@ type Proxy struct {
 	// Gate decides on requests whose actions need approval
 	// (Policy.RequiresApproval); without it they are refused.
 	Gate Gate
+	// MCP are the harness's remote MCP servers, whose tool calls approval
+	// gates can hold (with Inspect).
+	MCP []MCPEndpoint
 	// Local, if set, serves the job's own API to the guest: plain HTTP
 	// requests to the proxy itself under /hcc/v1/ (subagents, ADR-0011;
 	// MCP servers run as plugins, ADR-0014).

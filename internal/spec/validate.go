@@ -66,6 +66,7 @@ func (h *Harness) Validate() error {
 		validateModel(s.Model, &s.Permissions, add)
 	}
 	validateBudget(&s.Budget, add)
+	validateMCP(&s.MCP, &s.Permissions, add)
 	for i, a := range s.Approvals.RequireFor {
 		if !actionRe.MatchString(a) {
 			add(fmt.Sprintf("spec.approvals.requireFor[%d]", i), "invalid action %q (expected e.g. \"git.push\" or \"git.*\")", a)
@@ -167,6 +168,51 @@ func validateModel(m *Model, p *Permissions, add addFunc) {
 	}
 	if m.Credential != "" && !slices.Contains(p.Credentials, m.Credential) {
 		add("spec.model.credential", "%q is not in permissions.credentials", m.Credential)
+	}
+}
+
+func validateMCP(m *MCP, p *Permissions, add addFunc) {
+	if len(m.Servers) > MaxMCPServers {
+		add("spec.mcp.servers", "at most %d servers", MaxMCPServers)
+	}
+	seen := map[string]bool{}
+	for i, s := range m.Servers {
+		path := fmt.Sprintf("spec.mcp.servers[%d]", i)
+		if !nameRe.MatchString(s.Name) {
+			add(path+".name", "must be 1-63 lowercase letters, digits or '-'")
+		} else if seen[s.Name] {
+			add(path+".name", "%q is listed twice", s.Name)
+		}
+		seen[s.Name] = true
+		switch {
+		case (s.URL == "") == (s.Plugin == ""):
+			add(path, "set exactly one of url and plugin")
+		case s.Plugin != "":
+			if !nameRe.MatchString(s.Plugin) {
+				add(path+".plugin", "invalid plugin name %q", s.Plugin)
+			}
+		default:
+			u, err := url.Parse(s.URL)
+			switch {
+			case err != nil:
+				add(path+".url", "invalid URL: %v", err)
+				continue
+			case u.Scheme != "https":
+				add(path+".url", "must be an https:// URL")
+			case u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "":
+				add(path+".url", "must not contain credentials, a query or a fragment")
+			case !urlPathRe.MatchString(u.EscapedPath()):
+				add(path+".url", "invalid path %q", u.Path)
+			}
+			if err := ValidateEgressHost(NormalizeHost(u.Hostname()), p.Network.AllowPrivateNetworks); err != nil {
+				add(path+".url", "%v", err)
+			}
+			if port := u.Port(); port != "" {
+				if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+					add(path+".url", "invalid port %q", port)
+				}
+			}
+		}
 	}
 }
 

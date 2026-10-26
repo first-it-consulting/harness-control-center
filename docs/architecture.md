@@ -54,7 +54,7 @@ queued → provisioning → running ⇄ awaiting_approval → succeeded | failed
 Plugins run on runners, each run in a sandbox of its own with exactly the
 permissions of its manifest (see [ADR-0013](adr/0013-plugins-in-sandboxes.md)).
 Types: `notifier` (runner events, as JSON lines on stdin) and `mcp-server`
-(a stdio MCP server agents can use). Sandbox providers, agent runtimes and
+(a stdio MCP server agents can use, ADR-0014). Sandbox providers, agent runtimes and
 transports are still part of the core.
 
 ## Repository layout
@@ -71,6 +71,8 @@ transports are still part of the core.
 | `internal/helper`, `cmd/hcc-helper` | the only root-side code: start, kill, remove a jail, network links, copy out a jail's disk; validates every argument |
 | `internal/budget` | per-job token and cost meter |
 | `internal/plugins` | plugin bundles and store, running plugins in their own sandboxes, notifier events (ADR-0013) |
+| `internal/mcp` | reads MCP (JSON-RPC) messages: tool calls for approval gates, relaying plugin servers (ADR-0014) |
+| `cmd/hcc-guest` | runs inside sandboxes: the MCP plugin shim |
 | `internal/tools` | an image's tool catalog: which signed packages a harness may get installed (ADR-0010) |
 | `internal/results` | re-packs a guest's results archive into a safe one (ADR-0006) |
 | `internal/egress` | per-VM HTTPS (CONNECT) egress proxy enforcing the harness's network policy (ADR-0004); credential broker with a per-job CA (ADR-0005) |

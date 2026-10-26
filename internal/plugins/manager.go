@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -327,7 +328,7 @@ func (m *Manager) notify(ctx context.Context, name string, batch []Event) (strin
 		return "", "failed: " + err.Error()
 	}
 	id := newRunID()
-	err = m.runPlugin(ctx, id, p, bundle, func(t *pluginTask) { t.Events = batch })
+	err = m.runPlugin(ctx, id, p, bundle, runOpts{fill: func(t *pluginTask) { t.Events = batch }})
 	if err != nil {
 		m.cfg.Log.Warn("notifier failed", "plugin", name, "run", id, "events", len(batch), "err", err)
 		return id, "failed: " + err.Error()
@@ -353,10 +354,18 @@ type taskPlugin struct {
 	Command []string `json:"command"`
 }
 
+// runOpts: fill completes the task; local, if set, is served to the
+// guest by its proxy (and the plugin then lives until ctx ends, not its
+// manifest's timeout).
+type runOpts struct {
+	fill  func(*pluginTask)
+	local http.Handler
+}
+
 // runPlugin runs a plugin in its own sandbox until its command exits
 // (or its time is up), with the egress, credentials and tools of its
 // manifest. The caller holds a slot.
-func (m *Manager) runPlugin(ctx context.Context, id string, p *spec.Plugin, bundle []byte, fill func(*pluginTask)) error {
+func (m *Manager) runPlugin(ctx context.Context, id string, p *spec.Plugin, bundle []byte, o runOpts) error {
 	h, err := p.Harness(m.cfg.Target)
 	if err != nil {
 		return err
@@ -378,8 +387,8 @@ func (m *Manager) runPlugin(ctx context.Context, id string, p *spec.Plugin, bund
 		}
 		t.Tools = &runner.TaskTools{Packages: pkgs, Files: files}
 	}
-	if fill != nil {
-		fill(&t)
+	if o.fill != nil {
+		o.fill(&t)
 	}
 	task, err := json.Marshal(t)
 	if err != nil {
@@ -392,12 +401,15 @@ func (m *Manager) runPlugin(ctx context.Context, id string, p *spec.Plugin, bund
 		ID: id, Image: img, Task: task, Bundle: bundle, Tools: t.Tools != nil,
 		CPUs: h.Spec.Sandbox.CPUs, MemoryMiB: h.Spec.Sandbox.MemoryMiB, Timeout: h.Spec.Sandbox.Timeout.Duration,
 	}
+	if o.local != nil {
+		s.Timeout = sandbox.MaxTimeout // it lives as long as its job (ctx)
+	}
 	perms := h.Spec.Permissions
-	if len(perms.Network.Egress) > 0 || len(perms.Credentials) > 0 {
+	if len(perms.Network.Egress) > 0 || len(perms.Credentials) > 0 || o.local != nil {
 		if m.cfg.Egress == nil {
 			return errors.New("network access is not configured on this runner")
 		}
-		proxy, err := m.cfg.Egress(runner.EgressJob{Harness: h, JobID: id})
+		proxy, err := m.cfg.Egress(runner.EgressJob{Harness: h, JobID: id, Local: o.local})
 		if err != nil {
 			return fmt.Errorf("egress proxy: %w", err)
 		}

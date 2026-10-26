@@ -4,7 +4,7 @@
 # whose only root access is the hcc-helper (one sudoers rule). The admin
 # user is added to the group hcc, which may use the runner's socket.
 #
-#   install-runner.sh <hcc-binary> <hcc-helper-binary> <assets-dir> <target>
+#   install-runner.sh <hcc-binary> <hcc-helper-binary> <hcc-guest-binary> <assets-dir> <target>
 #
 # <assets-dir> holds firecracker, jailer, vmlinux and
 # alpine-minirootfs.tar.gz, checksum-verified by hack/firecracker-poc/run.sh.
@@ -17,8 +17,9 @@ set -euo pipefail
 
 HCC_BIN=$1
 HELPER_BIN=$2
-ASSETS=$3
-TARGET=$4
+GUEST_BIN=$3
+ASSETS=$4
+TARGET=$5
 ADMIN_USER=$(id -un)
 TOOLS=${HCC_TOOLS-python3 py3-pip nodejs npm make gcc musl-dev curl go}
 RUN_USER=hcc-runner
@@ -169,7 +170,7 @@ else
 fi
 
 echo "== image 'claude-code' (Claude Code $CC_VERSION)"
-cc_inputs=$(echo "$CC_VERSION $CC_INTEGRITY tools: $TOOLS" | cat - "$0" "$HERE/images/common.sh" "$HERE/images/claude-code/init" "$HERE/images/claude-code/hcc-subagent" "$ASSETS/alpine-minirootfs.tar.gz" "$ASSETS/vmlinux" | sha256sum | cut -d' ' -f1)
+cc_inputs=$(echo "$CC_VERSION $CC_INTEGRITY tools: $TOOLS" | cat - "$0" "$HERE/images/common.sh" "$HERE/images/claude-code/init" "$HERE/images/claude-code/hcc-subagent" "$GUEST_BIN" "$ASSETS/alpine-minirootfs.tar.gz" "$ASSETS/vmlinux" | sha256sum | cut -d' ' -f1)
 if uptodate claude-code "$cc_inputs"; then
 	echo "   up to date"
 else
@@ -184,6 +185,7 @@ else
 	sudo install -D -m 0644 "$HERE/images/common.sh" "$tree/usr/lib/hcc/common.sh"
 	sudo install -m 0755 "$HERE/images/claude-code/init" "$tree/init"
 	sudo install -m 0755 "$HERE/images/claude-code/hcc-subagent" "$tree/usr/local/bin/hcc-subagent"
+	sudo install -m 0755 "$GUEST_BIN" "$tree/usr/local/bin/hcc-guest"
 	# Signed Alpine packages (apk verifies them against the keys in the
 	# minirootfs). The chroot gets /proc, /dev and DNS for the build only.
 	sudo cp -L /etc/resolv.conf "$tree/etc/resolv.conf"
