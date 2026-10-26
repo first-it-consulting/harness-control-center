@@ -45,7 +45,7 @@ Risk: high
 • Runs the claude-code agent on server homelab-01.
 • Stops after 2h0m0s per run, or once its model has used 2,000,000 tokens (or cost $5.00, for models the runner has a price for).
 • When it finishes, it can hand back up to 4,096 MiB of files (plain files and folders only; nothing else is kept).
-• Starts automatically on the cron schedule "0 2 * * *" (times in UTC), without anyone watching, until you pause or delete the schedule. A run is skipped while the previous one is still going. Every run has the limits above.
+• Starts automatically on the cron schedule "0 2 * * *" (times in UTC), without anyone watching, until you pause or delete the schedule. A run is skipped while the previous one is still going. Every run has the limits above. If nobody contacts its runner for a while (72 hours unless the runner is set otherwise), the schedule pauses.
 • Can connect only to: gitlab.com, registry.npmjs.org.
 • Can act as you using: gitlab-my-team. The agent never sees these secrets.
 • Gets these tools installed before it starts: nodejs, npm. They come from the runner's own catalog of signed packages. The agent cannot install system packages itself; what it can download is limited by its network access.

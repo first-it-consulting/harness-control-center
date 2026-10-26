@@ -58,6 +58,12 @@ func TestLoadConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if c.ContactWait() != 72*time.Hour {
+		t.Errorf("default contactTimeout = %s", c.ContactWait())
+	}
+	if off, err := LoadConfig(writeConfig(t, goodConfig+"contactTimeout: \"off\"\n")); err != nil || off.ContactWait() != 0 {
+		t.Errorf("contactTimeout off: %v, %v", err, off)
+	}
 	if c.Target != "local" || c.MaxConcurrent != 1 || c.Socket != DefaultSocket || c.MaxDiskMiB != 8192 ||
 		c.Retention.MaxJobs != 1000 || c.Retention.Age() != 30*24*time.Hour {
 		t.Errorf("defaults = %+v", c)
@@ -88,6 +94,8 @@ func TestLoadConfigRejects(t *testing.T) {
 		"retention garbage":   {"maxConcurrent: 2", "maxConcurrent: 2\nretention: {maxAge: forever}", "retention.maxAge"},
 		"retention no jobs":   {"maxConcurrent: 2", "maxConcurrent: 2\nretention: {maxJobs: -3}", "retention.maxJobs"},
 		"tools outside root":  {"rootfs.ext4\n", "rootfs.ext4\n    tools: {drive: /tmp/tools.ext4, packages: /var/lib/hcc/images/base/tools.txt}\n", "tools.drive"},
+		"contact too short":   {"maxConcurrent: 2", "maxConcurrent: 2\ncontactTimeout: 30m", "contactTimeout"},
+		"contact garbage":     {"maxConcurrent: 2", "maxConcurrent: 2\ncontactTimeout: never", "contactTimeout"},
 		"tools half set":      {"rootfs.ext4\n", "rootfs.ext4\n    tools: {drive: /var/lib/hcc/images/base/tools.ext4}\n", "tools.packages"},
 	}
 	for name, tt := range tests {

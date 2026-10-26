@@ -159,6 +159,7 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(l) }()
+	go s.heartbeat(ctx)
 	select {
 	case err := <-errc:
 		return err
@@ -167,6 +168,32 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(sctx)
+}
+
+// HeartbeatInterval is how often a running Control Center contacts every
+// runner, so runners keep their schedules active (runner.Contact).
+const HeartbeatInterval = 5 * time.Minute
+
+// heartbeat contacts every runner now and then every HeartbeatInterval
+// until ctx ends. A runner it cannot reach is logged, nothing else.
+func (s *Server) heartbeat(ctx context.Context) {
+	tick := time.NewTicker(HeartbeatInterval)
+	defer tick.Stop()
+	for {
+		for _, v := range s.eachRunner(ctx, func(ctx context.Context, c *runnerd.Client, _ RunnerRef) error {
+			_, err := c.Info(ctx)
+			return err
+		}) {
+			if v.Error != "" {
+				s.log.Warn("runner not reached", "runner", v.Name, "err", v.Error)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
 }
 
 // ServeHTTP implements http.Handler (for tests).

@@ -42,6 +42,8 @@ import (
 //	GET  /v1/events[?job=ID]    NDJSON event stream
 //	POST /v1/kill               kill switch
 //	POST /v1/resume             accept jobs again
+//
+// Every request counts as contact (runner.Runner.Contact).
 
 // Server serves a runner over a Unix socket.
 type Server struct {
@@ -75,7 +77,12 @@ func NewServer(r *runner.Runner, stateDir string, log *slog.Logger) *Server {
 	mux.HandleFunc("POST /v1/kill", s.kill)
 	mux.HandleFunc("POST /v1/resume", s.resume)
 	s.http = &http.Server{
-		Handler:           mux,
+		// Every request is contact: only people (the hcc CLI, the Control
+		// Center) can reach this socket.
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			r.Contact()
+			mux.ServeHTTP(w, req)
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       2 * time.Minute,

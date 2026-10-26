@@ -66,6 +66,17 @@ type Config struct {
 	// ApprovalTimeout bounds how long a gated request waits for a human
 	// (a Go duration, default "30m", between "1m" and "24h").
 	ApprovalTimeout string `yaml:"approvalTimeout"`
+	// ContactTimeout pauses every schedule when nobody contacted the
+	// runner for that long (a Go duration between "1h" and "8760h",
+	// default "72h"; "off" never pauses).
+	ContactTimeout string `yaml:"contactTimeout"`
+}
+
+// ContactWait is ContactTimeout parsed (valid after LoadConfig; 0 for
+// "off").
+func (c *Config) ContactWait() time.Duration {
+	d, _ := time.ParseDuration(c.ContactTimeout)
+	return d
 }
 
 // ApprovalWait is ApprovalTimeout parsed (valid after LoadConfig).
@@ -231,6 +242,9 @@ func LoadConfig(path string) (*Config, error) {
 	if c.MinScheduleInterval == "" {
 		c.MinScheduleInterval = runner.DefaultMinScheduleInterval.String()
 	}
+	if c.ContactTimeout == "" {
+		c.ContactTimeout = runner.DefaultContactTimeout.String()
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -293,6 +307,9 @@ func (c *Config) Validate() error {
 	}
 	if d, err := time.ParseDuration(c.ApprovalTimeout); err != nil || d < time.Minute || d > 24*time.Hour {
 		add("approvalTimeout must be a duration between 1m and 24h, got %q", c.ApprovalTimeout)
+	}
+	if d, err := time.ParseDuration(c.ContactTimeout); c.ContactTimeout != "off" && (err != nil || d < time.Hour || d > 8760*time.Hour) {
+		add("contactTimeout must be \"off\" or a duration between 1h and 8760h, got %q", c.ContactTimeout)
 	}
 	if d, err := time.ParseDuration(c.MinScheduleInterval); err != nil || d < time.Minute || d > 24*time.Hour {
 		add("minScheduleInterval must be a duration between 1m and 24h, got %q", c.MinScheduleInterval)

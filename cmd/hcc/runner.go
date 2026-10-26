@@ -119,6 +119,9 @@ func serve(configPath string, log *slog.Logger) error {
 		Log:                 log,
 		ScheduleStore:       store,
 		MinScheduleInterval: cfg.ScheduleInterval(),
+		ContactTimeout:      cfg.ContactWait(),
+		LastContact:         store.LoadContact(),
+		SaveContact:         store.SaveContact,
 		ApprovalTimeout:     cfg.ApprovalWait(),
 	}
 	if netCfg != nil {

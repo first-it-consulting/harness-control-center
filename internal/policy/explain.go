@@ -113,7 +113,8 @@ func (e *Engine) Explain() []string {
 	switch {
 	case s.Trigger.Schedule != "":
 		lines = append(lines, fmt.Sprintf("Starts automatically on the cron schedule %q (times in UTC), without anyone watching, "+
-			"until you pause or delete the schedule. A run is skipped while the previous one is still going. Every run has the limits above.",
+			"until you pause or delete the schedule. A run is skipped while the previous one is still going. Every run has the limits above. "+
+			"If nobody contacts its runner for a while (72 hours unless the runner is set otherwise), the schedule pauses.",
 			s.Trigger.Schedule))
 	case s.Trigger.Loop != nil:
 		n := s.Trigger.Loop.MaxIterations

@@ -103,6 +103,8 @@ func startDaemonIn(t *testing.T, dir string) *testDaemon {
 		Results:       ResultsFunc(state),
 		Store:         NewFileStore(state, log),
 		ScheduleStore: NewFileStore(state, log),
+		LastContact:   NewFileStore(state, log).LoadContact(),
+		SaveContact:   NewFileStore(state, log).SaveContact,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -665,5 +667,30 @@ func TestApprovalAPI(t *testing.T) {
 		if resp.StatusCode != 400 {
 			t.Errorf("decision without approve: %d", resp.StatusCode)
 		}
+	}
+}
+
+func TestEveryRequestIsContact(t *testing.T) {
+	dir := shortTempDir(t)
+	d := startDaemonIn(t, dir)
+	ctx := context.Background()
+	before, err := d.client.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if _, err := d.client.List(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, err := d.client.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.LastContact.After(before.LastContact) {
+		t.Errorf("last contact %v, then %v", before.LastContact, after.LastContact)
+	}
+	// Persisted, for the next start.
+	if got := NewFileStore(d.state, slog.New(slog.DiscardHandler)).LoadContact(); got.IsZero() {
+		t.Error("contact not saved")
 	}
 }

@@ -22,6 +22,7 @@ import (
 //     reports the task done, or after maxIterations runs,
 //   - the kill switch pauses every schedule; Resume does not unpause
 //     them, each must be resumed on purpose,
+//   - so does a lapse of contact (see Contact),
 //   - every run is an ordinary job with the harness's own limits.
 
 // Schedule states.
@@ -284,6 +285,9 @@ func (r *Runner) scheduler() {
 				wait = min(wait, max(s.NextRun.Sub(now), 0))
 			}
 		}
+		if d := r.contactDeadlineLocked(); !d.IsZero() {
+			wait = min(wait, max(d.Sub(now), 0))
+		}
 		r.mu.Unlock()
 		timer.Reset(wait)
 		select {
@@ -302,6 +306,7 @@ func (r *Runner) scheduler() {
 func (r *Runner) fireDue() {
 	r.mu.Lock()
 	now := r.cfg.Now()
+	r.checkContactLocked(now)
 	var due []*schedule
 	for _, s := range r.schedules {
 		if s.State == ScheduleActive && !s.NextRun.IsZero() && !now.Before(s.NextRun) {

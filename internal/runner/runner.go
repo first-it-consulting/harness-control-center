@@ -99,6 +99,13 @@ type Config struct {
 	// MinScheduleInterval bounds how often a cron schedule may fire
 	// (default DefaultMinScheduleInterval).
 	MinScheduleInterval time.Duration
+	// ContactTimeout pauses every schedule when nobody contacted the
+	// runner for that long (see Contact; 0: never).
+	ContactTimeout time.Duration
+	// LastContact is when the runner was last contacted before it
+	// started (zero: now); SaveContact, if set, persists later contacts.
+	LastContact time.Time
+	SaveContact func(time.Time) error
 	// Now and NewID are injectable for tests.
 	Now   func() time.Time
 	NewID func() string
@@ -156,6 +163,9 @@ type Runner struct {
 
 	approvals     map[string]*pendingApproval
 	firing        int // schedule runs being started
+	lastContact   time.Time
+	savedContact  time.Time
+	contactLapsed bool // schedules were paused for it; reset by Contact
 	schedules     map[string]*schedule
 	wake          chan struct{}
 	stopScheduler chan struct{}
@@ -199,6 +209,11 @@ func New(cfg Config) (*Runner, error) {
 		schedules: map[string]*schedule{}, wake: make(chan struct{}, 1), approvals: map[string]*pendingApproval{},
 		stopScheduler: make(chan struct{}), schedulerDone: make(chan struct{})}
 	r.root, r.cancelRoot = context.WithCancel(context.Background())
+	r.lastContact = cfg.LastContact
+	if r.lastContact.IsZero() || r.lastContact.After(cfg.Now()) {
+		r.lastContact = cfg.Now()
+	}
+	r.savedContact = cfg.LastContact // none stored: save the first contact at once
 	if cfg.Store != nil {
 		if err := r.load(); err != nil {
 			return nil, err
@@ -716,6 +731,7 @@ func (r *Runner) Status() Status {
 	return Status{
 		Target: r.cfg.Target, Images: images, MaxConcurrent: r.cfg.MaxConcurrent, MaxDiskMiB: r.cfg.MaxDiskMiB,
 		Running: r.running, Queued: len(r.queue), Killed: r.killed, Schedules: len(r.schedules), Tools: offered,
+		LastContact: r.lastContact, ContactTimeout: contactTimeout(r.cfg.ContactTimeout),
 	}
 }
 
@@ -1023,4 +1039,11 @@ func randomID() string {
 		panic(err) // crypto/rand never fails on supported platforms
 	}
 	return "job-" + hex.EncodeToString(b)
+}
+
+func contactTimeout(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return d.String()
 }

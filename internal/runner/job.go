@@ -80,6 +80,10 @@ type Status struct {
 	// Tools are the tools each image offers ("name@version"), for images
 	// with a tool catalog.
 	Tools map[string][]string `json:"tools,omitempty"`
+	// LastContact is when a person last reached the runner; after
+	// ContactTimeout ("" if never) without, its schedules are paused.
+	LastContact    time.Time `json:"lastContact"`
+	ContactTimeout string    `json:"contactTimeout,omitempty"`
 }
 
 // Store persists jobs. Save is called with the runner's lock held, so it

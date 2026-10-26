@@ -117,6 +117,11 @@ Cron times are UTC. A schedule may not run more often than
 overlap, missed runs are not caught up, and the kill switch pauses every
 schedule (resume each one afterwards). See ADR-0008.
 
+If nobody uses the runner's socket (`hcc` or the Control Center, which
+checks in every 5 minutes while it runs) for `contactTimeout` (default
+`72h`; `off` to disable), every schedule pauses until resumed. See
+ADR-0012.
+
 ## Approvals
 
 Harnesses with `spec.approvals.requireFor` hold matching requests at the

@@ -253,3 +253,31 @@ func readJSONFile[T any](path string) (T, error) {
 	}
 	return v, json.Unmarshal(data, &v)
 }
+
+// contactRecord is when a person last reached the runner.
+type contactRecord struct {
+	At time.Time `json:"at"`
+}
+
+func (s *FileStore) contactPath() string { return filepath.Join(s.stateDir, "contact.json") }
+
+// SaveContact persists the time of the last contact (runner.Config.SaveContact).
+func (s *FileStore) SaveContact(t time.Time) error {
+	data, err := json.Marshal(contactRecord{At: t})
+	if err != nil {
+		return err
+	}
+	return writeAtomic(s.contactPath(), data)
+}
+
+// LoadContact returns the time of the last contact (zero if unknown).
+func (s *FileStore) LoadContact() time.Time {
+	rec, err := readJSONFile[contactRecord](s.contactPath())
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			s.log.Error("time of last contact unreadable", "err", err)
+		}
+		return time.Time{}
+	}
+	return rec.At
+}
