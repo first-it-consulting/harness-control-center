@@ -47,6 +47,8 @@ var webFS embed.FS
 //	GET    /api/schedules                        schedules of every runner
 //	POST   /api/runners/{runner}/schedules/{id}/{action}   pause or resume
 //	DELETE /api/runners/{runner}/schedules/{id}
+//	GET    /api/approvals                        requests waiting for a decision, on every runner
+//	POST   /api/runners/{runner}/approvals/{id}  decide: {"approve": true|false}
 //	POST   /api/check                            validate and explain a harness
 //	POST   /api/runs                             start a harness, or add it as a schedule if it has a trigger
 //	GET    /api/harnesses                        the library
@@ -106,6 +108,8 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /api/schedules", s.schedules)
 	mux.HandleFunc("POST /api/runners/{runner}/schedules/{id}/{action}", s.scheduleAction)
 	mux.HandleFunc("DELETE /api/runners/{runner}/schedules/{id}", s.scheduleAction)
+	mux.HandleFunc("GET /api/approvals", s.approvals)
+	mux.HandleFunc("POST /api/runners/{runner}/approvals/{id}", s.decide)
 	mux.HandleFunc("POST /api/check", s.check)
 	mux.HandleFunc("POST /api/runs", s.run)
 	mux.HandleFunc("GET /api/harnesses", s.harnesses)
@@ -531,6 +535,57 @@ func (s *Server) scheduleAction(w http.ResponseWriter, r *http.Request) {
 		}
 		s.log.Info("schedule "+action, "runner", r.PathValue("runner"), "schedule", id)
 		return map[string]string{}, c.ScheduleAction(ctx, id, action)
+	})
+}
+
+// --- approvals ---
+
+// ApprovalView is a pending approval and its runner. Path and details
+// come from the agent; the UI shows them as text.
+type ApprovalView struct {
+	Runner string `json:"runner"`
+	runner.Approval
+}
+
+func (s *Server) approvals(w http.ResponseWriter, r *http.Request) {
+	var mu sync.Mutex
+	list := []ApprovalView{}
+	views := s.eachRunner(r.Context(), func(ctx context.Context, c *runnerd.Client, ref RunnerRef) error {
+		pending, err := c.Approvals(ctx)
+		mu.Lock()
+		for _, a := range pending {
+			list = append(list, ApprovalView{Runner: ref.Name, Approval: a})
+		}
+		mu.Unlock()
+		return err
+	})
+	errs := map[string]string{}
+	for _, v := range views {
+		if v.Error != "" {
+			errs[v.Name] = v.Error
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"approvals": list, "errors": errs})
+}
+
+func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Approve *bool `json:"approve"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	if body.Approve == nil {
+		writeError(w, http.StatusBadRequest, errString(`expected {"approve": true} or {"approve": false}`))
+		return
+	}
+	s.withRunner(w, r, func(ctx context.Context, c *runnerd.Client) (any, error) {
+		id, err := jobID(r)
+		if err != nil {
+			return nil, err
+		}
+		s.log.Warn("approval decided", "runner", r.PathValue("runner"), "approval", id, "approved", *body.Approve)
+		return map[string]bool{"approved": *body.Approve}, c.Decide(ctx, id, *body.Approve)
 	})
 }
 

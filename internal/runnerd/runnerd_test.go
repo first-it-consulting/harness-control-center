@@ -17,8 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/budget"
 	"github.com/first-it-consulting/harness-control-center/internal/runner"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
+	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
 
 // testProvider prints to the console and exits, except for harnesses
@@ -588,5 +590,82 @@ func TestScheduleAPI(t *testing.T) {
 	}
 	if err := d2.client.ScheduleAction(ctx, sc.ID, "explode"); err == nil {
 		t.Error("unknown action accepted")
+	}
+}
+
+type nopProxy struct{}
+
+func (nopProxy) Serve(ctx context.Context, l net.Listener) error { <-ctx.Done(); return l.Close() }
+
+func TestApprovalAPI(t *testing.T) {
+	dir := shortTempDir(t)
+	log := slog.New(slog.DiscardHandler)
+	approvers := make(chan runner.Approver, 1)
+	r, err := runner.New(runner.Config{
+		Provider: testProvider{}, Images: []string{"base"},
+		Egress: func(_ *spec.Harness, _ string, _ *budget.Meter, a runner.Approver) (sandbox.Proxy, error) {
+			approvers <- a
+			return nopProxy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(dir, "r.sock")
+	l, err := Listen(sock, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- NewServer(r, filepath.Join(dir, "state"), log).Serve(ctx, l) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Serve: %v", err)
+		}
+	}()
+	c := NewUnixClient(sock)
+
+	doc := blockingHarnessDoc + "  approvals: {requireFor: [http.delete]}\n  permissions: {network: {egress: [{host: example.com}]}}\n"
+	id, err := c.Submit(ctx, []byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	approve := <-approvers
+	result := make(chan error, 1)
+	go func() {
+		result <- approve(ctx, runner.ApprovalRequest{Actions: []string{"http.delete"}, Method: "DELETE", Host: "example.com", Path: "/x"})
+	}()
+	var list []runner.Approval
+	for range 500 {
+		if list, err = c.Approvals(ctx); err == nil && len(list) == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(list) != 1 || list[0].JobID != id || list[0].Method != "DELETE" {
+		t.Fatalf("approvals = %+v, %v", list, err)
+	}
+	if j, _ := c.Get(ctx, id); j.State != runner.StateAwaitingApproval {
+		t.Errorf("job state = %s", j.State)
+	}
+	if err := c.Decide(ctx, list[0].ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; err == nil {
+		t.Error("denied request went through")
+	}
+	var apiErr *APIError
+	if err := c.Decide(ctx, list[0].ID, true); !errors.As(err, &apiErr) || apiErr.Status != 404 {
+		t.Errorf("deciding again: %v", err)
+	}
+	// The body must say what to do.
+	resp, err := c.http.Post(baseURL+"/v1/approvals/"+list[0].ID, "application/json", strings.NewReader(`{}`))
+	if err == nil {
+		_ = resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("decision without approve: %d", resp.StatusCode)
+		}
 	}
 }

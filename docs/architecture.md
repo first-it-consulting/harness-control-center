@@ -44,10 +44,10 @@
 ## Harness lifecycle
 
 ```
-queued → provisioning → running → succeeded | failed | cancelled | timed_out | over_budget
+queued → provisioning → running ⇄ awaiting_approval → succeeded | failed | cancelled | timed_out | over_budget
 ```
 
-(`awaiting_approval` between running and the end states is planned with approval gates.)
+`awaiting_approval`: a request is held by an approval gate (ADR-0009).
 
 ## Plugins
 

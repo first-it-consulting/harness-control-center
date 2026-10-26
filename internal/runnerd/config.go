@@ -62,6 +62,15 @@ type Config struct {
 	// MinScheduleInterval bounds how often a cron schedule may run (a Go
 	// duration, default "15m", at least "1m").
 	MinScheduleInterval string `yaml:"minScheduleInterval"`
+	// ApprovalTimeout bounds how long a gated request waits for a human
+	// (a Go duration, default "30m", between "1m" and "24h").
+	ApprovalTimeout string `yaml:"approvalTimeout"`
+}
+
+// ApprovalWait is ApprovalTimeout parsed (valid after LoadConfig).
+func (c *Config) ApprovalWait() time.Duration {
+	d, _ := time.ParseDuration(c.ApprovalTimeout)
+	return d
 }
 
 // ScheduleInterval is MinScheduleInterval parsed (valid after
@@ -184,6 +193,9 @@ func LoadConfig(path string) (*Config, error) {
 	if c.Retention.MaxAge == "" {
 		c.Retention.MaxAge = DefaultRetentionAge.String()
 	}
+	if c.ApprovalTimeout == "" {
+		c.ApprovalTimeout = runner.DefaultApprovalTimeout.String()
+	}
 	if c.MinScheduleInterval == "" {
 		c.MinScheduleInterval = runner.DefaultMinScheduleInterval.String()
 	}
@@ -242,6 +254,9 @@ func (c *Config) Validate() error {
 	}
 	if d, err := time.ParseDuration(c.Retention.MaxAge); err != nil || d < time.Hour || d > 10*365*24*time.Hour {
 		add("retention.maxAge must be a duration between 1h and 87600h, got %q", c.Retention.MaxAge)
+	}
+	if d, err := time.ParseDuration(c.ApprovalTimeout); err != nil || d < time.Minute || d > 24*time.Hour {
+		add("approvalTimeout must be a duration between 1m and 24h, got %q", c.ApprovalTimeout)
 	}
 	if d, err := time.ParseDuration(c.MinScheduleInterval); err != nil || d < time.Minute || d > 24*time.Hour {
 		add("minScheduleInterval must be a duration between 1m and 24h, got %q", c.MinScheduleInterval)

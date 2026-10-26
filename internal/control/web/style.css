@@ -61,6 +61,11 @@ nav a:hover { color: var(--text); background: var(--badge-bg); }
 nav a.active { color: var(--text); background: var(--badge-bg); font-weight: 600; }
 
 main { max-width: 1200px; margin: 0 auto; padding: 1.25rem; outline: none; }
+#approvals { max-width: 1200px; margin: 0.75rem auto 0; padding: 0 1.25rem; display: grid; gap: 0.5rem; }
+.approval { border: 2px solid var(--warn); background: var(--surface); border-radius: var(--radius); padding: 0.75rem 1rem; }
+.approval h2 { margin: 0 0 0.25rem; font-size: 1rem; }
+.approval ul { margin: 0.25rem 0 0.5rem; padding-left: 1.1rem; }
+.approval code { overflow-wrap: anywhere; }
 #notice { max-width: 1200px; margin: 0.75rem auto 0; padding: 0.6rem 1rem; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); }
 #notice.error { border-color: var(--danger); color: var(--danger); }
 
@@ -98,7 +103,7 @@ td.detail { color: var(--muted); max-width: 26rem; overflow-wrap: anywhere; }
 .badge.succeeded, .badge.low { color: var(--ok); }
 .badge.running, .badge.provisioning, .badge.queued { color: var(--accent); }
 .badge.failed, .badge.timed_out, .badge.over_budget, .badge.high, .badge.killed { color: var(--danger); }
-.badge.cancelled, .badge.medium { color: var(--warn); }
+.badge.cancelled, .badge.medium, .badge.awaiting_approval { color: var(--warn); }
 
 dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1rem; margin: 0; }
 dl.facts dt { color: var(--muted); }

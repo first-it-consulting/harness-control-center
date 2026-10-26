@@ -64,11 +64,14 @@ func (t *gatedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	gr := GateRequest{Actions: actions, Method: req.Method, Host: t.host, Path: truncate(req.URL.RequestURI(), maxGatePath)}
 	if req.Body != nil && req.Body != http.NoBody && strings.HasSuffix(req.URL.Path, "/git-receive-pack") {
 		cmds, rest, err := pushCommands(req.Body)
+		if err != nil {
+			// Never ask about a push that cannot be shown in full.
+			_ = req.Body.Close()
+			t.p.Log.Warn("egress: push refused", "job", t.p.JobID, "host", t.host, "path", gr.Path, "err", err)
+			return plainResponse(req, http.StatusForbidden, "this push cannot be approved: "+err.Error()), nil
+		}
 		req = req.Clone(req.Context())
 		req.Body = rest
-		if err != nil {
-			cmds = append(cmds, "(the rest of the ref updates could not be read: "+err.Error()+")")
-		}
 		gr.Details = cmds
 	}
 	if t.p.Gate == nil {
@@ -95,16 +98,21 @@ func truncate(s string, n int) string {
 
 // pushCommands reads the ref updates at the start of a git-receive-pack
 // request (pkt-lines up to the first flush) and returns them, with a body
-// that still yields every byte.
+// that still yields every byte. It fails unless it read them all.
 func pushCommands(body io.ReadCloser) ([]string, io.ReadCloser, error) {
 	var consumed bytes.Buffer
 	br := bufio.NewReader(io.LimitReader(body, maxPushPreamble))
 	r := io.TeeReader(br, &consumed)
 	var cmds []string
 	var err error
-	for len(cmds) < maxPushCommands {
+	for {
+		if len(cmds) == maxPushCommands {
+			err = fmt.Errorf("it updates more than %d refs", maxPushCommands)
+			break
+		}
 		var hdr [4]byte
 		if _, err = io.ReadFull(r, hdr[:]); err != nil {
+			err = fmt.Errorf("its ref updates end early or exceed %d bytes", maxPushPreamble)
 			break
 		}
 		n, perr := strconv.ParseUint(string(hdr[:]), 16, 16)
@@ -121,6 +129,7 @@ func pushCommands(body io.ReadCloser) ([]string, io.ReadCloser, error) {
 		}
 		line := make([]byte, n-4)
 		if _, err = io.ReadFull(r, line); err != nil {
+			err = fmt.Errorf("its ref updates end early or exceed %d bytes", maxPushPreamble)
 			break
 		}
 		cmds = append(cmds, describeRefUpdate(line))

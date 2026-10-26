@@ -160,7 +160,9 @@ func (e *Engine) Explain() []string {
 	}
 
 	if len(s.Approvals.RequireFor) > 0 {
-		lines = append(lines, "Asks you before: "+strings.Join(s.Approvals.RequireFor, ", ")+".")
+		lines = append(lines, "Asks you before: "+strings.Join(s.Approvals.RequireFor, ", ")+
+			". To catch these, every connection it makes is inspected (only HTTPS works then). While it waits, the job pauses but its time limit keeps running; "+
+			"if nobody decides in time (30 minutes by default), the action is refused.")
 	}
 	return lines
 }

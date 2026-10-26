@@ -306,3 +306,27 @@ func TestScheduleCommands(t *testing.T) {
 		t.Errorf("after delete:\n%s", out)
 	}
 }
+
+func TestApprovalCommands(t *testing.T) {
+	sock := startTestRunner(t)
+	if code, out, _ := runCLI("approvals", "--socket", sock); code != exitOK || !strings.Contains(out, "Nothing is waiting") {
+		t.Errorf("approvals: %d %s", code, out)
+	}
+	if code, _, errOut := runCLI("approve", "apr-1", "--socket", sock); code != exitInvalid || !strings.Contains(errOut, "no such pending approval") {
+		t.Errorf("approve unknown: %d %s", code, errOut)
+	}
+	if code, _, _ := runCLI("deny", "--socket", sock); code != exitUsage {
+		t.Errorf("deny without id: %d", code)
+	}
+}
+
+func TestPrintApprovalsNeutralizesAgentText(t *testing.T) {
+	var b strings.Builder
+	printApprovals(&b, []runner.Approval{{ID: "apr-1", JobID: "job-1", Harness: "h", ApprovalRequest: runner.ApprovalRequest{
+		Actions: []string{"git.push"}, Method: "POST", Host: "example.com", Path: "/r.git/git-receive-pack\x1b]0;x\x07",
+		Details: []string{"refs/heads/main\n  approved: yes"},
+	}}})
+	if strings.ContainsAny(b.String(), "\x1b\x07") || strings.Contains(b.String(), "\n  approved: yes") {
+		t.Errorf("agent text reached the terminal raw:\n%q", b.String())
+	}
+}

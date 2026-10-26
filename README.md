@@ -5,7 +5,8 @@
 > Claude Code runtime work: an agent runs in a confined microVM, reaches
 > exactly the hosts its harness allows, and uses credentials it never
 > sees, within a token budget enforced at the proxy. Its files come back
-> as a sanitized archive. Harnesses can run on a schedule or in a loop. The
+> as a sanitized archive. Harnesses can run on a schedule or in a loop, and
+> ask a human before chosen actions (approval gates). The
 > web UI (`hcc control serve`) manages harnesses, schedules, runners and
 > jobs.
 > "Harness Control Center" is a working codename.

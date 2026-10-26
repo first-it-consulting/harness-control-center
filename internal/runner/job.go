@@ -24,12 +24,16 @@ const (
 	// StateOverBudget: stopped because its model usage reached the
 	// harness's budget.
 	StateOverBudget State = "over_budget"
+	// StateAwaitingApproval: running, with a request held by an approval
+	// gate until a human decides.
+	StateAwaitingApproval State = "awaiting_approval"
 )
 
 var transitions = map[State][]State{
-	StateQueued:       {StateProvisioning, StateCancelled},
-	StateProvisioning: {StateRunning, StateFailed, StateCancelled},
-	StateRunning:      {StateSucceeded, StateFailed, StateTimedOut, StateCancelled, StateOverBudget},
+	StateQueued:           {StateProvisioning, StateCancelled},
+	StateProvisioning:     {StateRunning, StateFailed, StateCancelled},
+	StateRunning:          {StateSucceeded, StateFailed, StateTimedOut, StateCancelled, StateOverBudget, StateAwaitingApproval},
+	StateAwaitingApproval: {StateRunning, StateSucceeded, StateFailed, StateTimedOut, StateCancelled, StateOverBudget},
 }
 
 // Terminal reports whether no further transition is possible.

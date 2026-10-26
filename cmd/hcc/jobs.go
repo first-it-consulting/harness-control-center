@@ -144,6 +144,9 @@ func cmdRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			line += ": " + safetext.Line(ev.Message)
 		}
 		fmt.Fprintln(stdout, line)
+		if ev.To == runner.StateAwaitingApproval {
+			fmt.Fprintf(stdout, "            decide with \"hcc approvals%s\", then \"hcc approve <id>\" or \"hcc deny <id>\"\n", conn.flags())
+		}
 		return true
 	})
 	if err != nil {
@@ -235,6 +238,63 @@ func cmdJobs(cmd string, args []string, stdout, stderr io.Writer) int {
 		return exitInvalid
 	}
 	return exitOK
+}
+
+func cmdApprovals(cmd string, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var conn connFlags
+	conn.register(fs)
+	pos, err := parseFlags(fs, args)
+	if err != nil {
+		return exitUsage
+	}
+	if (cmd == "approvals") != (len(pos) == 0) || len(pos) > 1 {
+		fmt.Fprintf(stderr, "hcc %s: wrong number of arguments\n\n%s", cmd, usage)
+		return exitUsage
+	}
+	c, err := conn.client()
+	if err != nil {
+		fmt.Fprintf(stderr, "hcc %s: %v\n", cmd, err)
+		return exitUsage
+	}
+	ctx := context.Background()
+	if cmd == "approvals" {
+		list, err := c.Approvals(ctx)
+		if err != nil {
+			fmt.Fprintln(stderr, "hcc approvals:", err)
+			return exitInvalid
+		}
+		printApprovals(stdout, list)
+		return exitOK
+	}
+	if err := c.Decide(ctx, pos[0], cmd == "approve"); err != nil {
+		fmt.Fprintf(stderr, "hcc %s: %v\n", cmd, err)
+		return exitInvalid
+	}
+	if cmd == "approve" {
+		fmt.Fprintf(stdout, "Approved %s: the request goes through.\n", pos[0])
+	} else {
+		fmt.Fprintf(stdout, "Denied %s: the agent gets a refusal.\n", pos[0])
+	}
+	return exitOK
+}
+
+// printApprovals shows pending requests. Everything but the IDs and
+// times may come from the agent, so it is neutralized.
+func printApprovals(w io.Writer, list []runner.Approval) {
+	if len(list) == 0 {
+		fmt.Fprintln(w, "Nothing is waiting for approval.")
+		return
+	}
+	for _, a := range list {
+		fmt.Fprintf(w, "%s  job %s (%s), waiting since %s, refused at %s unless decided\n", a.ID, a.JobID, safetext.Line(a.Harness),
+			a.Created.Local().Format("15:04:05"), a.Expires.Local().Format("15:04:05"))
+		fmt.Fprintf(w, "    %s %s%s  [%s]\n", safetext.Line(a.Method), safetext.Line(a.Host), safetext.Line(a.Path), safetext.Line(strings.Join(a.Actions, ", ")))
+		for _, d := range a.Details {
+			fmt.Fprintf(w, "    - %s\n", safetext.Line(d))
+		}
+	}
 }
 
 // describeNext says when a schedule runs next.

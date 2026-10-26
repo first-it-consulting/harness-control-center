@@ -203,7 +203,6 @@ func TestFailClosedOnUnenforceablePermissions(t *testing.T) {
 	tests := map[string]string{
 		"tools":     "  permissions: {tools: {install: [git]}}\n",
 		"subagents": "  permissions: {subagents: {max: 1}}\n",
-		"approvals": "  approvals: {requireFor: [git.push]}\n",
 	}
 	for name, extra := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -537,7 +536,7 @@ func TestNetworkGetsPerJobProxy(t *testing.T) {
 	r, err := New(Config{
 		Provider: p,
 		Images:   []string{"base"},
-		Egress: func(h *spec.Harness, jobID string, _ *budget.Meter) (sandbox.Proxy, error) {
+		Egress: func(h *spec.Harness, jobID string, _ *budget.Meter, _ Approver) (sandbox.Proxy, error) {
 			asked = append(asked, h.Metadata.Name+"/"+jobID)
 			return nopProxy{job: jobID}, nil
 		},
@@ -574,7 +573,9 @@ func TestEgressFactoryErrorRejectsJob(t *testing.T) {
 	r, err := New(Config{
 		Provider: newFakeProvider(),
 		Images:   []string{"base"},
-		Egress:   func(*spec.Harness, string, *budget.Meter) (sandbox.Proxy, error) { return nil, errors.New("no subnet") },
+		Egress: func(*spec.Harness, string, *budget.Meter, Approver) (sandbox.Proxy, error) {
+			return nil, errors.New("no subnet")
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -600,7 +601,7 @@ func TestTaskReachesTheSandbox(t *testing.T) {
 	r, err := New(Config{
 		Provider: p,
 		Images:   []string{"base"},
-		Egress:   func(*spec.Harness, string, *budget.Meter) (sandbox.Proxy, error) { return nopProxy{}, nil },
+		Egress:   func(*spec.Harness, string, *budget.Meter, Approver) (sandbox.Proxy, error) { return nopProxy{}, nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -691,7 +692,7 @@ func TestBudgetStopsTheJob(t *testing.T) {
 	r, err := New(Config{
 		Provider: budgetProvider{},
 		Images:   []string{"base"},
-		Egress: func(_ *spec.Harness, _ string, m *budget.Meter) (sandbox.Proxy, error) {
+		Egress: func(_ *spec.Harness, _ string, m *budget.Meter, _ Approver) (sandbox.Proxy, error) {
 			meters <- m
 			return nopProxy{}, nil
 		},

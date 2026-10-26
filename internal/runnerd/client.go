@@ -147,6 +147,21 @@ func (c *Client) ScheduleAction(ctx context.Context, id, action string) error {
 	}
 }
 
+// Approvals lists the requests waiting for a decision.
+func (c *Client) Approvals(ctx context.Context) ([]runner.Approval, error) {
+	var out []runner.Approval
+	return out, c.do(ctx, http.MethodGet, "/v1/approvals", nil, &out)
+}
+
+// Decide approves or denies a pending request.
+func (c *Client) Decide(ctx context.Context, id string, approve bool) error {
+	if err := sandbox.ValidateID(id); err != nil {
+		return err
+	}
+	body, _ := json.Marshal(map[string]bool{"approve": approve})
+	return c.do(ctx, http.MethodPost, "/v1/approvals/"+id, bytes.NewReader(body), nil)
+}
+
 // Info returns the runner's status.
 func (c *Client) Info(ctx context.Context) (runner.Status, error) {
 	var st runner.Status

@@ -37,6 +37,8 @@ import (
 //	POST /v1/schedules/{id}/pause
 //	POST /v1/schedules/{id}/resume
 //	DELETE /v1/schedules/{id}
+//	GET  /v1/approvals          requests waiting for a human's decision
+//	POST /v1/approvals/{id}     decide: {"approve": true|false}
 //	GET  /v1/events[?job=ID]    NDJSON event stream
 //	POST /v1/kill               kill switch
 //	POST /v1/resume             accept jobs again
@@ -67,6 +69,8 @@ func NewServer(r *runner.Runner, stateDir string, log *slog.Logger) *Server {
 	mux.HandleFunc("POST /v1/schedules/{id}/pause", s.scheduleAction)
 	mux.HandleFunc("POST /v1/schedules/{id}/resume", s.scheduleAction)
 	mux.HandleFunc("DELETE /v1/schedules/{id}", s.scheduleAction)
+	mux.HandleFunc("GET /v1/approvals", s.approvals)
+	mux.HandleFunc("POST /v1/approvals/{id}", s.decide)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("POST /v1/kill", s.kill)
 	mux.HandleFunc("POST /v1/resume", s.resume)
@@ -255,6 +259,33 @@ func (s *Server) scheduleAction(w http.ResponseWriter, req *http.Request) {
 		s.log.Info("schedule "+action, "schedule", id)
 		writeJSON(w, http.StatusOK, map[string]string{"id": id})
 	}
+}
+
+func (s *Server) approvals(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.r.Approvals())
+}
+
+func (s *Server) decide(w http.ResponseWriter, req *http.Request) {
+	id := req.PathValue("id")
+	if err := sandbox.ValidateID(id); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var body struct {
+		Approve *bool `json:"approve"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, req.Body, 1<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil || body.Approve == nil {
+		writeError(w, http.StatusBadRequest, errors.New(`expected {"approve": true} or {"approve": false}`))
+		return
+	}
+	if err := s.r.Decide(id, *body.Approve); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	s.log.Warn("approval decided", "approval", id, "approved", *body.Approve)
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "approved": *body.Approve})
 }
 
 func (s *Server) list(w http.ResponseWriter, _ *http.Request) {

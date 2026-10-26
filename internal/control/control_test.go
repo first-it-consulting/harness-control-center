@@ -578,3 +578,24 @@ func TestSchedulesThroughTheUI(t *testing.T) {
 		t.Errorf("after delete: %+v", list.Schedules)
 	}
 }
+
+func TestApprovalsThroughTheUI(t *testing.T) {
+	ts := newTestServer(t)
+	sock := startRunner(t)
+	var out map[string]any
+	ts.do(http.MethodPost, "/api/runners", RunnerRef{Name: "local", Socket: sock}, &out)
+	var list struct {
+		Approvals []ApprovalView    `json:"approvals"`
+		Errors    map[string]string `json:"errors"`
+	}
+	ts.do(http.MethodGet, "/api/approvals", nil, &list)
+	if len(list.Approvals) != 0 || len(list.Errors) != 0 {
+		t.Errorf("approvals = %+v", list)
+	}
+	if code := ts.do(http.MethodPost, "/api/runners/local/approvals/apr-1", map[string]any{}, &out); code != http.StatusBadRequest {
+		t.Errorf("decision without approve: %d", code)
+	}
+	if code := ts.do(http.MethodPost, "/api/runners/local/approvals/apr-1", map[string]any{"approve": true}, &out); code != http.StatusNotFound {
+		t.Errorf("unknown approval: %d %v", code, out)
+	}
+}

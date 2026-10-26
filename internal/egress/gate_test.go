@@ -172,11 +172,28 @@ func TestGateWithoutDeciderFailsClosed(t *testing.T) {
 
 func TestPushCommandsOnGarbage(t *testing.T) {
 	for _, body := range []string{"", "zzzz", "0003", pkt("not a ref update"), strings.Repeat("ffff", 10)} {
-		cmds, rest, _ := pushCommands(io.NopCloser(strings.NewReader(body)))
+		_, rest, err := pushCommands(io.NopCloser(strings.NewReader(body)))
 		got, _ := io.ReadAll(rest)
-		if string(got) != body || len(cmds) > 1 {
-			t.Errorf("%q: cmds %v, body %q", body, cmds, got)
+		if err == nil || string(got) != body {
+			t.Errorf("%q: err %v, body %q", body, err, got)
 		}
+	}
+}
+
+// A push whose ref updates cannot all be shown is refused, not asked.
+func TestGateRefusesPushesItCannotShowInFull(t *testing.T) {
+	env := startGate(t, true)
+	var b strings.Builder
+	for i := range maxPushCommands + 1 {
+		b.WriteString(pkt(fmt.Sprintf("%040d %040d refs/heads/b%d\n", 1, 2, i)))
+	}
+	b.WriteString("0000PACK")
+	body := b.String()
+	resp := env.do(t, fmt.Sprintf("POST /r.git/git-receive-pack HTTP/1.1\r\nHost: example.com\r\nContent-Length: %d\r\n\r\n%s", len(body), body))
+	msg, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(msg), "more than") || len(env.asked) != 0 {
+		t.Errorf("push of %d refs: %d %q, asked %d", maxPushCommands+1, resp.StatusCode, msg, len(env.asked))
 	}
 }
 

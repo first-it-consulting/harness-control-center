@@ -30,4 +30,4 @@ spec:
     maxCostUSD: 5
     maxTokens: 2000000
   approvals:
-    requireFor: [git.push.default-branch, delete.*]
+    requireFor: [git.push, http.delete]

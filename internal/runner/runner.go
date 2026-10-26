@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/first-it-consulting/harness-control-center/internal/budget"
+	"github.com/first-it-consulting/harness-control-center/internal/policy"
 	"github.com/first-it-consulting/harness-control-center/internal/results"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
@@ -59,7 +60,11 @@ type Config struct {
 	// Egress returns the egress proxy for a job whose harness grants
 	// network access; the proxy enforces meter (the job's budget) for the
 	// model traffic it brokers. Without it, such harnesses are rejected.
-	Egress func(h *spec.Harness, jobID string, meter *budget.Meter) (sandbox.Proxy, error)
+	// approve decides the requests its approval gates hold.
+	Egress func(h *spec.Harness, jobID string, meter *budget.Meter, approve Approver) (sandbox.Proxy, error)
+	// ApprovalTimeout bounds how long a gated request waits for a
+	// decision (default DefaultApprovalTimeout).
+	ApprovalTimeout time.Duration
 	// Pricing gives models a price (USD per million tokens), so that
 	// budget.maxCostUSD can be enforced for them; unpriced models are
 	// limited by tokens only.
@@ -119,6 +124,7 @@ type Runner struct {
 	root       context.Context
 	cancelRoot context.CancelFunc
 
+	approvals     map[string]*pendingApproval
 	schedules     map[string]*schedule
 	wake          chan struct{}
 	stopScheduler chan struct{}
@@ -152,11 +158,14 @@ func New(cfg Config) (*Runner, error) {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
+	if cfg.ApprovalTimeout <= 0 {
+		cfg.ApprovalTimeout = DefaultApprovalTimeout
+	}
 	if cfg.MinScheduleInterval <= 0 {
 		cfg.MinScheduleInterval = DefaultMinScheduleInterval
 	}
 	r := &Runner{cfg: cfg, jobs: map[string]*job{}, subs: map[chan Event]struct{}{},
-		schedules: map[string]*schedule{}, wake: make(chan struct{}, 1),
+		schedules: map[string]*schedule{}, wake: make(chan struct{}, 1), approvals: map[string]*pendingApproval{},
 		stopScheduler: make(chan struct{}), schedulerDone: make(chan struct{})}
 	r.root, r.cancelRoot = context.WithCancel(context.Background())
 	if cfg.Store != nil {
@@ -308,7 +317,8 @@ func (r *Runner) enqueue(h *spec.Harness, scheduleID string, loop *TaskLoop) (st
 	if needsNet {
 		meter = budget.New(budget.Limits{MaxTokens: h.Spec.Budget.MaxTokens, MaxCostUSD: h.Spec.Budget.MaxCostUSD},
 			r.price(h), func(reason string) { r.stopOverBudget(j, reason) })
-		proxy, err := r.cfg.Egress(h, id, meter)
+		approve := func(ctx context.Context, req ApprovalRequest) error { return r.awaitApproval(ctx, j, req) }
+		proxy, err := r.cfg.Egress(h, id, meter, approve)
 		if err != nil {
 			r.mu.Unlock()
 			return "", fmt.Errorf("runner: egress proxy: %w", err)
@@ -704,8 +714,8 @@ func checkSupported(h *spec.Harness) error {
 	if p.Subagents.Max > 0 {
 		notYet("subagents")
 	}
-	if len(s.Approvals.RequireFor) > 0 {
-		notYet("approval gates")
+	if err := policy.CheckApprovalPatterns(s.Approvals.RequireFor); err != nil {
+		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("runner: %w", errors.Join(errs...))

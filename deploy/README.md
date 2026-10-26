@@ -117,6 +117,20 @@ Cron times are UTC. A schedule may not run more often than
 overlap, missed runs are not caught up, and the kill switch pauses every
 schedule (resume each one afterwards). See ADR-0008.
 
+## Approvals
+
+Harnesses with `spec.approvals.requireFor` hold matching requests at the
+egress proxy until someone decides:
+
+```sh
+hcc approvals --ssh <host>
+hcc approve|deny <approval> --ssh <host>
+```
+
+The web UI shows them on every page. Unanswered requests are refused
+after `approvalTimeout` in `/etc/hcc/runner.yaml` (default `30m`). See
+ADR-0009.
+
 ## Job history
 
 Each job is kept in `/var/lib/hcc/state/jobs/<id>/` (owner-only): its

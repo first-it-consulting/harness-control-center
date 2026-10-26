@@ -7,6 +7,7 @@
 const view = document.getElementById("view");
 const dialog = document.getElementById("dialog");
 const notice = document.getElementById("notice");
+const approvalsBox = document.getElementById("approvals");
 
 const TEMPLATE = `# A new harness. Everything not written here is denied:
 # no network, no credentials, no subagents, 30 minutes, $1.
@@ -645,6 +646,44 @@ function runnerCard(r) {
       } }, "Remove")));
 }
 
+// --- approvals (shown on every page) ---
+
+async function loadApprovals() {
+  if (document.hidden) return;
+  let data;
+  try {
+    data = await api("GET", "/api/approvals");
+  } catch {
+    return; // the views report connection problems
+  }
+  set(approvalsBox, ...data.approvals.map(approvalCard));
+  approvalsBox.hidden = data.approvals.length === 0;
+}
+
+function approvalCard(a) {
+  const path = "/api/runners/" + encodeURIComponent(a.runner) + "/approvals/" + encodeURIComponent(a.id);
+  const decide = (approve) => async () => {
+    if (approve && !confirm("Let the agent do this?\n\n" + a.method + " " + a.host + a.path)) return;
+    try {
+      await api("POST", path, { approve });
+      say(approve ? "Approved." : "Denied: the agent gets a refusal.");
+    } catch (err) {
+      fail(err);
+    }
+    loadApprovals();
+  };
+  const jobHref = "#/job/" + encodeURIComponent(a.runner) + "/" + encodeURIComponent(a.jobId);
+  return h("div", { class: "approval" },
+    h("h2", {}, "The agent asks to: ", a.actions.join(", ")),
+    h("p", {}, h("code", {}, a.method + " " + a.host + a.path)),
+    a.details && a.details.length > 0 && h("ul", {}, a.details.map((d) => h("li", {}, h("code", {}, d)))),
+    h("p", { class: "muted" }, "Job ", h("a", { href: jobHref }, a.harness), " on " + a.runner +
+      ". Refused automatically at " + fmtTime(a.expires) + " unless you decide."),
+    h("div", { class: "actions" },
+      h("button", { class: "primary", onclick: decide(true) }, "Approve"),
+      h("button", { class: "danger", onclick: decide(false) }, "Deny")));
+}
+
 // --- kill switch ---
 
 document.getElementById("stop-all").addEventListener("click", async () => {
@@ -674,6 +713,8 @@ async function start() {
   }
   window.addEventListener("hashchange", route);
   route();
+  loadApprovals();
+  setInterval(loadApprovals, 3000);
 }
 
 start();

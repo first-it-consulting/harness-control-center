@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"slices"
 	"syscall"
 	"time"
 
@@ -113,6 +114,7 @@ func serve(configPath string, log *slog.Logger) error {
 		Log:                 log,
 		ScheduleStore:       store,
 		MinScheduleInterval: cfg.ScheduleInterval(),
+		ApprovalTimeout:     cfg.ApprovalWait(),
 	}
 	if netCfg != nil {
 		rcfg.Egress = egressFactory(netCfg, cfg.Credentials, log)
@@ -168,8 +170,11 @@ func pruneJobs(ctx context.Context, r *runner.Runner, store *runnerd.FileStore, 
 // credentials are loaded fresh for every job and get a CA of their own.
 // The model endpoint is always brokered, so the job's budget can be
 // metered and enforced there.
-func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slog.Logger) func(*spec.Harness, string, *budget.Meter) (sandbox.Proxy, error) {
-	return func(h *spec.Harness, jobID string, meter *budget.Meter) (sandbox.Proxy, error) {
+//
+// With approval gates, every allowed host is brokered (inspected), so
+// that no request bypasses a gate.
+func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slog.Logger) func(*spec.Harness, string, *budget.Meter, runner.Approver) (sandbox.Proxy, error) {
+	return func(h *spec.Harness, jobID string, meter *budget.Meter, approve runner.Approver) (sandbox.Proxy, error) {
 		engine, err := policy.New(h)
 		if err != nil {
 			return nil, err
@@ -211,6 +216,17 @@ func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slo
 			hosts = append(hosts, host)
 			if c.Scheme == "https" {
 				tlsHosts = append(tlsHosts, host)
+			}
+		}
+		if len(h.Spec.Approvals.RequireFor) > 0 {
+			p.Inspect = true
+			for _, r := range h.Spec.Permissions.Network.Egress {
+				if host := spec.NormalizeHost(r.Host); !slices.Contains(tlsHosts, host) {
+					tlsHosts = append(tlsHosts, host)
+				}
+			}
+			p.Gate = func(ctx context.Context, g egress.GateRequest) error {
+				return approve(ctx, runner.ApprovalRequest{Actions: g.Actions, Method: g.Method, Host: g.Host, Path: g.Path, Details: g.Details})
 			}
 		}
 		if len(tlsHosts) > 0 { // plain-http hosts need no CA
