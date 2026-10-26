@@ -9,7 +9,7 @@
 # <assets-dir> holds firecracker, jailer, vmlinux and
 # alpine-minirootfs.tar.gz, checksum-verified by hack/firecracker-poc/run.sh.
 # <target> is this runner's name as harnesses address it, e.g.
-# server:hcc-dev-1.
+# server:hcc-dev.
 #
 # HCC_TOOLS lists the Alpine packages the claude-code image offers as
 # tools (ADR-0010); set it to "" for none.

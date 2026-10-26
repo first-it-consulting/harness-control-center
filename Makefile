@@ -44,7 +44,7 @@ e2e:
 		cd / && rm -rf $$t; sudo systemctl start hcc-runner; exit $$rc'
 
 # Install or upgrade the runner daemon on a Linux/KVM host, e.g.
-# make deploy-runner HOST=hcc-dev TARGET=server:hcc-dev-1
+# make deploy-runner HOST=hcc-dev TARGET=server:hcc-dev
 # E2E_ASSETS: Firecracker, kernel and rootfs fetched on the host by
 # hack/firecracker-poc/run.sh.
 E2E_HOST   ?=
