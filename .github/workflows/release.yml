@@ -1,11 +1,17 @@
 name: Release
 
 # release-please keeps a release PR up to date from conventional commits.
-# Merging that PR creates the tag and GitHub release; the goreleaser job
-# then builds, signs and attests the artifacts in the same run.
+# Merging that PR creates the tag (vX.Y.Z) and GitHub release; the
+# goreleaser job then builds, signs and attests the artifacts in the same
+# run. If that job failed, run this workflow by hand for the existing tag.
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build again, e.g. v0.1.0"
+        required: true
 
 permissions:
   contents: read
@@ -28,7 +34,7 @@ jobs:
 
   goreleaser:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -36,8 +42,17 @@ jobs:
       id-token: write     # keyless cosign signing and attestations
       attestations: write # build provenance
     steps:
+      # Only a plain semantic version tag is built (passed via env, never
+      # into the shell script itself).
+      - name: Check the tag
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
+        run: |
+          [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a release tag: $TAG"; exit 1; }
+          echo "TAG=$TAG" >>"$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
