@@ -55,6 +55,28 @@ type Spec struct {
 	Approvals   Approvals   `yaml:"approvals,omitempty"`
 	// MCP lists the MCP servers the agent may use (ADR-0014).
 	MCP MCP `yaml:"mcp,omitempty"`
+	// A2A lists the A2A agents the agent may talk to (ADR-0015).
+	A2A A2A `yaml:"a2a,omitempty"`
+}
+
+// A2A lists other agents, reached with the Agent2Agent protocol.
+type A2A struct {
+	Agents []A2AAgent `yaml:"agents,omitempty"`
+}
+
+// A2AAgent is a remote A2A agent: its JSON-RPC endpoint (https). Its
+// host and port must be in the egress allowlist; a credential for that
+// host is added by the broker.
+type A2AAgent struct {
+	// Name is how the agent and approval actions (a2a.<name>.send) refer
+	// to it.
+	Name string `yaml:"name"`
+	URL  string `yaml:"url"`
+}
+
+// EndpointHostPort returns the agent's host, port and path.
+func (a A2AAgent) EndpointHostPort() (host string, port int, path string) {
+	return MCPServer{URL: a.URL}.EndpointHostPort()
 }
 
 // MCP lists MCP servers.

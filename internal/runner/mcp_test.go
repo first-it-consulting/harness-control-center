@@ -176,3 +176,57 @@ func TestMCPPluginMustBeInstalled(t *testing.T) {
 		t.Errorf("Submit without MCP plugins = %v", err)
 	}
 }
+
+func TestMCPRelayRefusesAmbiguousCalls(t *testing.T) {
+	fm := &fakeMCP{}
+	var mu sync.Mutex
+	ejs := map[string]EgressJob{}
+	r, err := New(Config{Provider: &scriptProvider{specs: map[string]sandbox.Spec{}}, Images: []string{"base"}, MCP: fm,
+		Egress: func(ej EgressJob) (sandbox.Proxy, error) {
+			mu.Lock()
+			ejs[ej.JobID] = ej
+			mu.Unlock()
+			return nopProxy{}, nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Shutdown(context.Background()) })
+	// A bare "mcp" gate holds every tool call.
+	h, err := spec.Parse([]byte(strings.Replace(mcpDoc, "[mcp.gh.delete_repo]", "[mcp]", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := r.Submit(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, r, id, StateRunning)
+	mu.Lock()
+	local := ejs[id].Local
+	mu.Unlock()
+	post := func(body string) string {
+		w := httptest.NewRecorder()
+		local.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/hcc/v1/mcp/gh", strings.NewReader(body)))
+		return w.Body.String()
+	}
+	if got := post(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_repos","Name":"delete_repo"}}`); !strings.Contains(got, "error") {
+		t.Errorf("case-variant keys = %s", got)
+	}
+	done := make(chan string, 1)
+	go func() { done <- post(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_repos"}}`) }()
+	var a []Approval
+	for deadline := time.Now().Add(5 * time.Second); len(a) == 0 && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		a = r.Approvals()
+	}
+	if len(a) != 1 {
+		t.Fatalf("a bare mcp gate held nothing: %v", a)
+	}
+	_ = r.Decide(a[0].ID, false)
+	<-done
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if len(fm.sent) != 0 {
+		t.Errorf("the server got %v", fm.sent)
+	}
+}

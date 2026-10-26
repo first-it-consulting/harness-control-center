@@ -133,7 +133,7 @@ func cmdRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	var started time.Time
 	last, err := c.Follow(ctx, id, func(ev runner.Event) bool {
-		if ev.To == runner.StateRunning {
+		if ev.To == runner.StateRunning && started.IsZero() { // not again after an approval
 			started = ev.At
 		}
 		line := fmt.Sprintf("  %s  %s", ev.At.Local().Format("15:04:05"), ev.To)

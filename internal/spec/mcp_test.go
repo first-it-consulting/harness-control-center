@@ -47,3 +47,36 @@ func TestMCPServers(t *testing.T) {
 		}
 	}
 }
+
+func TestA2AAgents(t *testing.T) {
+	doc := `
+apiVersion: hcc/v1alpha1
+kind: Harness
+metadata: {name: a}
+spec:
+  runtime: claude-code
+  prompt: p
+  a2a:
+    agents: [{name: reviewer, url: "https://agents.example.com/a2a"}]
+  permissions:
+    network:
+      egress: [{host: agents.example.com}]
+`
+	h, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host, port, path := h.Spec.A2A.Agents[0].EndpointHostPort(); host != "agents.example.com" || port != 443 || path != "/a2a" {
+		t.Errorf("endpoint = %s %d %s", host, port, path)
+	}
+	for name, tt := range map[string]struct{ old, new, want string }{
+		"http":    {"https://agents", "http://agents", "https://"},
+		"no url":  {`, url: "https://agents.example.com/a2a"`, "", "https://"},
+		"dup":     {"[{name: reviewer", "[{name: x, url: \"https://agents.example.com/b\"}, {name: x", "listed twice"},
+		"private": {"agents.example.com/a2a", "agents.lan/a2a", "url"},
+	} {
+		if _, err := Parse([]byte(strings.Replace(doc, tt.old, tt.new, 1))); err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: %v, want %q", name, err, tt.want)
+		}
+	}
+}

@@ -72,7 +72,7 @@ transports are still part of the core.
 | `internal/budget` | per-job token and cost meter |
 | `internal/plugins` | plugin bundles and store, running plugins in their own sandboxes, notifier events (ADR-0013) |
 | `internal/mcp` | reads MCP (JSON-RPC) messages: tool calls for approval gates, relaying plugin servers (ADR-0014) |
-| `cmd/hcc-guest` | runs inside sandboxes: the MCP plugin shim |
+| `cmd/hcc-guest` | runs inside sandboxes: the MCP plugin shim and the A2A client |
 | `internal/tools` | an image's tool catalog: which signed packages a harness may get installed (ADR-0010) |
 | `internal/results` | re-packs a guest's results archive into a safe one (ADR-0006) |
 | `internal/egress` | per-VM HTTPS (CONNECT) egress proxy enforcing the harness's network policy (ADR-0004); credential broker with a per-job CA (ADR-0005) |

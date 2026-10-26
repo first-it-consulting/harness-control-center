@@ -59,6 +59,11 @@ func New(h *spec.Harness) (*Engine, error) {
 			return nil, fmt.Errorf("policy: MCP server %s (%s:%d) is not in the egress allowlist", s.Name, host, port)
 		}
 	}
+	for _, a := range h.Spec.A2A.Agents {
+		if host, port, _ := a.EndpointHostPort(); !e.CheckEgress(host, port).Allowed {
+			return nil, fmt.Errorf("policy: A2A agent %s (%s:%d) is not in the egress allowlist", a.Name, host, port)
+		}
+	}
 	return e, nil
 }
 
@@ -136,15 +141,14 @@ func (e *Engine) CheckSpawnSubagent(started int) Decision {
 }
 
 // RequiresApproval reports whether action (e.g. "git.push") must be
-// approved by a human before it runs. A pattern "git.*" covers "git" and
-// every action below it.
+// approved by a human before it runs. A pattern covers its action and
+// every action below it: "git" and "git.*" both cover "git.push"; "mcp"
+// covers every MCP tool call. So a pattern the runner accepted can never
+// silently match nothing.
 func (e *Engine) RequiresApproval(action string) bool {
 	for _, p := range e.h.Spec.Approvals.RequireFor {
-		if prefix, ok := strings.CutSuffix(p, ".*"); ok {
-			if action == prefix || strings.HasPrefix(action, prefix+".") {
-				return true
-			}
-		} else if p == action {
+		prefix := strings.TrimSuffix(p, ".*")
+		if action == prefix || strings.HasPrefix(action, prefix+".") {
 			return true
 		}
 	}

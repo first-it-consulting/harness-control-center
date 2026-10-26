@@ -82,7 +82,10 @@ type Proxy struct {
 	Gate Gate
 	// MCP are the harness's remote MCP servers, whose tool calls approval
 	// gates can hold (with Inspect).
-	MCP []MCPEndpoint
+	MCP []Endpoint
+	// A2A are the harness's A2A agents, whose calls approval gates can
+	// hold (with Inspect).
+	A2A []Endpoint
 	// Local, if set, serves the job's own API to the guest: plain HTTP
 	// requests to the proxy itself under /hcc/v1/ (subagents, ADR-0011;
 	// MCP servers run as plugins, ADR-0014).

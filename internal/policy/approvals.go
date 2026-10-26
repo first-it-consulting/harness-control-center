@@ -26,9 +26,10 @@ var ApprovalActions = []string{
 func CheckApprovalPatterns(s *spec.Spec) error {
 	var errs []error
 	for _, p := range s.Approvals.RequireFor {
-		if !enforceable(p) && !enforceableMCP(p, s) {
+		if !enforceable(p) && !enforceableMCP(p, s) && !enforceableA2A(p, s) {
 			errs = append(errs, fmt.Errorf("approval for %q cannot be enforced (supported: %s, http.* and git.*, "+
-				"and mcp.<server>.<tool> for the servers in spec.mcp)", p, strings.Join(ApprovalActions, ", ")))
+				"mcp.<server>.<tool> for the servers in spec.mcp, and a2a.<agent>.send|cancel|read for the agents in spec.a2a)",
+				p, strings.Join(ApprovalActions, ", ")))
 		}
 	}
 	return errors.Join(errs...)
@@ -47,6 +48,43 @@ func enforceableMCP(p string, s *spec.Spec) bool {
 func (e *Engine) GatesMCP() bool {
 	return slices.ContainsFunc(e.h.Spec.Approvals.RequireFor, func(p string) bool {
 		return p == "mcp" || strings.HasPrefix(p, "mcp.")
+	})
+}
+
+// A2A actions per method: sending a message (message/send,
+// message/stream), cancelling a task, and everything else (reading tasks,
+// push notification settings).
+var a2aActions = []string{"send", "cancel", "read"}
+
+// enforceableA2A: a pattern below "a2a" naming no agent, or one of s's
+// (and, below it, one of a2aActions).
+func enforceableA2A(p string, s *spec.Spec) bool {
+	parts := strings.Split(strings.TrimSuffix(p, ".*"), ".")
+	if parts[0] != "a2a" || len(s.A2A.Agents) == 0 || len(parts) > 3 {
+		return false
+	}
+	if len(parts) >= 2 && !slices.ContainsFunc(s.A2A.Agents, func(a spec.A2AAgent) bool { return a.Name == parts[1] }) {
+		return false
+	}
+	return len(parts) < 3 || slices.Contains(a2aActions, parts[2])
+}
+
+// A2AAction is the approval action of calling method on an A2A agent.
+func A2AAction(agent, method string) string {
+	switch method {
+	case "message/send", "message/stream":
+		return "a2a." + agent + ".send"
+	case "tasks/cancel":
+		return "a2a." + agent + ".cancel"
+	default:
+		return "a2a." + agent + ".read"
+	}
+}
+
+// GatesA2A reports whether some A2A calls need approval.
+func (e *Engine) GatesA2A() bool {
+	return slices.ContainsFunc(e.h.Spec.Approvals.RequireFor, func(p string) bool {
+		return p == "a2a" || strings.HasPrefix(p, "a2a.")
 	})
 }
 

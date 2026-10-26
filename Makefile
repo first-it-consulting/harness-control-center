@@ -22,6 +22,7 @@ fuzz:
 	$(GO) test ./internal/cron -run='^$$' -fuzz=FuzzNext -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/tools -run='^$$' -fuzz=FuzzParse -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/mcp -run='^$$' -fuzz=FuzzToolCalls -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/mcp -run='^$$' -fuzz=FuzzStrictJSON -fuzztime=$(FUZZTIME)
 
 lint:
 	golangci-lint run

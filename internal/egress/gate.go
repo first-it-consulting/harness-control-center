@@ -66,11 +66,24 @@ func (t *gatedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	actions := policy.HTTPActions(req.Method, req.URL.Path)
 	var details []string
-	if ep, ok := t.p.mcpEndpoint(t.host, t.port, req.URL.Path); ok && req.Method == http.MethodPost && t.p.Policy.GatesMCP() {
-		var err error
-		if req, actions, details, err = t.inspectMCP(req, ep, actions); err != nil {
-			t.p.Log.Warn("egress: MCP request refused", "job", t.p.JobID, "server", ep.Name, "err", err)
-			return plainResponse(req, http.StatusForbidden, "this MCP request cannot be approved: "+err.Error()), nil
+	// On a host with a gated MCP server or A2A agent, every request with a
+	// body is read, whatever its path or method: a server might answer
+	// on paths or in forms the endpoint's URL does not name.
+	if eps := t.p.gatedEndpoints(t.host, t.port); len(eps) > 0 && hasBody(req) {
+		ep, err := pickEndpoint(eps, req.URL.Path)
+		ce := req.Header.Get("Content-Encoding")
+		switch {
+		case err != nil:
+		case ce != "" && !strings.EqualFold(ce, "identity"):
+			err = fmt.Errorf("its body is encoded (%s)", ce)
+		case ep.kind == kindMCP:
+			req, actions, details, err = t.inspectMCP(req, ep.Endpoint, actions)
+		default:
+			req, actions, details, err = t.inspectA2A(req, ep.Endpoint, actions, details)
+		}
+		if err != nil {
+			t.p.Log.Warn("egress: request to a gated MCP or A2A host refused", "job", t.p.JobID, "host", t.host, "path", req.URL.Path, "err", err)
+			return plainResponse(req, http.StatusForbidden, "this request cannot be approved: "+err.Error()), nil
 		}
 	}
 	if !t.p.Policy.RequiresApprovalAny(actions) {
@@ -197,7 +210,7 @@ func short(id string) string {
 
 // inspectMCP reads a request to an MCP server and adds the actions of its
 // tool calls (mcp.<server>.<tool>), each described in full.
-func (t *gatedTransport) inspectMCP(req *http.Request, ep MCPEndpoint, actions []string) (*http.Request, []string, []string, error) {
+func (t *gatedTransport) inspectMCP(req *http.Request, ep Endpoint, actions []string) (*http.Request, []string, []string, error) {
 	if req.Body == nil || req.Body == http.NoBody {
 		return req, actions, nil, nil
 	}

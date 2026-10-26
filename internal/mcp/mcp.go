@@ -29,6 +29,9 @@ type ToolCall struct {
 // gated call can never hide in a message it does not understand.
 func ToolCalls(body []byte) ([]ToolCall, error) {
 	body = bytes.TrimSpace(body)
+	if err := StrictJSON(body); err != nil {
+		return nil, err
+	}
 	var msgs []json.RawMessage
 	if len(body) > 0 && body[0] == '[' {
 		if err := json.Unmarshal(body, &msgs); err != nil {
@@ -97,6 +100,9 @@ func Parse(b []byte) (Message, error) {
 	b = bytes.TrimSpace(b)
 	if len(b) == 0 || b[0] != '{' {
 		return Message{}, errors.New("not a JSON-RPC message object")
+	}
+	if err := StrictJSON(b); err != nil {
+		return Message{}, err
 	}
 	if err := json.Unmarshal(b, &m); err != nil {
 		return Message{}, fmt.Errorf("not a JSON-RPC message: %w", err)

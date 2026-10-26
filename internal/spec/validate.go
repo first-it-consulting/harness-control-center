@@ -67,6 +67,7 @@ func (h *Harness) Validate() error {
 	}
 	validateBudget(&s.Budget, add)
 	validateMCP(&s.MCP, &s.Permissions, add)
+	validateA2A(&s.A2A, &s.Permissions, add)
 	for i, a := range s.Approvals.RequireFor {
 		if !actionRe.MatchString(a) {
 			add(fmt.Sprintf("spec.approvals.requireFor[%d]", i), "invalid action %q (expected e.g. \"git.push\" or \"git.*\")", a)
@@ -192,26 +193,48 @@ func validateMCP(m *MCP, p *Permissions, add addFunc) {
 				add(path+".plugin", "invalid plugin name %q", s.Plugin)
 			}
 		default:
-			u, err := url.Parse(s.URL)
-			switch {
-			case err != nil:
-				add(path+".url", "invalid URL: %v", err)
-				continue
-			case u.Scheme != "https":
-				add(path+".url", "must be an https:// URL")
-			case u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "":
-				add(path+".url", "must not contain credentials, a query or a fragment")
-			case !urlPathRe.MatchString(u.EscapedPath()):
-				add(path+".url", "invalid path %q", u.Path)
-			}
-			if err := ValidateEgressHost(NormalizeHost(u.Hostname()), p.Network.AllowPrivateNetworks); err != nil {
-				add(path+".url", "%v", err)
-			}
-			if port := u.Port(); port != "" {
-				if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-					add(path+".url", "invalid port %q", port)
-				}
-			}
+			validateRemoteURL(path+".url", s.URL, p, add)
+		}
+	}
+}
+
+func validateA2A(a *A2A, p *Permissions, add addFunc) {
+	if len(a.Agents) > MaxA2AAgents {
+		add("spec.a2a.agents", "at most %d agents", MaxA2AAgents)
+	}
+	seen := map[string]bool{}
+	for i, ag := range a.Agents {
+		path := fmt.Sprintf("spec.a2a.agents[%d]", i)
+		if !nameRe.MatchString(ag.Name) {
+			add(path+".name", "must be 1-63 lowercase letters, digits or '-'")
+		} else if seen[ag.Name] {
+			add(path+".name", "%q is listed twice", ag.Name)
+		}
+		seen[ag.Name] = true
+		validateRemoteURL(path+".url", ag.URL, p, add)
+	}
+}
+
+// validateRemoteURL checks an https endpoint of a remote server.
+func validateRemoteURL(path, raw string, p *Permissions, add addFunc) {
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil:
+		add(path, "invalid URL: %v", err)
+		return
+	case u.Scheme != "https":
+		add(path, "must be an https:// URL")
+	case u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "":
+		add(path, "must not contain credentials, a query or a fragment")
+	case !urlPathRe.MatchString(u.EscapedPath()):
+		add(path, "invalid path %q", u.Path)
+	}
+	if err := ValidateEgressHost(NormalizeHost(u.Hostname()), p.Network.AllowPrivateNetworks); err != nil {
+		add(path, "%v", err)
+	}
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			add(path, "invalid port %q", port)
 		}
 	}
 }

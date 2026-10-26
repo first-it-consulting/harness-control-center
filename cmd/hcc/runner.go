@@ -225,8 +225,12 @@ func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slo
 		for _, s := range h.Spec.MCP.Servers {
 			if s.URL != "" {
 				host, port, path := s.EndpointHostPort()
-				p.MCP = append(p.MCP, egress.MCPEndpoint{Name: s.Name, Host: host, Port: port, Path: path})
+				p.MCP = append(p.MCP, egress.Endpoint{Name: s.Name, Host: host, Port: port, Path: path})
 			}
+		}
+		for _, a := range h.Spec.A2A.Agents {
+			host, port, path := a.EndpointHostPort()
+			p.A2A = append(p.A2A, egress.Endpoint{Name: a.Name, Host: host, Port: port, Path: path})
 		}
 		byHost := map[string]credentials.Credential{}
 		if len(h.Spec.Permissions.Credentials) > 0 {

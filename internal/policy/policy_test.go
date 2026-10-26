@@ -157,7 +157,7 @@ func TestRequiresApproval(t *testing.T) {
 	e := mustEngine(t, granted)
 	tests := map[string]bool{
 		"git.push":        true,
-		"git.push.force":  false,
+		"git.push.force":  true, // a pattern covers what is below it
 		"git.commit":      false,
 		"delete":          true,
 		"delete.file":     true,
@@ -167,6 +167,29 @@ func TestRequiresApproval(t *testing.T) {
 	for action, want := range tests {
 		if got := e.RequiresApproval(action); got != want {
 			t.Errorf("RequiresApproval(%q) = %v, want %v", action, got, want)
+		}
+	}
+}
+
+// Every pattern the runner accepts must hold what it names: bare groups
+// ("mcp", "mcp.<server>", "http") are prefixes too.
+func TestBarePatternsMatch(t *testing.T) {
+	for pattern, action := range map[string]string{
+		"mcp":           "mcp.notes.delete_note",
+		"mcp.notes":     "mcp.notes.delete_note",
+		"http":          "http.delete",
+		"git":           "git.push",
+		"a2a":           "a2a.rev.send",
+		"a2a.rev":       "a2a.rev.send",
+		"mcp.notes.del": "", // not a dot boundary: no match
+	} {
+		e := mustEngine(t, base+"  approvals: {requireFor: ["+pattern+"]}\n")
+		probe := action
+		if probe == "" {
+			probe = "mcp.notes.delete_note"
+		}
+		if got := e.RequiresApproval(probe); got != (action != "") {
+			t.Errorf("pattern %q, action %q: %v", pattern, probe, got)
 		}
 	}
 }
@@ -368,6 +391,19 @@ func TestApprovalVocabulary(t *testing.T) {
 	}
 	if err := CheckApprovalPatterns(patterns([]string{"gitlab"}, "mcp.github.*")); err == nil {
 		t.Error("a pattern for an undeclared MCP server was accepted")
+	}
+	a2a := &spec.Spec{A2A: spec.A2A{Agents: []spec.A2AAgent{{Name: "rev", URL: "https://x.example.com"}}}}
+	for p, want := range map[string]bool{"a2a.*": true, "a2a.rev.send": true, "a2a.rev.*": true, "a2a.rev.read": true,
+		"a2a.rev.delete": false, "a2a.other.send": false, "a2a.rev.send.x": false} {
+		a2a.Approvals.RequireFor = []string{p}
+		if got := CheckApprovalPatterns(a2a) == nil; got != want {
+			t.Errorf("A2A pattern %q accepted = %v", p, got)
+		}
+	}
+	for m, want := range map[string]string{"message/send": "a2a.rev.send", "message/stream": "a2a.rev.send", "tasks/cancel": "a2a.rev.cancel", "tasks/get": "a2a.rev.read"} {
+		if got := A2AAction("rev", m); got != want {
+			t.Errorf("A2AAction(%s) = %s", m, got)
+		}
 	}
 	if got := MCPAction("gitlab", "Create_Issue"); got != "mcp.gitlab.create_issue" {
 		t.Errorf("MCPAction = %q", got)

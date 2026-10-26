@@ -31,6 +31,7 @@ const (
 	MaxPromptBytes   = 256 * 1024
 	MaxEgressRules   = 64
 	MaxMCPServers    = 16
+	MaxA2AAgents     = 16
 )
 
 // ApplyDefaults fills omitted fields in place. It never widens a

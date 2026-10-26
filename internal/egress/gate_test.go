@@ -265,7 +265,7 @@ spec:
 
 func TestGateHoldsMCPToolCalls(t *testing.T) {
 	env := startGateFor(t, true, mcpHarness, func(p *Proxy) {
-		p.MCP = []MCPEndpoint{{Name: "docs", Host: "example.com", Port: 443, Path: "/mcp"}}
+		p.MCP = []Endpoint{{Name: "docs", Host: "example.com", Port: 443, Path: "/mcp"}}
 	})
 	post := func(body string) *http.Response {
 		return env.do(t, fmt.Sprintf("POST /mcp HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body))
@@ -299,4 +299,107 @@ func TestGateHoldsMCPToolCalls(t *testing.T) {
 		t.Error("an unreadable message reached the server")
 	default:
 	}
+}
+
+const a2aHarness = `
+apiVersion: hcc/v1alpha1
+kind: Harness
+metadata: {name: g}
+spec:
+  runtime: claude-code
+  prompt: p
+  approvals: {requireFor: [a2a.reviewer.send]}
+  a2a:
+    agents: [{name: reviewer, url: "https://example.com/a2a"}]
+  permissions:
+    network:
+      egress:
+        - host: example.com
+`
+
+func TestGateHoldsA2AMessages(t *testing.T) {
+	env := startGateFor(t, true, a2aHarness, func(p *Proxy) {
+		p.A2A = []Endpoint{{Name: "reviewer", Host: "example.com", Port: 443, Path: "/a2a"}}
+	})
+	post := func(body string) *http.Response {
+		return env.do(t, fmt.Sprintf("POST /a2a HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body))
+	}
+	get := `{"jsonrpc":"2.0","id":1,"method":"tasks/get","params":{"id":"t1"}}`
+	resp := post(get)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || len(env.asked) != 0 || string(<-env.body) != get {
+		t.Fatalf("tasks/get: %d, asked %v", resp.StatusCode, env.asked)
+	}
+	env.answer = errors.New("denied by you")
+	send := `{"jsonrpc":"2.0","id":2,"method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"review my diff"}],"messageId":"m1"}}}`
+	resp = post(send)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("denied send: %d", resp.StatusCode)
+	}
+	if len(env.asked) != 1 || !strings.Contains(strings.Join(env.asked[0].Actions, ","), "a2a.reviewer.send") ||
+		!strings.Contains(env.asked[0].Details[0], `"text":"review my diff"`) {
+		t.Errorf("asked %+v", env.asked)
+	}
+	select {
+	case <-env.body:
+		t.Error("a denied message reached the agent")
+	default:
+	}
+	long := `{"jsonrpc":"2.0","id":3,"method":"message/send","params":{"message":{"parts":[{"kind":"text","text":"` + strings.Repeat("x", 3000) + `"}]}}}`
+	resp = post(long)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || len(env.asked) != 1 {
+		t.Errorf("a message too long to show: %d, asked %d times", resp.StatusCode, len(env.asked))
+	}
+}
+
+// The review's bypasses: another spelling of the path, an encoded body,
+// a body that is not JSON-RPC, keys a server could read differently, and
+// a bare pattern.
+func TestGateMCPBypassesAreClosed(t *testing.T) {
+	doc := strings.Replace(mcpHarness, "[mcp.docs.delete_page]", "[mcp]", 1)
+	env := startGateFor(t, true, doc, func(p *Proxy) {
+		p.MCP = []Endpoint{{Name: "docs", Host: "example.com", Port: 443, Path: "/mcp"}}
+	})
+	env.answer = errors.New("denied by you")
+	send := func(path, hdr, body string) int {
+		resp := env.do(t, fmt.Sprintf("POST %s HTTP/1.1\r\nHost: example.com\r\n%sContent-Length: %d\r\n\r\n%s", path, hdr, len(body), body))
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_page","arguments":{}}}`
+	for _, path := range []string{"/mcp", "//mcp", "/MCP/", "/mcp/.", "/other"} {
+		env.asked = nil
+		if code := send(path, "", call); code != http.StatusForbidden || len(env.asked) != 1 {
+			t.Errorf("POST %s: %d, asked %d times (want held and denied)", path, code, len(env.asked))
+		}
+	}
+	env.asked = nil
+	for name, tt := range map[string]struct{ hdr, body string }{
+		"gzip":       {"Content-Encoding: gzip\r\n", call},
+		"form":       {"Content-Type: application/x-www-form-urlencoded\r\n", "a=b"},
+		"case keys":  {"", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","Name":"delete_page"}}`},
+		"dup keys":   {"", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","name":"delete_page"}}`},
+		"two values": {"", call + call},
+	} {
+		if code := send("/mcp", tt.hdr, tt.body); code != http.StatusForbidden {
+			t.Errorf("%s: %d", name, code)
+		}
+	}
+	if len(env.asked) != 0 {
+		t.Errorf("unreadable requests were offered for approval: %+v", env.asked)
+	}
+	select {
+	case b := <-env.body:
+		t.Errorf("the server got %q", b)
+	default:
+	}
+	// Without a body (e.g. an event stream), nothing to inspect.
+	resp := env.do(t, "GET /mcp HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET without a body: %d", resp.StatusCode)
+	}
+	<-env.body
 }

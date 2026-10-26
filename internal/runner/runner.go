@@ -353,7 +353,7 @@ func (r *Runner) resolveTools(h *spec.Harness) (pkgs, files []string, err error)
 // and the subagent API is served by it.
 func needsNetwork(h *spec.Harness) bool {
 	p := h.Spec.Permissions
-	return len(p.Network.Egress) > 0 || len(p.Credentials) > 0 || p.Subagents.Max > 0 || len(h.Spec.MCP.Servers) > 0
+	return len(p.Network.Egress) > 0 || len(p.Credentials) > 0 || p.Subagents.Max > 0 || len(h.Spec.MCP.Servers) > 0 || len(h.Spec.A2A.Agents) > 0
 }
 
 // enqueueOpts: scheduleID and loop are set for runs started by a
@@ -1021,6 +1021,14 @@ type Task struct {
 	Subagents *TaskSubagents `json:"subagents,omitempty"`
 	// MCP are the MCP servers the runtime configures (ADR-0014).
 	MCP []TaskMCP `json:"mcp,omitempty"`
+	// A2A are the A2A agents the runtime may talk to (ADR-0015).
+	A2A []TaskA2A `json:"a2a,omitempty"`
+}
+
+// TaskA2A is one A2A agent.
+type TaskA2A struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
 }
 
 // TaskMCP is one MCP server: remote (URL), or a plugin served by the
@@ -1065,6 +1073,9 @@ func taskFor(h *spec.Harness, loop *TaskLoop, tools *TaskTools) ([]byte, error) 
 	}
 	for _, s := range h.Spec.MCP.Servers {
 		t.MCP = append(t.MCP, TaskMCP{Name: s.Name, URL: s.URL, Local: s.Plugin != ""})
+	}
+	for _, a := range h.Spec.A2A.Agents {
+		t.A2A = append(t.A2A, TaskA2A{Name: a.Name, URL: a.URL})
 	}
 	if m := h.Spec.Model; m != nil {
 		t.Model = &TaskModel{Name: m.Name, Endpoint: m.Endpoint}

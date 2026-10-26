@@ -195,6 +195,14 @@ Tool calls can need approval: `approvals: {requireFor: [mcp.notes.delete_note]}`
 For your own assistant, `hcc control mcp` is a read-only MCP server (stdio)
 over everything the Control Center sees. See ADR-0014.
 
+## A2A
+
+Harnesses list the A2A agents they may talk to in `spec.a2a.agents` (name
+and https URL, whose host must be in the egress allowlist). Inside the
+`claude-code` image the agent uses `hcc-guest a2a`; sending can need
+approval: `approvals: {requireFor: [a2a.reviewer.send]}`. See ADR-0015 and
+`examples/a2a-review.yaml`.
+
 ## Job history
 
 Each job is kept in `/var/lib/hcc/state/jobs/<id>/` (owner-only): its
