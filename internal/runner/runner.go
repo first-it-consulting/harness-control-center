@@ -1062,8 +1062,9 @@ type TaskLoop struct {
 
 // TaskModel tells the runtime which model to ask, and where.
 type TaskModel struct {
-	Name     string `json:"name"`
-	Endpoint string `json:"endpoint"`
+	Name          string `json:"name"`
+	Endpoint      string `json:"endpoint"`
+	ContextWindow int    `json:"contextWindow,omitempty"`
 }
 
 func taskFor(h *spec.Harness, loop *TaskLoop, tools *TaskTools) ([]byte, error) {
@@ -1078,7 +1079,7 @@ func taskFor(h *spec.Harness, loop *TaskLoop, tools *TaskTools) ([]byte, error) 
 		t.A2A = append(t.A2A, TaskA2A{Name: a.Name, URL: a.URL})
 	}
 	if m := h.Spec.Model; m != nil {
-		t.Model = &TaskModel{Name: m.Name, Endpoint: m.Endpoint}
+		t.Model = &TaskModel{Name: m.Name, Endpoint: m.Endpoint, ContextWindow: m.ContextWindow}
 	}
 	b, err := json.Marshal(t)
 	if err != nil {

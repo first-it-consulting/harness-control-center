@@ -170,6 +170,9 @@ func validateModel(m *Model, p *Permissions, add addFunc) {
 	if m.Credential != "" && !slices.Contains(p.Credentials, m.Credential) {
 		add("spec.model.credential", "%q is not in permissions.credentials", m.Credential)
 	}
+	if w := m.ContextWindow; w != 0 && (w < MinContextWindow || w > MaxContextWindow) {
+		add("spec.model.contextWindow", "must be between %d and %d tokens", MinContextWindow, MaxContextWindow)
+	}
 }
 
 func validateMCP(m *MCP, p *Permissions, add addFunc) {

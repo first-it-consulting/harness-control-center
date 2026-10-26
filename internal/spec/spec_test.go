@@ -251,12 +251,16 @@ func TestModel(t *testing.T) {
     name: Ornith-1.5-35B-A3B-MLX
     endpoint: http://LLM.example:4000
     credential: llm
+    contextWindow: 262144
   permissions:
     credentials: [llm]
 `
 	h, err := Parse([]byte(with))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if h.Spec.Model.ContextWindow != 262144 {
+		t.Errorf("contextWindow = %d", h.Spec.Model.ContextWindow)
 	}
 	scheme, host, port := h.Spec.Model.EndpointHostPort()
 	if scheme != "http" || host != "llm.example" || port != 4000 {
@@ -279,6 +283,10 @@ func TestModel(t *testing.T) {
 		"bad port":         {"{name: m, endpoint: 'http://a.example:99999'}", "port"},
 		"bad name":         {"{name: 'a b', endpoint: 'https://a.example'}", "model name"},
 		"credential grant": {"{name: m, endpoint: 'https://a.example', credential: llm}", "not in permissions.credentials"},
+		"small window":     {"{name: m, endpoint: 'https://a.example', contextWindow: 8191}", "contextWindow"},
+		"large window":     {"{name: m, endpoint: 'https://a.example', contextWindow: 1000001}", "contextWindow"},
+		"negative window":  {"{name: m, endpoint: 'https://a.example', contextWindow: -1}", "contextWindow"},
+		"text window":      {"{name: m, endpoint: 'https://a.example', contextWindow: 256k}", "cannot unmarshal"},
 	}
 	for name, tt := range bad {
 		t.Run(name, func(t *testing.T) {

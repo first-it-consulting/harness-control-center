@@ -31,6 +31,9 @@ const (
 	MaxPromptBytes   = 256 * 1024
 	MaxEgressRules   = 64
 	MaxMCPServers    = 16
+	// Bounds of spec.model.contextWindow, in tokens.
+	MinContextWindow = 8 * 1024
+	MaxContextWindow = 1_000_000
 	MaxA2AAgents     = 16
 )
 

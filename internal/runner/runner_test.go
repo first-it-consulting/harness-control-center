@@ -676,7 +676,7 @@ func TestTaskReachesTheSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Shutdown(context.Background()) }()
-	id, err := r.Submit(harness(t, `  model: {name: m1, endpoint: 'https://api.example', credential: k}
+	id, err := r.Submit(harness(t, `  model: {name: m1, endpoint: 'https://api.example', credential: k, contextWindow: 262144}
   permissions:
     credentials: [k]
     network: {egress: [{host: api.example}]}
@@ -689,7 +689,7 @@ func TestTaskReachesTheSandbox(t *testing.T) {
 	if err := json.Unmarshal(p.startedSpecs()[0].Task, &task); err != nil {
 		t.Fatal(err)
 	}
-	if task.Runtime != "claude-code" || task.Prompt != "hi" || task.Model == nil || task.Model.Name != "m1" || task.Model.Endpoint != "https://api.example" {
+	if task.Runtime != "claude-code" || task.Prompt != "hi" || task.Model == nil || task.Model.Name != "m1" || task.Model.Endpoint != "https://api.example" || task.Model.ContextWindow != 262144 {
 		t.Errorf("task = %+v / %+v", task, task.Model)
 	}
 	if strings.Contains(string(p.startedSpecs()[0].Task), "credential") {

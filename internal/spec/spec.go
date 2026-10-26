@@ -126,6 +126,10 @@ type Model struct {
 	// Credential names the granted credential that authenticates to the
 	// endpoint (added by the egress proxy; the agent never sees it).
 	Credential string `yaml:"credential,omitempty"`
+	// ContextWindow is the model's context window in tokens, for a model
+	// the runtime does not know (it then assumes one; Claude Code assumes
+	// 200k). Zero leaves it to the runtime.
+	ContextWindow int `yaml:"contextWindow,omitempty"`
 }
 
 // EndpointHostPort returns the endpoint's host and port (default 443 for

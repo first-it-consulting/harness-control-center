@@ -322,6 +322,7 @@ const modelHarness = base + `
     name: Ornith-1.5-35B-A3B-MLX
     endpoint: http://llm.example:4000
     credential: llm
+    contextWindow: 262144
   permissions:
     credentials: [llm]
     network:
@@ -338,7 +339,7 @@ func TestModelEndpointMustBeAllowed(t *testing.T) {
 		t.Errorf("risk %v %v", risk, why)
 	}
 	explained := strings.Join(e.Explain(), "\n")
-	for _, want := range []string{"Uses the model Ornith-1.5-35B-A3B-MLX at http://llm.example:4000, authenticated with llm.", "UNENCRYPTED"} {
+	for _, want := range []string{"Uses the model Ornith-1.5-35B-A3B-MLX at http://llm.example:4000, authenticated with llm, with a context window of 262,144 tokens.", "UNENCRYPTED"} {
 		if !strings.Contains(explained, want) {
 			t.Errorf("explanation missing %q:\n%s", want, explained)
 		}

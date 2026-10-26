@@ -103,6 +103,9 @@ func (e *Engine) Explain() []string {
 		if m.Credential != "" {
 			line += ", authenticated with " + m.Credential
 		}
+		if m.ContextWindow > 0 {
+			line += ", with a context window of " + groupDigits(int64(m.ContextWindow)) + " tokens"
+		}
 		line += "."
 		if scheme, _, _ := m.EndpointHostPort(); scheme == "http" {
 			line += " UNENCRYPTED: prompts, code and the credential cross the network in clear text."
