@@ -68,8 +68,14 @@ func (t *gatedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var details []string
 	// On a host with a gated MCP server or A2A agent, every request with a
 	// body is read, whatever its path or method: a server might answer
-	// on paths or in forms the endpoint's URL does not name.
-	if eps := t.p.gatedEndpoints(t.host, t.port); len(eps) > 0 && hasBody(req) {
+	// on paths or in forms the endpoint's URL does not name (A2A also has
+	// a REST binding). Without a body, only reading (GET, HEAD) passes.
+	eps := t.p.gatedEndpoints(t.host, t.port)
+	if len(eps) > 0 && !hasBody(req) && req.Method != http.MethodGet && req.Method != http.MethodHead {
+		t.p.Log.Warn("egress: bodyless request to a gated MCP or A2A host refused", "job", t.p.JobID, "host", t.host, "method", req.Method, "path", req.URL.Path)
+		return plainResponse(req, http.StatusForbidden, "this request cannot be approved: on this host only JSON-RPC messages, and GET or HEAD, can be inspected"), nil
+	}
+	if len(eps) > 0 && hasBody(req) {
 		ep, err := pickEndpoint(eps, req.URL.Path)
 		ce := req.Header.Get("Content-Encoding")
 		switch {

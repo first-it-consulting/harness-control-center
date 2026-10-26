@@ -395,7 +395,16 @@ func TestGateMCPBypassesAreClosed(t *testing.T) {
 		t.Errorf("the server got %q", b)
 	default:
 	}
-	// Without a body (e.g. an event stream), nothing to inspect.
+	// Without a body, only reading passes (A2A's REST binding cancels with
+	// a bodyless POST).
+	for _, m := range []string{"POST", "DELETE", "PUT"} {
+		resp := env.do(t, m+" /v1/tasks/t1:cancel HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n")
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("bodyless %s: %d", m, resp.StatusCode)
+		}
+	}
+	// A GET without a body (e.g. an event stream): nothing to inspect.
 	resp := env.do(t, "GET /mcp HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
