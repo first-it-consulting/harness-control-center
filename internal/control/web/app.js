@@ -655,23 +655,59 @@ async function runnersView() {
     h("h2", {}, "Add a runner"),
     h("p", { class: "muted" }, "The runner must already be installed (see deploy/README.md). Over ssh, your own ssh configuration and keys are used."),
     form);
+  // Every card shows at once and fills in when its runner answers, so a
+  // slow or unreachable runner holds up only its own card.
+  const cards = new Map(); // runner name → its card, while shown
+  const busy = new Set(); // runners being asked
+  const refresh = (ref) => {
+    if (busy.has(ref.name)) return;
+    busy.add(ref.name);
+    const key = JSON.stringify(ref);
+    api("GET", "/api/runners/" + encodeURIComponent(ref.name))
+      .then((v) => {
+        const old = cards.get(ref.name);
+        if (!old || old.dataset.ref !== key) return; // removed or changed meanwhile
+        const card = runnerCard(v);
+        card.dataset.ref = old.dataset.ref;
+        old.replaceWith(card);
+        cards.set(ref.name, card);
+      })
+      .catch(() => {}) // the next round tries again
+      .finally(() => busy.delete(ref.name));
+  };
   const load = async () => {
+    let runners;
     try {
-      const runners = await api("GET", "/api/runners");
-      if (runners.length === 0) {
-        set(list, h("div", { class: "empty" }, "No runners yet. Add one below."));
-        return;
-      }
-      set(list, ...runners.map(runnerCard));
+      runners = await api("GET", "/api/runners?status=false");
     } catch (err) {
       fail(err);
+      return;
     }
+    if (runners.length === 0) {
+      cards.clear();
+      set(list, h("div", { class: "empty" }, "No runners yet. Add one below."));
+      return;
+    }
+    // Keep shown cards; add new runners as pending, drop removed ones.
+    const next = runners.map((ref) => {
+      const key = JSON.stringify(ref);
+      const card = cards.get(ref.name);
+      return card && card.dataset.ref === key ? card : runnerCard(ref, true);
+    });
+    cards.clear();
+    runners.forEach((ref, i) => {
+      next[i].dataset.ref = JSON.stringify(ref);
+      cards.set(ref.name, next[i]);
+    });
+    set(list, ...next);
+    runners.forEach(refresh);
   };
   await load();
   every(5000, load);
 }
 
-function runnerCard(r) {
+// runnerCard shows a runner; pending while it has not answered yet.
+function runnerCard(r, pending) {
   const st = r.status;
   const path = "/api/runners/" + encodeURIComponent(r.name);
   const act = (what, msg) => async () => {
@@ -684,7 +720,7 @@ function runnerCard(r) {
     }
   };
   return h("div", { class: "card" },
-    h("h3", {}, r.name, " ", st ? (st.killed ? badge("stopped", "killed") : badge("ready", "succeeded")) : badge("unreachable", "failed")),
+    h("h3", {}, r.name, " ", pending ? badge("checking…", "queued") : st ? (st.killed ? badge("stopped", "killed") : badge("ready", "succeeded")) : badge("unreachable", "failed")),
     h("p", { class: "muted" }, r.ssh ? "ssh " + r.ssh : r.socket),
     st && h("dl", { class: "facts" },
       h("dt", {}, "Target"), h("dd", {}, st.target),

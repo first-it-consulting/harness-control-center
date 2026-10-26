@@ -35,7 +35,8 @@ var webFS embed.FS
 //
 //	GET    /api/session                          whether the session is valid
 //	POST   /api/logout
-//	GET    /api/runners                          configured runners and their status
+//	GET    /api/runners                          configured runners and their status (?status=false: the list only)
+//	GET    /api/runners/{runner}                 one runner and its status
 //	POST   /api/runners                          add a runner
 //	GET    /api/ssh-hosts                        host aliases from ~/.ssh/config, to suggest
 //	PUT    /api/runners/{runner}                 change how a runner is reached, or rename it
@@ -104,6 +105,7 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("POST /api/logout", s.logout)
 	mux.HandleFunc("GET /api/runners", s.runners)
 	mux.HandleFunc("POST /api/runners", s.addRunner)
+	mux.HandleFunc("GET /api/runners/{runner}", s.oneRunner)
 	mux.HandleFunc("PUT /api/runners/{runner}", s.updateRunner)
 	mux.HandleFunc("GET /api/ssh-hosts", s.sshHosts)
 	mux.HandleFunc("DELETE /api/runners/{runner}", s.removeRunner)
@@ -297,31 +299,68 @@ func (s *Server) eachRunner(ctx context.Context, fn func(ctx context.Context, c 
 	return out
 }
 
+// runners lists the runners with their status; with ?status=false only
+// the list, without asking any runner.
 func (s *Server) runners(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("status") == "false" {
+		cfg := s.config()
+		views := make([]RunnerView, len(cfg.Runners))
+		for i, ref := range cfg.Runners {
+			views[i].RunnerRef = ref
+		}
+		writeJSON(w, http.StatusOK, views)
+		return
+	}
 	var mu sync.Mutex
-	statuses := map[string]runner.Status{}
-	plugs := map[string][]runnerd.PluginView{}
+	got := map[string]RunnerView{}
 	views := s.eachRunner(r.Context(), func(ctx context.Context, c *runnerd.Client, ref RunnerRef) error {
-		st, err := c.Info(ctx)
-		if err != nil {
-			return err
-		}
-		pl, perr := c.Plugins(ctx) // an older runner has none
+		v, err := runnerStatus(ctx, c)
 		mu.Lock()
-		statuses[ref.Name] = st
-		if perr == nil {
-			plugs[ref.Name] = pl
-		}
+		got[ref.Name] = v
 		mu.Unlock()
-		return nil
+		return err
 	})
 	for i := range views {
-		if st, ok := statuses[views[i].Name]; ok {
-			views[i].Status = &st
-			views[i].Plugins = plugs[views[i].Name]
-		}
+		views[i].Status, views[i].Plugins = got[views[i].Name].Status, got[views[i].Name].Plugins
 	}
 	writeJSON(w, http.StatusOK, views)
+}
+
+// oneRunner is one runner with its status, so a page can show each
+// runner as soon as it answers.
+func (s *Server) oneRunner(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("runner")
+	ref, ok := s.config().Runner(name)
+	if !ok {
+		writeError(w, http.StatusNotFound, errNotFound("no runner called "+name))
+		return
+	}
+	v := RunnerView{RunnerRef: ref}
+	c, err := s.client(name)
+	if err == nil {
+		ctx, cancel := context.WithTimeout(r.Context(), runnerTimeout)
+		defer cancel()
+		var st RunnerView
+		st, err = runnerStatus(ctx, c)
+		v.Status, v.Plugins = st.Status, st.Plugins
+	}
+	if err != nil {
+		v.Error = err.Error()
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+// runnerStatus asks a runner for its status and plugins.
+func runnerStatus(ctx context.Context, c *runnerd.Client) (RunnerView, error) {
+	st, err := c.Info(ctx)
+	if err != nil {
+		return RunnerView{}, err
+	}
+	pl, perr := c.Plugins(ctx) // an older runner has none
+	if perr != nil {
+		pl = nil
+	}
+	return RunnerView{Status: &st, Plugins: pl}, nil
 }
 
 func (s *Server) addRunner(w http.ResponseWriter, r *http.Request) {

@@ -465,6 +465,36 @@ func TestRunThroughTheUI(t *testing.T) {
 	}
 }
 
+func TestRunnerOneByOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sockets")
+	}
+	ts := newTestServer(t)
+	sock := startRunner(t)
+	var out map[string]any
+	ts.do(http.MethodPost, "/api/runners", RunnerRef{Name: "up", Socket: sock}, &out)
+	ts.do(http.MethodPost, "/api/runners", RunnerRef{Name: "down", Socket: "/nonexistent/hcc.sock"}, &out)
+
+	var list []RunnerView
+	if code := ts.do(http.MethodGet, "/api/runners?status=false", nil, &list); code != http.StatusOK ||
+		len(list) != 2 || list[0].Name != "up" || list[0].Status != nil || list[1].Error != "" {
+		t.Errorf("list only: %d %+v", code, list)
+	}
+	var up, down RunnerView
+	if code := ts.do(http.MethodGet, "/api/runners/up", nil, &up); code != http.StatusOK || up.Status == nil || up.Status.Target != "local" || up.Error != "" {
+		t.Errorf("up: %d %+v", code, up)
+	}
+	if code := ts.do(http.MethodGet, "/api/runners/down", nil, &down); code != http.StatusOK || down.Status != nil || down.Error == "" {
+		t.Errorf("down: %d %+v", code, down)
+	}
+	if code := ts.do(http.MethodGet, "/api/runners/nope", nil, &out); code != http.StatusNotFound {
+		t.Errorf("unknown runner: %d", code)
+	}
+	if code := ts.do(http.MethodGet, "/api/runners", nil, &list); code != http.StatusOK || len(list) != 2 || list[0].Status == nil || list[1].Error == "" {
+		t.Errorf("all with status: %d %+v", code, list)
+	}
+}
+
 func TestEditRunner(t *testing.T) {
 	ts := newTestServer(t)
 	var out map[string]any
