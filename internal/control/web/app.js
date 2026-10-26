@@ -1,4 +1,6 @@
 // Harness Control Center UI.
+
+import { dashboardView } from "./dashboard.js";
 //
 // Everything shown here may come from an agent (job errors, console
 // output, file names), so the DOM is only ever built with textContent and
@@ -36,7 +38,7 @@ let session = "";
 function loadSession() {
   if (location.hash.startsWith("#session=")) {
     session = location.hash.slice("#session=".length);
-    history.replaceState(null, "", "/#/jobs");
+    history.replaceState(null, "", "/#/dashboard");
     try {
       sessionStorage.setItem(SESSION_KEY, session);
     } catch {
@@ -182,9 +184,10 @@ function route() {
   say("");
   const parts = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
   for (const a of document.querySelectorAll("nav a")) {
-    a.classList.toggle("active", a.dataset.nav === (parts[0] || "jobs"));
+    a.classList.toggle("active", a.dataset.nav === (parts[0] || "dashboard"));
   }
   const routes = {
+    dashboard: () => dashboardView({ h, api, set, show, every, fail, badge, fmtTime, fmtDuration }),
     jobs: () => jobsView(),
     job: () => jobView(parts[1], parts[2]),
     harnesses: () => harnessesView(),
@@ -193,7 +196,7 @@ function route() {
     runners: () => runnersView(),
     schedules: () => schedulesView(),
   };
-  (routes[parts[0]] || routes.jobs)();
+  (routes[parts[0]] || routes.dashboard)();
   view.focus();
 }
 

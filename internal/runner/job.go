@@ -45,8 +45,10 @@ func canTransition(from, to State) bool {
 
 // Job is a snapshot of one harness run.
 type Job struct {
-	ID       string    `json:"id"`
-	Harness  string    `json:"harness"`
+	ID      string `json:"id"`
+	Harness string `json:"harness"`
+	// Model is the model the job's agent uses, if any.
+	Model    string    `json:"model,omitempty"`
 	State    State     `json:"state"`
 	Error    string    `json:"error,omitempty"`
 	Created  time.Time `json:"created"`

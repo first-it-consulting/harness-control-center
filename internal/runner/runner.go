@@ -450,7 +450,7 @@ func (r *Runner) enqueue(h *spec.Harness, o enqueueOpts) (string, error) {
 	}
 	ctx, cancel := context.WithCancel(base)
 	j = &job{
-		Job:     Job{ID: id, Harness: h.Metadata.Name, State: StateQueued, Created: r.cfg.Now(), Schedule: o.scheduleID},
+		Job:     Job{ID: id, Harness: h.Metadata.Name, Model: modelName(h), State: StateQueued, Created: r.cfg.Now(), Schedule: o.scheduleID},
 		ctx:     ctx,
 		cancel:  cancel,
 		harness: h,
@@ -1065,6 +1065,14 @@ type TaskModel struct {
 	Name          string `json:"name"`
 	Endpoint      string `json:"endpoint"`
 	ContextWindow int    `json:"contextWindow,omitempty"`
+}
+
+// modelName is the model a harness uses, "" for none.
+func modelName(h *spec.Harness) string {
+	if h.Spec.Model == nil {
+		return ""
+	}
+	return h.Spec.Model.Name
 }
 
 func taskFor(h *spec.Harness, loop *TaskLoop, tools *TaskTools) ([]byte, error) {

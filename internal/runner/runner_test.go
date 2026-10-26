@@ -685,6 +685,9 @@ func TestTaskReachesTheSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitState(t, r, id, StateSucceeded)
+	if j, _ := r.Get(id); j.Model != "m1" {
+		t.Errorf("job model = %q", j.Model)
+	}
 	var task Task
 	if err := json.Unmarshal(p.startedSpecs()[0].Task, &task); err != nil {
 		t.Fatal(err)
