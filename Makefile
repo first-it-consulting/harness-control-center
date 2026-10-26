@@ -1,12 +1,16 @@
 GO       ?= go
 FUZZTIME ?= 30s
 
-.PHONY: all build test cover fuzz lint vuln snapshot check clean e2e deploy-runner
+.PHONY: all build test cover fuzz lint vuln snapshot check clean e2e e2e-vz deploy-runner
 
 all: check build
 
 build:
 	$(GO) build -trimpath -o bin/hcc ./cmd/hcc
+ifeq ($(shell uname -s),Darwin)
+	# Ad-hoc signature with the virtualization entitlement (ADR-0016).
+	codesign --force --sign - --entitlements hack/vz/entitlements.plist bin/hcc
+endif
 
 test:
 	$(GO) test -race ./...
@@ -42,6 +46,12 @@ e2e:
 		sudo systemctl stop hcc-runner; \
 		cd $$t && sudo -u hcc-runner HCC_E2E_CONFIG=/etc/hcc/runner.yaml ./fc-e2e.test -test.run E2E -test.v -test.timeout 5m; rc=$$?; \
 		cd / && rm -rf $$t; sudo systemctl start hcc-runner; exit $$rc'
+
+# End-to-end tests of the vz provider on this Mac (ADR-0016), with real
+# VMs from the images hack/vz/build-images.sh built.
+VZ_IMAGES ?= $(HOME)/Library/Application Support/hcc/local/images
+e2e-vz:
+	HCC_VZ_IMAGES="$(VZ_IMAGES)" $(GO) test -tags vz_e2e -exec $(CURDIR)/hack/vz/codesign-exec.sh -count=1 -v -timeout 10m ./internal/sandbox/vz
 
 # Install or upgrade the runner daemon on a Linux/KVM host, e.g.
 # make deploy-runner HOST=hcc-dev TARGET=server:hcc-dev

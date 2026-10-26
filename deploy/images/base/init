@@ -28,4 +28,4 @@ case " $(cat /proc/cmdline) " in
 	;;
 esac
 echo "HCC-GUEST-DONE no agent runtime in this image; shutting down"
-reboot -f
+hcc_shutdown

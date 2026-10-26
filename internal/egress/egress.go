@@ -287,12 +287,20 @@ func (p *Proxy) resolveChecked(ctx context.Context, conn net.Conn, host string, 
 		return netip.Addr{}, false
 	}
 	for _, a := range addrs {
-		if a = a.Unmap(); !p.blocked(a) && !slices.Contains(local, a) {
+		if a = a.Unmap(); !p.blocked(a) && (!slices.Contains(local, a) || p.modelOnHost(host, port)) {
 			return a, true
 		}
 	}
 	p.refuse(conn, http.StatusForbidden, "host resolves only to internal or blocked addresses", host, port, nil)
 	return netip.Addr{}, false
+}
+
+// modelOnHost reports whether host:port is the job's model endpoint, which
+// may be served by the runner's own machine (ADR-0016: a model server on
+// the Mac that runs the agents). Only with AllowPrivate, only that host
+// and port, and never on loopback (blocked before this is asked).
+func (p *Proxy) modelOnHost(host string, port int) bool {
+	return p.AllowPrivate && p.ModelHost != "" && spec.NormalizeHost(host) == p.ModelHost && port == p.ModelPort
 }
 
 // caPath is where a guest fetches the job CA to trust (plain HTTP from

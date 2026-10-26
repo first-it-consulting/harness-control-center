@@ -99,6 +99,7 @@ var (
 		"init": true, "rdinit": true, "console": true, "root": true, "rootfstype": true,
 		"rw": true, "ro": true, "reboot": true, "panic": true, "pci": true,
 		"ip": true, "hcc.ip": true, "hcc.proxy": true, "hcc.tools": true, "hcc.bundle": true,
+		"hcc.vsock": true, "hcc.shutdown": true,
 	}
 )
 
@@ -110,14 +111,22 @@ func ValidateID(id string) error {
 	return nil
 }
 
+// ValidateImage checks an image name.
+func ValidateImage(name string) error {
+	if !imageNameRe.MatchString(name) {
+		return fmt.Errorf("sandbox: invalid image name %q", name)
+	}
+	return nil
+}
+
 // Validate checks every field and returns all problems at once.
 func (s *Spec) Validate() error {
 	var errs []error
 	if err := ValidateID(s.ID); err != nil {
 		errs = append(errs, err)
 	}
-	if !imageNameRe.MatchString(s.Image) {
-		errs = append(errs, fmt.Errorf("sandbox: invalid image name %q", s.Image))
+	if err := ValidateImage(s.Image); err != nil {
+		errs = append(errs, err)
 	}
 	if len(s.Task) > MaxTaskBytes {
 		errs = append(errs, fmt.Errorf("sandbox: task is %d bytes; the limit is %d", len(s.Task), MaxTaskBytes))

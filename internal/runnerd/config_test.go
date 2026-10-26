@@ -166,3 +166,100 @@ func TestCatalogs(t *testing.T) {
 		t.Error("a missing package list was ignored")
 	}
 }
+
+const vzConfig = `
+target: local
+runnerUser: alice
+socket: /Users/alice/hcc/runner.sock
+stateDir: /Users/alice/hcc/state
+provider: vz
+vz:
+  stagingDir: /Users/alice/hcc/staging
+  imageRoot: /Users/alice/hcc/images
+images:
+  base:
+    kernel: /Users/alice/hcc/images/kernel/Image
+    rootfs: /Users/alice/hcc/images/base/rootfs.ext4
+network:
+  proxyPort: 3128
+`
+
+func TestLoadConfigVZ(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX paths")
+	}
+	c, err := LoadConfig(writeConfig(t, vzConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.IsVZ() || c.ImageRoot() != "/Users/alice/hcc/images" || c.ProxyPort() != 3128 {
+		t.Errorf("config = %+v", c)
+	}
+	if nc, err := c.NetworkConfig(); nc != nil || err != nil {
+		t.Errorf("vz has no sandbox links: %v %v", nc, err)
+	}
+	if c, err := LoadConfig(writeConfig(t, goodConfig)); err != nil || c.Provider != ProviderFirecracker {
+		t.Errorf("default provider: %v %v", c, err)
+	}
+
+	for name, tc := range map[string]struct{ old, new, want string }{
+		"socket group":        {"provider: vz\n", "provider: vz\nsocketGroup: staff\n", "socketGroup"},
+		"firecracker section": {"provider: vz\n", "provider: vz\nfirecracker:\n  uid: 64000\n", "firecracker section"},
+		"subnet":              {"  proxyPort: 3128\n", "  proxyPort: 3128\n  subnet: 172.31.0.0/16\n", "network.subnet"},
+		"image outside root":  {"/Users/alice/hcc/images/base/rootfs.ext4", "/tmp/rootfs.ext4", "inside vz.imageRoot"},
+		"relative staging":    {"stagingDir: /Users/alice/hcc/staging", "stagingDir: staging", "vz.stagingDir"},
+		"unknown provider":    {"provider: vz\n", "provider: qemu\n", "provider must be"},
+		"bad proxy port":      {"proxyPort: 3128", "proxyPort: 70000", "proxyPort"},
+	} {
+		doc := strings.Replace(vzConfig, tc.old, tc.new, 1)
+		if _, err := LoadConfig(writeConfig(t, doc)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want %q", name, err, tc.want)
+		}
+	}
+	// A vz section on a Firecracker runner is a mistake too.
+	fc := goodConfig + "vz:\n  stagingDir: /x\n"
+	if _, err := LoadConfig(writeConfig(t, fc)); err == nil || !strings.Contains(err.Error(), "vz section") {
+		t.Errorf("vz section on firecracker: %v", err)
+	}
+}
+
+func TestCheckFilesVZ(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions")
+	}
+	dir := t.TempDir() // owner-only
+	creds := filepath.Join(dir, "credentials.yaml")
+	if err := os.WriteFile(creds, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &Config{Provider: ProviderVZ, Credentials: creds}
+	if err := c.CheckFiles(); err != nil {
+		t.Errorf("own, private file: %v", err)
+	}
+	for mode, want := range map[os.FileMode]string{0o620: "writable", 0o604: "readable by others"} {
+		if err := os.Chmod(creds, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.CheckFiles(); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("mode %o: %v, want %q", mode, err, want)
+		}
+	}
+}
+
+// The example configuration for a Mac stays valid.
+func TestMacOSExampleConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX paths")
+	}
+	data, err := os.ReadFile("../../deploy/runner-macos.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(writeConfig(t, strings.ReplaceAll(string(data), "ME", "alice")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.IsVZ() || c.Target != "local" || len(c.Images) != 2 {
+		t.Errorf("config = %+v", c)
+	}
+}

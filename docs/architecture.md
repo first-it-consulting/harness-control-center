@@ -66,6 +66,7 @@ transports are still part of the core.
 | `internal/policy` | permission decisions, risk rating, plain-language explanation |
 | `internal/sandbox` | provider-neutral sandbox interface and validated run spec |
 | `internal/sandbox/firecracker` | Firecracker provider: jailer, cgroup v2 limits, kill switch, cleanup |
+| `internal/sandbox/vz` | macOS provider with Apple's Virtualization framework: one VM per run, no network device, the proxy on vsock (ADR-0016) |
 | `internal/runner` | job queue and state machine, concurrency limit, per-job cancel, kill switch, event stream, schedules and loops (ADR-0008), subagents and their API (ADR-0011) |
 | `internal/cron` | 5-field cron expressions in UTC |
 | `internal/helper`, `cmd/hcc-helper` | the only root-side code: start, kill, remove a jail, network links, copy out a jail's disk; validates every argument |

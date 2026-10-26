@@ -40,8 +40,12 @@ type Config struct {
 	// in this group can drive the runner without being the runner user.
 	SocketGroup string `yaml:"socketGroup"`
 	// StateDir holds per-job console logs.
-	StateDir    string                 `yaml:"stateDir"`
+	StateDir string `yaml:"stateDir"`
+	// Provider is the sandbox provider: "firecracker" (Linux, the
+	// default) or "vz" (macOS, ADR-0016).
+	Provider    string                 `yaml:"provider"`
 	Firecracker FirecrackerConfig      `yaml:"firecracker"`
+	VZ          VZConfig               `yaml:"vz"`
 	Images      map[string]ImageConfig `yaml:"images"`
 	// Network enables network access for harnesses that are granted it;
 	// without it, such harnesses are rejected.
@@ -134,10 +138,11 @@ type NetworkSection struct {
 	ProxyPort int    `yaml:"proxyPort"`
 }
 
-// NetworkConfig returns the sandbox network configuration, or nil when
-// networking is not configured.
+// NetworkConfig returns the Firecracker sandbox network configuration, or
+// nil when networking is not configured (or not Firecracker's: vz
+// sandboxes have no network device, see ProxyPort).
 func (c *Config) NetworkConfig() (*firecracker.NetworkConfig, error) {
-	if c.Network == nil {
+	if c.Network == nil || c.IsVZ() {
 		return nil, nil
 	}
 	subnet, err := netip.ParsePrefix(c.Network.Subnet)
@@ -171,6 +176,40 @@ type FirecrackerConfig struct {
 	// gets its own.
 	UID int `yaml:"uid"`
 	GID int `yaml:"gid"`
+}
+
+// VZConfig configures the vz sandbox provider (macOS, ADR-0016). It needs
+// no privileges: the runner's user owns everything.
+type VZConfig struct {
+	// StagingDir is the runner's own directory for each run's files.
+	StagingDir string `yaml:"stagingDir"`
+	// ImageRoot holds the images (kernel, root file systems, catalogs).
+	ImageRoot string `yaml:"imageRoot"`
+}
+
+// Providers.
+const (
+	ProviderFirecracker = "firecracker"
+	ProviderVZ          = "vz"
+)
+
+// IsVZ reports whether the runner uses the vz provider.
+func (c *Config) IsVZ() bool { return c.Provider == ProviderVZ }
+
+// ImageRoot is the configured provider's image directory.
+func (c *Config) ImageRoot() string {
+	if c.IsVZ() {
+		return c.VZ.ImageRoot
+	}
+	return c.Firecracker.ImageRoot
+}
+
+// ProxyPort is the guest's proxy port with network access (default 3128).
+func (c *Config) ProxyPort() int {
+	if c.Network == nil || c.Network.ProxyPort == 0 {
+		return 3128
+	}
+	return c.Network.ProxyPort
 }
 
 // Catalogs loads the images' tool catalogs, by image name.
@@ -243,6 +282,9 @@ func LoadConfig(path string) (*Config, error) {
 	if c.Socket == "" {
 		c.Socket = DefaultSocket
 	}
+	if c.Provider == "" {
+		c.Provider = ProviderFirecracker
+	}
 	if c.MaxDiskMiB == 0 {
 		c.MaxDiskMiB = runner.DefaultMaxDiskMiB
 	}
@@ -284,14 +326,40 @@ func (c *Config) Validate() error {
 	if c.SocketGroup != "" && (!unixNameRe.MatchString(c.SocketGroup) || c.SocketGroup == "root") {
 		add("socketGroup must name a non-root group, got %q", c.SocketGroup)
 	}
-	if within(c.Firecracker.StagingDir, c.Firecracker.ChrootBase) || within(c.StateDir, c.Firecracker.ChrootBase) {
-		add("firecracker.chrootBase must not be inside a runner-owned directory")
-	}
-	paths := map[string]string{
-		"socket": c.Socket, "stateDir": c.StateDir,
-		"firecracker.jailer": c.Firecracker.Jailer, "firecracker.firecracker": c.Firecracker.Firecracker,
-		"firecracker.chrootBase": c.Firecracker.ChrootBase, "firecracker.imageRoot": c.Firecracker.ImageRoot,
-		"firecracker.helper": c.Firecracker.Helper, "firecracker.stagingDir": c.Firecracker.StagingDir,
+	paths := map[string]string{"socket": c.Socket, "stateDir": c.StateDir}
+	switch c.Provider {
+	case ProviderFirecracker:
+		if within(c.Firecracker.StagingDir, c.Firecracker.ChrootBase) || within(c.StateDir, c.Firecracker.ChrootBase) {
+			add("firecracker.chrootBase must not be inside a runner-owned directory")
+		}
+		for k, v := range map[string]string{
+			"firecracker.jailer": c.Firecracker.Jailer, "firecracker.firecracker": c.Firecracker.Firecracker,
+			"firecracker.chrootBase": c.Firecracker.ChrootBase, "firecracker.imageRoot": c.Firecracker.ImageRoot,
+			"firecracker.helper": c.Firecracker.Helper, "firecracker.stagingDir": c.Firecracker.StagingDir,
+		} {
+			paths[k] = v
+		}
+		if c.Firecracker.UID <= 0 || c.Firecracker.GID <= 0 {
+			add("firecracker.uid and firecracker.gid must be non-root")
+		}
+		if c.VZ != (VZConfig{}) {
+			add("the vz section is only for provider vz")
+		}
+	case ProviderVZ:
+		paths["vz.stagingDir"], paths["vz.imageRoot"] = c.VZ.StagingDir, c.VZ.ImageRoot
+		if c.Firecracker != (FirecrackerConfig{}) {
+			add("the firecracker section is only for provider firecracker")
+		}
+		// Only the runner's own user may use its socket: there is no
+		// operator group on a personal computer.
+		if c.SocketGroup != "" {
+			add("socketGroup is not supported with provider vz")
+		}
+		if c.Network != nil && c.Network.Subnet != "" {
+			add("network.subnet is not used with provider vz (its sandboxes have no network device)")
+		}
+	default:
+		add("provider must be %q or %q, got %q", ProviderFirecracker, ProviderVZ, c.Provider)
 	}
 	for name, p := range paths {
 		if !cleanAbs(p) {
@@ -310,8 +378,8 @@ func (c *Config) Validate() error {
 			files["tools.drive"], files["tools.packages"] = img.Tools.Drive, img.Tools.Packages
 		}
 		for what, p := range files {
-			if !cleanAbs(p) || !within(c.Firecracker.ImageRoot, p) {
-				add("images.%s.%s must be an absolute path inside firecracker.imageRoot, got %q", name, what, p)
+			if !cleanAbs(p) || !within(c.ImageRoot(), p) {
+				add("images.%s.%s must be an absolute path inside %s.imageRoot, got %q", name, what, c.Provider, p)
 			}
 		}
 	}
@@ -336,8 +404,8 @@ func (c *Config) Validate() error {
 	if c.MaxDiskMiB < 1 || c.MaxDiskMiB > sandbox.MaxDiskMiB {
 		add("maxDiskMiB must be between 1 and %d", sandbox.MaxDiskMiB)
 	}
-	if c.Firecracker.UID <= 0 || c.Firecracker.GID <= 0 {
-		add("firecracker.uid and firecracker.gid must be non-root")
+	if p := c.ProxyPort(); p < 1 || p > 65535 {
+		add("network.proxyPort must be between 1 and 65535")
 	}
 	if _, err := c.NetworkConfig(); err != nil {
 		errs = append(errs, err)
@@ -364,27 +432,35 @@ func (c *Config) Validate() error {
 // CheckFiles verifies the binaries that run as root (through sudo).
 // Whoever can modify one can become root, so each must be owned by root
 // and writable by nobody else.
+//
+// With provider vz nothing runs as root: the files must belong to the
+// runner's user (or root) and be writable by nobody else.
 func (c *Config) CheckFiles() error {
 	var errs []error
-	for _, p := range []string{c.Firecracker.Helper, c.Firecracker.Jailer, c.Firecracker.Firecracker} {
-		if err := checkRootOwned(p); err != nil {
-			errs = append(errs, err)
+	check := checkRootOwned
+	if c.IsVZ() {
+		check = checkOwnedBySelf
+	} else {
+		for _, p := range []string{c.Firecracker.Helper, c.Firecracker.Jailer, c.Firecracker.Firecracker} {
+			if err := checkRootOwned(p); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
-	// What an image offers as tools is root's decision.
+	// What an image offers as tools is root's decision (on Linux).
 	for _, img := range c.Images {
 		if img.Tools != nil {
 			for _, p := range []string{img.Tools.Drive, img.Tools.Packages} {
-				if err := checkRootOwned(p); err != nil {
+				if err := check(p); err != nil {
 					errs = append(errs, err)
 				}
 			}
 		}
 	}
-	// The runner must not be able to change where secrets go, and nobody
-	// else may read them.
+	// The runner must not be able to change where secrets go (on Linux),
+	// and nobody else may read them.
 	if c.Credentials != "" {
-		if err := checkRootOwned(c.Credentials); err != nil {
+		if err := check(c.Credentials); err != nil {
 			errs = append(errs, err)
 		} else if err := checkNotWorldReadable(c.Credentials); err != nil {
 			errs = append(errs, err)

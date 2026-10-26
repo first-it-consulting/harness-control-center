@@ -1,0 +1,28 @@
+# A local runner on a Mac (ADR-0016): copy to
+# ~/Library/Application Support/hcc/local/runner.yaml and replace ME with
+# your user name (and the path prefix, if your home is elsewhere). The
+# runner runs as you; nothing runs as root.
+target: local
+maxConcurrent: 2
+runnerUser: ME
+socket: /Users/ME/Library/Application Support/hcc/local/runner.sock
+stateDir: /Users/ME/Library/Application Support/hcc/local/state
+provider: vz
+vz:
+  stagingDir: /Users/ME/Library/Application Support/hcc/local/staging
+  imageRoot: /Users/ME/Library/Application Support/hcc/local/images
+images:
+  base:
+    kernel: /Users/ME/Library/Application Support/hcc/local/images/kernel/Image
+    rootfs: /Users/ME/Library/Application Support/hcc/local/images/base/rootfs.ext4
+  claude-code:
+    kernel: /Users/ME/Library/Application Support/hcc/local/images/kernel/Image
+    rootfs: /Users/ME/Library/Application Support/hcc/local/images/claude-code/rootfs.ext4
+    tools:
+      drive: /Users/ME/Library/Application Support/hcc/local/images/claude-code/tools.ext4
+      packages: /Users/ME/Library/Application Support/hcc/local/images/claude-code/tools.txt
+# Network access for harnesses that are granted it. Optional: a credential
+# store (see deploy/README.md), owner-only.
+network:
+  proxyPort: 3128
+# credentials: /Users/ME/Library/Application Support/hcc/local/credentials.yaml

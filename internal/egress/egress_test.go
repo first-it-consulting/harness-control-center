@@ -356,6 +356,43 @@ func TestHostAddressesNeverReachable(t *testing.T) {
 	}
 }
 
+// The model endpoint alone may be on the runner's own machine (a model
+// server on the Mac that runs the agents), with allowPrivateNetworks.
+func TestModelMayBeOnTheHost(t *testing.T) {
+	proxy, w, _ := startProxy(t, func(p *Proxy) {
+		p.AllowPrivate = true
+		p.ModelHost, p.ModelPort = "host.cdn.example", 8443
+	})
+	code, c, _ := connect(t, proxy, "host.cdn.example:8443")
+	_ = c.Close()
+	if code != http.StatusOK || !slices.Equal(w.dialedAddrs(), []string{"10.10.20.151:8443"}) {
+		t.Errorf("model on the host: status %d, dialed %v", code, w.dialedAddrs())
+	}
+	// Any other host that resolves to the machine stays refused.
+	code, c, _ = connect(t, proxy, "pubhost.cdn.example:8443")
+	_ = c.Close()
+	if code != http.StatusForbidden {
+		t.Errorf("another host on the machine: status %d, want 403", code)
+	}
+
+	for name, mutate := range map[string]func(*Proxy){
+		"without allowPrivateNetworks": func(p *Proxy) { p.ModelHost, p.ModelPort = "host.cdn.example", 8443 },
+		"another port":                 func(p *Proxy) { p.AllowPrivate = true; p.ModelHost, p.ModelPort = "host.cdn.example", 4000 },
+		"loopback":                     func(p *Proxy) { p.AllowPrivate = true; p.ModelHost, p.ModelPort = "mapped.cdn.example", 8443 },
+	} {
+		target := "host.cdn.example:8443"
+		if name == "loopback" {
+			target = "mapped.cdn.example:8443"
+		}
+		proxy, w, _ := startProxy(t, mutate)
+		code, c, _ := connect(t, proxy, target)
+		_ = c.Close()
+		if code != http.StatusForbidden || len(w.dialedAddrs()) != 0 {
+			t.Errorf("%s: status %d, dialed %v; want 403", name, code, w.dialedAddrs())
+		}
+	}
+}
+
 func TestLocalAddrsErrorFailsClosed(t *testing.T) {
 	proxy, w, _ := startProxy(t, func(p *Proxy) {
 		p.LocalAddrs = func() ([]netip.Addr, error) { return nil, errors.New("netlink unavailable") }

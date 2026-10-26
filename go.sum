@@ -1,5 +1,11 @@
+github.com/Code-Hex/go-infinity-channel v1.0.0 h1:M8BWlfDOxq9or9yvF9+YkceoTkDI1pFAqvnP87Zh0Nw=
+github.com/Code-Hex/go-infinity-channel v1.0.0/go.mod h1:5yUVg/Fqao9dAjcpzoQ33WwfdMWmISOrQloDRn3bsvY=
+github.com/Code-Hex/vz/v3 v3.8.0 h1:wgOH3VY0le5fP3VPQFBf6wls8jSqzK5Haq/qIoO6pb4=
+github.com/Code-Hex/vz/v3 v3.8.0/go.mod h1:eO4cMfeE9agtnGsC+zrcLFcPDBf1RlPbUcJJF0MIq9w=
 go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
 go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
+golang.org/x/mod v0.22.0 h1:D4nJWe9zXqHOmWqj4VMOJhvzj7bEZg4wEYa759z1pH4=
+golang.org/x/mod v0.22.0/go.mod h1:6SkKJ3Xj0I0BrPOZoBy3bdMptDDU9oJrpohJ3eWZ1fY=
 golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
 golang.org/x/sys v0.49.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
 golang.org/x/term v0.47.0 h1:cpyOwQkr2Nzxe2p6KnrTG7Ei2wtzjsuSjhpXXepZ/BM=

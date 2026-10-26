@@ -21,13 +21,29 @@ hcc_mounts() {
 # If the harness grants network access: eth0 with an address but no
 # gateway and no DNS (the egress proxy is on-link and resolves names), the
 # job CA (only for jobs with https credentials) and the proxy variables.
+# In a vz sandbox (ADR-0016) there is no network device: the proxy address
+# is on loopback, carried to the host over vsock (hcc.vsock) by
+# hcc-guest, which runs as nobody.
 hcc_network() {
 	HCC_NET=$(hcc_arg hcc.ip)
+	HCC_VSOCK=$(hcc_arg hcc.vsock)
 	HCC_PROXY=$(hcc_arg hcc.proxy)
-	[ -n "$HCC_NET" ] || return 0
-	ip link set lo up
-	ip addr add "$HCC_NET" dev eth0
-	ip link set eth0 up
+	if [ -n "$HCC_VSOCK" ]; then
+		ip link set lo up
+		su -s /bin/sh nobody -c 'exec /usr/local/bin/hcc-guest vsock-proxy "$0" "$1" </dev/null >/dev/null 2>&1' "$HCC_PROXY" "$HCC_VSOCK" &
+		i=0
+		until nc -z "${HCC_PROXY%:*}" "${HCC_PROXY##*:}" 2>/dev/null; do
+			i=$((i + 1))
+			[ "$i" -lt 50 ] || { echo "HCC-NET-ERROR the proxy forwarder did not start"; return 1; }
+			sleep 0.1
+		done
+	elif [ -n "$HCC_NET" ]; then
+		ip link set lo up
+		ip addr add "$HCC_NET" dev eth0
+		ip link set eth0 up
+	else
+		return 0
+	fi
 	if wget -q -T 5 -O /tmp/hcc-ca.pem "http://$HCC_PROXY/hcc/ca.pem" 2>/dev/null && grep -q "BEGIN CERTIFICATE" /tmp/hcc-ca.pem; then
 		cat /etc/ssl/certs/ca-certificates.crt /tmp/hcc-ca.pem >/tmp/hcc-bundle.pem 2>/dev/null || cp /tmp/hcc-ca.pem /tmp/hcc-bundle.pem
 		export SSL_CERT_FILE=/tmp/hcc-bundle.pem NODE_EXTRA_CA_CERTS=/tmp/hcc-ca.pem REQUESTS_CA_BUNDLE=/tmp/hcc-bundle.pem \
@@ -81,6 +97,18 @@ hcc_tools() {
 	echo "HCC-TOOLS installed: $(echo "$task" | jq -r '.tools.packages | join(" ")')"
 }
 
+# Ends the VM. Firecracker stops on a reboot; Apple's Virtualization
+# framework restarts the guest instead, so there the provider asks for a
+# power-off (hcc.shutdown=poweroff).
+hcc_shutdown() {
+	sync
+	if [ "$(hcc_arg hcc.shutdown)" = poweroff ]; then
+		poweroff -f
+	else
+		reboot -f
+	fi
+}
+
 # The task (JSON, read-only drive vdb), zero padding removed.
 hcc_task() { [ -b /dev/vdb ] && tr -d '\000' </dev/vdb; }
 
@@ -95,8 +123,7 @@ hcc_disk() {
 
 # Hands a directory back as the job's results: a tar archive on the disk,
 # which the runner reads and sanitizes after shutdown (it keeps only
-# regular files and directories). Must run before shutdown; "reboot -f"
-# does not sync.
+# regular files and directories). Must run before hcc_shutdown.
 hcc_save_results() {
 	dev=$(hcc_disk) || { echo "HCC-RESULTS none (no disk)"; return 0; }
 	if (cd "$1" && tar -cf "$dev" .) 2>/tmp/hcc-tar.err; then

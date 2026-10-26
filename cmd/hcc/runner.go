@@ -24,6 +24,7 @@ import (
 	"github.com/first-it-consulting/harness-control-center/internal/runnerd"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox"
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox/firecracker"
+	"github.com/first-it-consulting/harness-control-center/internal/sandbox/vz"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
 	"github.com/first-it-consulting/harness-control-center/internal/version"
 )
@@ -75,19 +76,11 @@ func serve(configPath string, log *slog.Logger) error {
 	if err := cfg.CheckFiles(); err != nil {
 		return err
 	}
-	// The jail tree (chrootBase) is root's; only these are the runner's.
-	for _, d := range []string{cfg.StateDir, cfg.Firecracker.StagingDir} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return err
-		}
+	netCfg, err := cfg.NetworkConfig()
+	if err != nil {
+		return err
 	}
-	provider, err := firecracker.New(firecracker.Config{
-		StagingBase: cfg.Firecracker.StagingDir,
-		// One UID/GID per concurrently running VM (jobs and plugins):
-		// uid..uid+maxConcurrent+maxPluginVMs-1.
-		Identities: cfg.VMSlots(),
-		Host:       firecracker.NewHelperHost(cfg.Firecracker.Helper),
-	})
+	provider, recoverVMs, err := newProvider(cfg, netCfg)
 	if err != nil {
 		return err
 	}
@@ -95,30 +88,24 @@ func serve(configPath string, log *slog.Logger) error {
 	for name := range cfg.Images {
 		images = append(images, name)
 	}
-	netCfg, err := cfg.NetworkConfig()
-	if err != nil {
-		return err
-	}
 	catalogs, err := cfg.Catalogs()
 	if err != nil {
 		return err
 	}
 	store := runnerd.NewFileStore(cfg.StateDir, log)
 	rcfg := runner.Config{
-		Provider:      provider,
-		Target:        cfg.Target,
-		Images:        images,
-		Tools:         catalogs,
-		MaxConcurrent: cfg.MaxConcurrent,
-		Console:       runnerd.ConsoleFunc(cfg.StateDir, log),
-		Pricing:       cfg.Pricing,
-		Results:       runnerd.ResultsFunc(cfg.StateDir),
-		ReadResults:   runnerd.OpenResultsFunc(cfg.StateDir),
-		MaxDiskMiB:    cfg.MaxDiskMiB,
-		Store:         store,
-		Recover: func(ctx context.Context, ids []string) error {
-			return provider.Recover(ctx, ids, netCfg != nil)
-		},
+		Provider:            provider,
+		Target:              cfg.Target,
+		Images:              images,
+		Tools:               catalogs,
+		MaxConcurrent:       cfg.MaxConcurrent,
+		Console:             runnerd.ConsoleFunc(cfg.StateDir, log),
+		Pricing:             cfg.Pricing,
+		Results:             runnerd.ResultsFunc(cfg.StateDir),
+		ReadResults:         runnerd.OpenResultsFunc(cfg.StateDir),
+		MaxDiskMiB:          cfg.MaxDiskMiB,
+		Store:               store,
+		Recover:             recoverVMs,
 		Log:                 log,
 		ScheduleStore:       store,
 		MinScheduleInterval: cfg.ScheduleInterval(),
@@ -127,8 +114,13 @@ func serve(configPath string, log *slog.Logger) error {
 		SaveContact:         store.SaveContact,
 		ApprovalTimeout:     cfg.ApprovalWait(),
 	}
-	if netCfg != nil {
-		rcfg.Egress = egressFactory(netCfg, cfg.Credentials, log)
+	if cfg.Network != nil {
+		// The sandboxes' own links are never a valid destination.
+		var blocked []netip.Prefix
+		if netCfg != nil {
+			blocked = []netip.Prefix{netCfg.Subnet}
+		}
+		rcfg.Egress = egressFactory(blocked, cfg.Credentials, log)
 	}
 	// Plugins (ADR-0013): each run in a sandbox of its own, with its own
 	// share of the VM identities. MCP server plugins run for jobs
@@ -170,14 +162,57 @@ func serve(configPath string, log *slog.Logger) error {
 		close(pluginsDone)
 	}
 
-	log.Info("runner started", "version", version.Version, "target", cfg.Target, "socket", cfg.Socket,
-		"maxConcurrent", cfg.MaxConcurrent, "maxPluginVMs", cfg.PluginVMs(), "network", netCfg != nil)
+	log.Info("runner started", "version", version.Version, "target", cfg.Target, "socket", cfg.Socket, "provider", provider.Name(),
+		"maxConcurrent", cfg.MaxConcurrent, "maxPluginVMs", cfg.PluginVMs(), "network", cfg.Network != nil)
 	srv := runnerd.NewServer(r, cfg.StateDir, log)
 	srv.EnablePlugins(pluginStore, mgr)
 	err = srv.Serve(ctx, l)
 	<-pluginsDone
 	log.Info("runner stopped; all jobs and plugins were stopped")
 	return err
+}
+
+// newProvider builds the configured sandbox provider and the function
+// that cleans up after a previous runner process's sandboxes. Its
+// directories are the runner's own.
+func newProvider(cfg *runnerd.Config, netCfg *firecracker.NetworkConfig) (sandbox.Provider, func(context.Context, []string) error, error) {
+	if cfg.IsVZ() {
+		for _, d := range []string{cfg.StateDir, cfg.VZ.StagingDir} {
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				return nil, nil, err
+			}
+		}
+		images := map[string]vz.Image{}
+		for name, img := range cfg.Images {
+			i := vz.Image{Kernel: img.Kernel, RootFS: img.RootFS}
+			if img.Tools != nil {
+				i.Tools = img.Tools.Drive
+			}
+			images[name] = i
+		}
+		p, err := vz.New(vz.Config{StagingBase: cfg.VZ.StagingDir, Images: images, Slots: cfg.VMSlots(), ProxyPort: cfg.ProxyPort()})
+		if err != nil {
+			return nil, nil, err
+		}
+		return p, p.Recover, nil
+	}
+	// The jail tree (chrootBase) is root's; only these are the runner's.
+	for _, d := range []string{cfg.StateDir, cfg.Firecracker.StagingDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return nil, nil, err
+		}
+	}
+	p, err := firecracker.New(firecracker.Config{
+		StagingBase: cfg.Firecracker.StagingDir,
+		// One UID/GID per concurrently running VM (jobs and plugins):
+		// uid..uid+maxConcurrent+maxPluginVMs-1.
+		Identities: cfg.VMSlots(),
+		Host:       firecracker.NewHelperHost(cfg.Firecracker.Helper),
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return p, func(ctx context.Context, ids []string) error { return p.Recover(ctx, ids, netCfg != nil) }, nil
 }
 
 // pruneJobs enforces the retention limits now and then every hour.
@@ -199,14 +234,14 @@ func pruneJobs(ctx context.Context, r *runner.Runner, store *runnerd.FileStore, 
 }
 
 // egressFactory builds each networked job's proxy from that job's own
-// harness. The sandboxes' subnet is never a valid destination. Granted
+// harness. Blocked addresses are never a valid destination. Granted
 // credentials are loaded fresh for every job and get a CA of their own.
 // The model endpoint is always brokered, so the job's budget can be
 // metered and enforced there.
 //
 // With approval gates, every allowed host is brokered (inspected), so
 // that no request bypasses a gate.
-func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slog.Logger) func(runner.EgressJob) (sandbox.Proxy, error) {
+func egressFactory(blocked []netip.Prefix, credsPath string, log *slog.Logger) func(runner.EgressJob) (sandbox.Proxy, error) {
 	return func(ej runner.EgressJob) (sandbox.Proxy, error) {
 		h, jobID := ej.Harness, ej.JobID
 		engine, err := policy.New(h)
@@ -216,7 +251,7 @@ func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slo
 		p := &egress.Proxy{
 			Policy:       engine,
 			AllowPrivate: h.Spec.Permissions.Network.AllowPrivateNetworks,
-			Blocked:      []netip.Prefix{netCfg.Subnet},
+			Blocked:      blocked,
 			JobID:        jobID,
 			Log:          log,
 			Meter:        ej.Meter,

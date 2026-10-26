@@ -29,7 +29,7 @@ linters:
       # fixed tools (tar, mkfs.ext4, pgrep) with test-controlled arguments.
       - path: _test\.go
         linters: [gosec]
-        text: "G304|G204|G702"
+        text: "G304|G204|G702|G703"
 
 formatters:
   enable:

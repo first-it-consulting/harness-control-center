@@ -12,11 +12,11 @@ hcc_network
 TASK=$(hcc_task)
 if [ -z "$TASK" ]; then
 	echo "HCC-RESULT-ERROR no task"
-	reboot -f
+	hcc_shutdown
 fi
 if ! hcc_tools "$TASK"; then
 	echo "HCC-RESULT-END exit=1"
-	reboot -f
+	hcc_shutdown
 fi
 
 # A plugin (ADR-0013): its files from the bundle drive, its command run in
@@ -53,7 +53,7 @@ run_plugin() {
 if [ "$(echo "$TASK" | jq -r .runtime)" = plugin ]; then
 	run_plugin "$TASK"
 	echo "HCC-RESULT-END exit=$?"
-	reboot -f
+	hcc_shutdown
 fi
 echo "$TASK" | jq -r .prompt >/tmp/prompt.txt
 MODEL=$(echo "$TASK" | jq -r '.model.name // empty')
@@ -126,4 +126,4 @@ if [ -n "$ITER" ] && [ -e /tmp/workspace/.hcc-done ]; then
 	echo "HCC-LOOP-DONE"
 fi
 echo "HCC-RESULT-END exit=$rc"
-reboot -f
+hcc_shutdown

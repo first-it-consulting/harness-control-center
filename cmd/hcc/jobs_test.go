@@ -277,7 +277,7 @@ func TestScheduleCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := filepath.Join(t.TempDir(), "nightly.yaml")
-	if err := os.WriteFile(p, append(doc, []byte("  trigger: {schedule: '0 2 * * *'}\n")...), 0o600); err != nil { //nolint:gosec // a temp file in the test
+	if err := os.WriteFile(p, append(doc, []byte("  trigger: {schedule: '0 2 * * *'}\n")...), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	code, out, errOut := runCLI("run", p, "--yes", "--socket", sock)
