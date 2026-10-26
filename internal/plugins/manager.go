@@ -52,6 +52,9 @@ type Event struct {
 type Runner interface {
 	Subscribe(buffer int) (<-chan runner.Event, func())
 	Schedules() []runner.Schedule
+	Status() runner.Status
+	// OnKill registers a function the kill switch calls.
+	OnKill(func())
 }
 
 // Config configures a Manager.
@@ -100,6 +103,11 @@ type Manager struct {
 	queues map[string][]Event
 	status map[string]*Status
 	wg     sync.WaitGroup
+	// runs is cancelled by the kill switch: every plugin run derives from
+	// the one that was current when it started.
+	base       context.Context
+	runs       context.Context
+	cancelRuns context.CancelFunc
 }
 
 // NewManager returns a manager; Run starts it.
@@ -124,8 +132,14 @@ func NewManager(cfg Config) *Manager {
 }
 
 // Run passes r's events to the notifiers until ctx ends, then waits for
-// running plugins to stop.
+// running plugins to stop. The kill switch stops running plugins, and
+// none start while it is engaged.
 func (m *Manager) Run(ctx context.Context, r Runner) {
+	m.mu.Lock()
+	m.base = ctx
+	m.runs, m.cancelRuns = context.WithCancel(ctx)
+	m.mu.Unlock()
+	r.OnKill(m.kill)
 	events, stop := r.Subscribe(1024)
 	defer stop()
 	defer m.wg.Wait()
@@ -158,8 +172,8 @@ func (m *Manager) Run(ctx context.Context, r Runner) {
 			paused = now
 		case <-flush:
 			flush = nil
-			if m.dispatch(ctx) {
-				flush = time.After(batchDelay) // some had to wait for a slot
+			if r.Status().Killed || m.dispatch() {
+				flush = time.After(batchDelay) // killed, or some had to wait for a slot
 			}
 		case <-m.wake:
 			if flush == nil {
@@ -228,11 +242,24 @@ func (m *Manager) statusLocked(name string) *Status {
 	return st
 }
 
-// dispatch starts a run for every notifier with events that is not
-// running yet, while slots are free. It reports whether some are left.
-func (m *Manager) dispatch(ctx context.Context) bool {
+// kill stops every running plugin (the kill switch).
+func (m *Manager) kill() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.cancelRuns == nil {
+		return
+	}
+	m.cancelRuns()
+	m.runs, m.cancelRuns = context.WithCancel(m.base)
+	m.cfg.Log.Warn("kill switch: plugins stopped")
+}
+
+// dispatch starts a run for every notifier with events that is not
+// running yet, while slots are free. It reports whether some are left.
+func (m *Manager) dispatch() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ctx := m.runs
 	left := false
 	names := make([]string, 0, len(m.queues))
 	for name := range m.queues {

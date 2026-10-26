@@ -120,9 +120,10 @@ type EgressJob struct {
 	Meter *budget.Meter
 	// Approve decides the requests the job's approval gates hold.
 	Approve Approver
-	// Agents, if set, is the subagent API the proxy serves to the guest
-	// (ADR-0011).
-	Agents http.Handler
+	// Local, if set, is the job's own API the proxy serves to the guest
+	// under /hcc/v1/: subagents (ADR-0011), MCP servers run as plugins
+	// (ADR-0014).
+	Local http.Handler
 }
 
 type job struct {
@@ -163,6 +164,7 @@ type Runner struct {
 
 	approvals     map[string]*pendingApproval
 	firing        int // schedule runs being started
+	onKill        []func()
 	lastContact   time.Time
 	savedContact  time.Time
 	contactLapsed bool // schedules were paused for it; reset by Contact
@@ -415,7 +417,7 @@ func (r *Runner) enqueue(h *spec.Harness, o enqueueOpts) (string, error) {
 			Approve: func(ctx context.Context, req ApprovalRequest) error { return r.awaitApproval(ctx, j, req) }}
 		if h.Spec.Permissions.Subagents.Max > 0 {
 			api = &agentAPI{r: r}
-			ej.Agents = api
+			ej.Local = api
 		}
 		proxy, err := r.cfg.Egress(ej)
 		if err != nil {
@@ -675,8 +677,20 @@ func (r *Runner) KillAll() {
 	r.cancelQueuedLocked(func(*job) bool { return true }, "cancelled by kill switch")
 	cancel := r.cancelRoot
 	r.root, r.cancelRoot = context.WithCancel(context.Background())
+	hooks := slices.Clone(r.onKill)
 	r.mu.Unlock()
 	cancel()
+	for _, fn := range hooks {
+		fn()
+	}
+}
+
+// OnKill registers fn to be called by every KillAll, so that what runs
+// besides jobs (plugins) stops too.
+func (r *Runner) OnKill(fn func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onKill = append(r.onKill, fn)
 }
 
 // Resume accepts new jobs again after KillAll.

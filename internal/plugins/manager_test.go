@@ -17,9 +17,35 @@ import (
 )
 
 type fakeRunner struct {
-	ch    chan runner.Event
-	mu    sync.Mutex
-	sched []runner.Schedule
+	ch     chan runner.Event
+	mu     sync.Mutex
+	sched  []runner.Schedule
+	killed bool
+	onKill []func()
+}
+
+func (f *fakeRunner) Status() runner.Status {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return runner.Status{Killed: f.killed}
+}
+
+func (f *fakeRunner) OnKill(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onKill = append(f.onKill, fn)
+}
+
+func (f *fakeRunner) kill(killed bool) {
+	f.mu.Lock()
+	f.killed = killed
+	hooks := f.onKill
+	f.mu.Unlock()
+	if killed {
+		for _, fn := range hooks {
+			fn()
+		}
+	}
 }
 
 func (f *fakeRunner) Subscribe(int) (<-chan runner.Event, func()) { return f.ch, func() {} }
@@ -33,14 +59,19 @@ type recProvider struct {
 	mu    sync.Mutex
 	specs []sandbox.Spec
 	exit  string
+	block bool // run until stopped
 }
 
 func (p *recProvider) Name() string { return "rec" }
-func (p *recProvider) Run(_ context.Context, s sandbox.Spec, console io.Writer) (sandbox.Result, error) {
+func (p *recProvider) Run(ctx context.Context, s sandbox.Spec, console io.Writer) (sandbox.Result, error) {
 	p.mu.Lock()
 	p.specs = append(p.specs, s)
-	exit := p.exit
+	exit, block := p.exit, p.block
 	p.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return sandbox.Result{Outcome: sandbox.OutcomeKilled}, nil
+	}
 	_, _ = io.WriteString(console, "HCC-RESULT-END exit="+exit+"\n")
 	return sandbox.Result{Outcome: sandbox.OutcomeExited}, nil
 }
@@ -135,6 +166,44 @@ func TestNotifierGetsItsEvents(t *testing.T) {
 		st := m.Statuses()
 		return len(st) == 1 && strings.Contains(st[0].LastResult, "status 3")
 	})
+	cancel()
+	<-done
+}
+
+func TestKillSwitchStopsPlugins(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes")
+	}
+	store := NewStore(filepath.Join(t.TempDir(), "plugins"))
+	installNotifier(t, store, manifest)
+	prov := &recProvider{exit: "0", block: true}
+	m := NewManager(Config{Store: store, Provider: prov, Images: []string{"claude-code"}, Target: "server:r1",
+		Egress: func(runner.EgressJob) (sandbox.Proxy, error) { return nil, nil }})
+	fr := &fakeRunner{ch: make(chan runner.Event, 10)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { m.Run(ctx, fr); close(done) }()
+	ended := func(job string) runner.Event {
+		return runner.Event{JobID: job, Harness: "h", From: runner.StateRunning, To: runner.StateSucceeded, At: time.Now()}
+	}
+
+	fr.ch <- ended("job-1")
+	waitFor(t, "a running plugin", func() bool { st := m.Statuses(); return len(prov.runs()) == 1 && st[0].Running })
+	fr.kill(true)
+	waitFor(t, "the plugin stopped", func() bool { st := m.Statuses(); return !st[0].Running && strings.Contains(st[0].LastResult, "killed") })
+
+	// While killed, nothing starts; after resuming, the events are passed on.
+	prov.mu.Lock()
+	prov.block = false
+	prov.mu.Unlock()
+	fr.ch <- ended("job-2")
+	time.Sleep(batchDelay + time.Second)
+	if n := len(prov.runs()); n != 1 {
+		t.Fatalf("%d plugin runs while the kill switch was engaged", n)
+	}
+	fr.kill(false)
+	waitFor(t, "the run after resuming", func() bool { return len(prov.runs()) == 2 })
 	cancel()
 	<-done
 }

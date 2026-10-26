@@ -132,7 +132,7 @@ func (e *treeEnv) startParent(t *testing.T, doc string) string {
 // call makes a request to a job's subagent API.
 func (e *treeEnv) call(t *testing.T, jobID, method, path, body string) (int, string) {
 	t.Helper()
-	api := e.egress(t, jobID).Agents
+	api := e.egress(t, jobID).Local
 	if api == nil {
 		t.Fatalf("%s has no subagent API", jobID)
 	}
@@ -176,7 +176,7 @@ func TestSubagentInheritsAndShares(t *testing.T) {
 	if h.Spec.Sandbox.Image != "base" || h.Spec.Sandbox.CPUs != 1 || h.Spec.Sandbox.MemoryMiB != 1024 || h.Spec.Sandbox.Timeout.Duration != 5*time.Minute {
 		t.Errorf("sandbox = %+v", h.Spec.Sandbox)
 	}
-	if ce.Agents != nil {
+	if ce.Local != nil {
 		t.Error("a subagent without subagents.max got the subagent API")
 	}
 	if s := e.p.spec(j.ID); s.Timeout != 5*time.Minute || s.CPUs != 1 {

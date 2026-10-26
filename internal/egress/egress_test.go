@@ -436,7 +436,7 @@ func TestSubagentAPIIsServedToTheGuest(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"id":"job-2"}`)
 	})
-	proxy, _, _ := startProxy(t, func(p *Proxy) { p.Agents = api })
+	proxy, _, _ := startProxy(t, func(p *Proxy) { p.Local = api })
 	code, body, h := rawRequest(t, proxy, "POST /hcc/v1/agents HTTP/1.1\r\nHost: proxy\r\nContent-Length: 13\r\n\r\n{\"prompt\":1}\n")
 	if code != http.StatusCreated || body != `{"id":"job-2"}` || h.Get("Content-Length") != "" || h.Get("Content-Type") != "application/json" {
 		t.Errorf("response = %d %q %v", code, body, h)
@@ -444,16 +444,22 @@ func TestSubagentAPIIsServedToTheGuest(t *testing.T) {
 	if len(got) != 1 || got[0] != "POST /hcc/v1/agents {\"prompt\":1}\n" {
 		t.Errorf("handler saw %q", got)
 	}
-	// Only under /hcc/v1/agents, and never as a proxied (absolute) URL.
+	// In proxy form, only to the proxy's own address.
+	code, _, _ = rawRequest(t, proxy, "POST http://"+proxy+"/hcc/v1/agents HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}")
+	if code != http.StatusCreated || len(got) != 2 || got[1] != "POST /hcc/v1/agents {}" {
+		t.Errorf("proxy form: %d, %q", code, got)
+	}
+	// Only under /hcc/v1/, and never for another host.
 	for _, req := range []string{
-		"GET /hcc/v1/agentsx HTTP/1.1\r\nHost: proxy\r\n\r\n",
+		"GET /hcc/agents HTTP/1.1\r\nHost: proxy\r\n\r\n",
 		"GET http://proxy/hcc/v1/agents HTTP/1.1\r\nHost: proxy\r\n\r\n",
+		"GET http://10.9.9.9:3128/hcc/v1/agents HTTP/1.1\r\nHost: proxy\r\n\r\n",
 	} {
 		if code, _, _ := rawRequest(t, proxy, req); code < 400 {
 			t.Errorf("%q = %d", req, code)
 		}
 	}
-	if len(got) != 1 {
+	if len(got) != 2 {
 		t.Errorf("handler saw %q", got)
 	}
 }
@@ -467,7 +473,7 @@ func TestNoSubagentAPIWithoutSubagents(t *testing.T) {
 
 func TestSubagentAPIPanicIsContained(t *testing.T) {
 	proxy, _, _ := startProxy(t, func(p *Proxy) {
-		p.Agents = http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("bug") })
+		p.Local = http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("bug") })
 	})
 	if code, _, _ := rawRequest(t, proxy, "GET /hcc/v1/agents HTTP/1.1\r\nHost: proxy\r\n\r\n"); code != http.StatusInternalServerError {
 		t.Errorf("status %d, want 500", code)

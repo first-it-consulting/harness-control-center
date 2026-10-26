@@ -1055,3 +1055,15 @@ func TestPruneKeepsUnfinishedJobs(t *testing.T) {
 	}
 	close(p.release)
 }
+
+func TestKillAllCallsOnKill(t *testing.T) {
+	r := newRunner(t, newFakeProvider(), 1)
+	called := 0
+	r.OnKill(func() { called++ })
+	r.KillAll()
+	r.Resume()
+	r.KillAll()
+	if called != 2 {
+		t.Errorf("OnKill called %d times, want 2", called)
+	}
+}

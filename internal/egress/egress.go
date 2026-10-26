@@ -80,9 +80,10 @@ type Proxy struct {
 	// Gate decides on requests whose actions need approval
 	// (Policy.RequiresApproval); without it they are refused.
 	Gate Gate
-	// Agents, if set, serves the subagent API (ADR-0011) to the guest:
-	// plain HTTP requests to the proxy itself under /hcc/v1/agents.
-	Agents http.Handler
+	// Local, if set, serves the job's own API to the guest: plain HTTP
+	// requests to the proxy itself under /hcc/v1/ (subagents, ADR-0011;
+	// MCP servers run as plugins, ADR-0014).
+	Local http.Handler
 	// Resolve, Dial and LocalAddrs are replaceable for tests.
 	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 	Dial    func(ctx context.Context, addr netip.AddrPort) (net.Conn, error)
@@ -181,8 +182,11 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 			p.serveCA(conn) // 404 when the job has no CA: the guest's init asks anyway
 			return
 		}
-		if !req.URL.IsAbs() && (req.URL.Path == agentsPath || strings.HasPrefix(req.URL.Path, agentsPath+"/")) {
-			p.serveAgents(conn, req)
+		// To the proxy itself, also in proxy form (clients that send
+		// every request to their proxy).
+		if (!req.URL.IsAbs() || req.URL.Scheme == "http" && isSelf(req.URL.Host, conn.LocalAddr())) &&
+			strings.HasPrefix(req.URL.Path, localPath) {
+			p.serveLocal(conn, req)
 			return
 		}
 		if req.URL.IsAbs() && req.URL.Scheme == "http" {
@@ -289,33 +293,47 @@ func (p *Proxy) resolveChecked(ctx context.Context, conn net.Conn, host string, 
 // the proxy itself; the certificate is public).
 const caPath = "/hcc/ca.pem"
 
-// agentsPath is the subagent API's root (plain HTTP to the proxy itself).
-const agentsPath = "/hcc/v1/agents"
+// localPath is the root of the job's own API (plain HTTP to the proxy
+// itself).
+const localPath = "/hcc/v1/"
 
-// agentAPITimeout bounds one subagent API exchange, including
-// downloading a subagent's results.
-const agentAPITimeout = 10 * time.Minute
+// localAPITimeout bounds one exchange with the job's API, including
+// downloading a subagent's results or a long MCP tool call.
+const localAPITimeout = 10 * time.Minute
 
-// serveAgents answers one subagent API request; the connection closes
+// isSelf reports whether hostport names the address the guest reached
+// the proxy on.
+func isSelf(hostport string, local net.Addr) bool {
+	want, err := netip.ParseAddrPort(local.String())
+	if err != nil {
+		return false
+	}
+	got, err := netip.ParseAddrPort(hostport)
+	return err == nil && got.Addr().Unmap() == want.Addr().Unmap() && got.Port() == want.Port()
+}
+
+// serveLocal answers one request to the job's API; the connection closes
 // after it. The listener only accepts this sandbox's guest, so the
 // request is the job's own.
-func (p *Proxy) serveAgents(conn net.Conn, req *http.Request) {
-	if p.Agents == nil {
-		p.refuse(conn, http.StatusNotFound, "this job may not start subagents", "", 0, nil)
+func (p *Proxy) serveLocal(conn net.Conn, req *http.Request) {
+	if p.Local == nil {
+		p.refuse(conn, http.StatusNotFound, "this job has no API here", "", 0, nil)
 		return
 	}
-	_ = conn.SetDeadline(time.Now().Add(agentAPITimeout))
+	// A proxy-form request is answered as if sent directly.
+	req.URL.Scheme, req.URL.Host = "", ""
+	_ = conn.SetDeadline(time.Now().Add(localAPITimeout))
 	w := &connResponse{conn: conn, header: http.Header{}}
 	defer func() {
 		// Nothing a guest sends may take the runner down.
 		if v := recover(); v != nil {
-			p.Log.Error("egress: subagent API failed", "job", p.JobID, "panic", fmt.Sprint(v))
+			p.Log.Error("egress: job API failed", "job", p.JobID, "panic", fmt.Sprint(v))
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 	}()
-	p.Agents.ServeHTTP(w, req)
+	p.Local.ServeHTTP(w, req)
 	w.finish()
-	p.Log.Info("egress: subagent API", "job", p.JobID, "method", req.Method, "path", req.URL.Path, "status", w.code)
+	p.Log.Info("egress: job API", "job", p.JobID, "method", req.Method, "path", req.URL.Path, "status", w.code)
 }
 
 // connResponse writes one HTTP/1.1 response straight to a connection;

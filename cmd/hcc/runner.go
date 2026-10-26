@@ -216,7 +216,7 @@ func egressFactory(netCfg *firecracker.NetworkConfig, credsPath string, log *slo
 			JobID:        jobID,
 			Log:          log,
 			Meter:        ej.Meter,
-			Agents:       ej.Agents,
+			Local:        ej.Local,
 		}
 		byHost := map[string]credentials.Credential{}
 		if len(h.Spec.Permissions.Credentials) > 0 {
