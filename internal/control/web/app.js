@@ -583,18 +583,38 @@ function scheduleRow(s) {
 
 // --- runners ---
 
-async function runnersView() {
-  const list = h("div", { class: "grid wide" });
+// runnerFields returns the inputs for a runner entry, filled from ref, and
+// a function that reads them back.
+function runnerFields(ref) {
   const name = h("input", { required: true, placeholder: "hcc-dev", pattern: "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?" });
   const kind = h("select", {}, h("option", { value: "ssh" }, "over ssh"), h("option", { value: "socket" }, "on this computer"));
-  const where = h("input", { required: true, placeholder: "ssh host, e.g. hcc-dev" });
-  kind.addEventListener("change", () => {
+  const where = h("input", { required: true });
+  const hint = () => {
     where.placeholder = kind.value === "ssh" ? "ssh host, e.g. hcc-dev" : "/run/hcc/runner.sock";
-  });
+  };
+  kind.addEventListener("change", hint);
+  if (ref) {
+    name.value = ref.name;
+    kind.value = ref.socket ? "socket" : "ssh";
+    where.value = ref.socket || ref.ssh;
+  }
+  hint();
+  const read = () => {
+    const out = { name: name.value };
+    out[kind.value] = where.value;
+    // Kept as it was: the UI does not show it.
+    if (kind.value === "ssh" && ref && ref.remoteSocket) out.remoteSocket = ref.remoteSocket;
+    return out;
+  };
+  return { labels: [h("label", {}, "Name", name), h("label", {}, "Reached", kind), h("label", {}, "Where", where)], read };
+}
+
+async function runnersView() {
+  const list = h("div", { class: "grid wide" });
+  const fields = runnerFields();
   const form = h("form", { class: "inline", onsubmit: async (ev) => {
     ev.preventDefault();
-    const ref = { name: name.value };
-    ref[kind.value] = where.value;
+    const ref = fields.read();
     try {
       await api("POST", "/api/runners", ref);
       say("Added runner " + ref.name + ".");
@@ -602,7 +622,7 @@ async function runnersView() {
     } catch (err) {
       fail(err);
     }
-  } }, h("label", {}, "Name", name), h("label", {}, "Reached", kind), h("label", {}, "Where", where), h("button", { class: "primary" }, "Add runner"));
+  } }, ...fields.labels, h("button", { class: "primary" }, "Add runner"));
   show(
     h("div", { class: "head" }, h("div", {}, h("h1", {}, "Runners"),
       h("p", { class: "muted" }, "Machines that run harnesses. Runners enforce every limit themselves; this list only says how to reach them."))),
@@ -658,6 +678,7 @@ function runnerCard(r) {
     h("div", { class: "actions" },
       st && !st.killed && h("button", { class: "danger", onclick: act("kill", "Stopping every job on " + r.name + ".") }, "Stop all jobs"),
       st && st.killed && h("button", { onclick: act("resume", r.name + " accepts jobs again. Its schedules stay paused until you resume them.") }, "Accept jobs again"),
+      h("button", { onclick: () => editRunner(r) }, "Edit"),
       h("button", { onclick: async () => {
         if (!confirm("Remove " + r.name + " from this list? The runner itself keeps running.")) return;
         try {
@@ -667,6 +688,31 @@ function runnerCard(r) {
           fail(err);
         }
       } }, "Remove")));
+}
+
+function editRunner(r) {
+  const fields = runnerFields(r);
+  const problem = h("div", {});
+  const form = h("form", { method: "dialog", onsubmit: async (ev) => {
+    ev.preventDefault();
+    const ref = fields.read();
+    try {
+      await api("PUT", "/api/runners/" + encodeURIComponent(r.name), ref);
+      dialog.close();
+      say("Saved runner " + ref.name + ".");
+      runnersView();
+    } catch (err) {
+      set(problem, h("div", { class: "error-box" }, err.message));
+    }
+  } },
+  h("h1", {}, "Edit " + r.name),
+  h("p", { class: "muted" }, "This only changes how this Control Center reaches the runner. Harnesses address a runner by its own target name (" +
+    (r.status ? r.status.target : "set when it was installed") + "), which stays the same."),
+  h("div", { class: "form-stack" }, ...fields.labels),
+  problem,
+  h("div", { class: "actions" }, h("button", { class: "primary" }, "Save"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
+  set(dialog, form);
+  dialog.showModal();
 }
 
 // --- approvals (shown on every page) ---

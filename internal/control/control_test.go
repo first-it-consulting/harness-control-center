@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -461,6 +462,46 @@ func TestRunThroughTheUI(t *testing.T) {
 	}
 	if code := ts.do(http.MethodDelete, "/api/runners/local", nil, &out); code != http.StatusOK {
 		t.Errorf("remove runner: %d", code)
+	}
+}
+
+func TestEditRunner(t *testing.T) {
+	ts := newTestServer(t)
+	var out map[string]any
+	for _, ref := range []RunnerRef{{Name: "a", SSH: "host-a"}, {Name: "b", SSH: "host-b", RemoteSocket: "/run/hcc/other.sock"}, {Name: "c", Socket: "/run/c.sock"}} {
+		if code := ts.do(http.MethodPost, "/api/runners", ref, &out); code != http.StatusCreated {
+			t.Fatalf("add %s: %d %v", ref.Name, code, out)
+		}
+	}
+	// Rename and change how it is reached; its place in the list stays.
+	if code := ts.do(http.MethodPut, "/api/runners/b", RunnerRef{Name: "b2", Socket: "/run/b.sock"}, &out); code != http.StatusOK {
+		t.Fatalf("edit: %d %v", code, out)
+	}
+	cfg, err := LoadConfig(ts.s.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []RunnerRef{{Name: "a", SSH: "host-a"}, {Name: "b2", Socket: "/run/b.sock"}, {Name: "c", Socket: "/run/c.sock"}}
+	if !slices.Equal(cfg.Runners, want) {
+		t.Errorf("saved runners = %+v, want %+v", cfg.Runners, want)
+	}
+	for _, tc := range []struct {
+		path string
+		ref  RunnerRef
+		code int
+	}{
+		{"/api/runners/a", RunnerRef{Name: "c", SSH: "host-a"}, http.StatusConflict},            // takes another's name
+		{"/api/runners/nope", RunnerRef{Name: "nope", SSH: "x"}, http.StatusNotFound},           // no such runner
+		{"/api/runners/a", RunnerRef{Name: "a", SSH: "x", Socket: "/y"}, http.StatusBadRequest}, // both ways
+		{"/api/runners/a", RunnerRef{Name: "A!", SSH: "x"}, http.StatusBadRequest},              // bad name
+		{"/api/runners/a", RunnerRef{Name: "a", SSH: "-oProxyCommand=x"}, http.StatusBadRequest},
+	} {
+		if code := ts.do(http.MethodPut, tc.path, tc.ref, &out); code != tc.code {
+			t.Errorf("PUT %s %+v: %d, want %d (%v)", tc.path, tc.ref, code, tc.code, out)
+		}
+	}
+	if cfg2, _ := LoadConfig(ts.s.cfgPath); !slices.Equal(cfg2.Runners, want) {
+		t.Errorf("a refused edit changed the config: %+v", cfg2.Runners)
 	}
 }
 

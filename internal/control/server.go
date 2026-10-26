@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +36,7 @@ var webFS embed.FS
 //	POST   /api/logout
 //	GET    /api/runners                          configured runners and their status
 //	POST   /api/runners                          add a runner
+//	PUT    /api/runners/{runner}                 change how a runner is reached, or rename it
 //	DELETE /api/runners/{runner}                 remove a runner (from this list only)
 //	POST   /api/runners/{runner}/kill            kill switch on one runner
 //	POST   /api/runners/{runner}/resume
@@ -95,6 +97,7 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("POST /api/logout", s.logout)
 	mux.HandleFunc("GET /api/runners", s.runners)
 	mux.HandleFunc("POST /api/runners", s.addRunner)
+	mux.HandleFunc("PUT /api/runners/{runner}", s.updateRunner)
 	mux.HandleFunc("DELETE /api/runners/{runner}", s.removeRunner)
 	mux.HandleFunc("POST /api/runners/{runner}/kill", s.killRunner)
 	mux.HandleFunc("POST /api/runners/{runner}/resume", s.resumeRunner)
@@ -332,6 +335,37 @@ func (s *Server) addRunner(w http.ResponseWriter, r *http.Request) {
 	s.cfg = next
 	s.log.Info("runner added", "runner", ref.Name, "ssh", ref.SSH, "socket", ref.Socket)
 	writeJSON(w, http.StatusCreated, ref)
+}
+
+// updateRunner replaces a runner's entry, keeping its place in the list.
+// It only changes how this Control Center reaches the runner (and what it
+// calls it here); the runner itself and its target name are unchanged.
+func (s *Server) updateRunner(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("runner")
+	var ref RunnerRef
+	if !readJSON(w, r, &ref) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := slices.IndexFunc(s.cfg.Runners, func(r RunnerRef) bool { return r.Name == name })
+	if i < 0 {
+		writeError(w, http.StatusNotFound, errNotFound("no runner called "+name))
+		return
+	}
+	if _, exists := s.cfg.Runner(ref.Name); exists && ref.Name != name {
+		writeError(w, http.StatusConflict, fmt.Errorf("a runner called %s exists already", ref.Name))
+		return
+	}
+	next := &Config{Runners: append([]RunnerRef(nil), s.cfg.Runners...)}
+	next.Runners[i] = ref
+	if err := SaveConfig(s.cfgPath, next); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.cfg = next
+	s.log.Info("runner changed", "runner", name, "name", ref.Name, "ssh", ref.SSH, "socket", ref.Socket)
+	writeJSON(w, http.StatusOK, ref)
 }
 
 func (s *Server) removeRunner(w http.ResponseWriter, r *http.Request) {
