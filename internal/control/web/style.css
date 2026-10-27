@@ -215,3 +215,14 @@ details .table-wrap { margin-top: 0.5rem; }
 .card.local h2 { margin: 0 0 0.5rem; font-size: 1rem; }
 .steps { list-style: none; padding: 0; margin: 0.75rem 0; display: grid; gap: 0.35rem; }
 .steps .badge { min-width: 6.5rem; display: inline-block; text-align: center; }
+
+/* Credentials (credentials.js) */
+.stack { display: grid; gap: 1rem; }
+.card-head { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+.card-head h2 { margin: 0; font-size: 1rem; }
+.form-stack .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+.form-stack .note { display: block; font-size: 0.85rem; font-weight: normal; }
+.notice-box { border-left: 3px solid var(--warn); padding: 0.5rem 0.75rem; background: var(--badge-bg); border-radius: 0 var(--radius) var(--radius) 0; margin: 0.5rem 0; }
+td .badge { margin-left: 0.4rem; }
+@media (max-width: 480px) { .form-stack .row { grid-template-columns: 1fr; } }
+.card td.actions { margin-top: 0; }
