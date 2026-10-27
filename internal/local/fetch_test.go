@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -56,7 +57,7 @@ func TestFetchUnpacksSparsely(t *testing.T) {
 	if last != int64(len(packed)) {
 		t.Errorf("progress ended at %d, want %d", last, len(packed))
 	}
-	if fi, _ := os.Stat(dest); fi.Mode().Perm() != 0o600 {
+	if fi, _ := os.Stat(dest); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Errorf("mode %v", fi.Mode().Perm())
 	}
 }
@@ -139,7 +140,7 @@ func TestClaudePinMatchesBuildInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := string(data)
+	s := strings.ReplaceAll(string(data), "\r\n", "\n") // a Windows checkout
 	for _, want := range []string{`CC_VERSION=` + ClaudeCodeVersion + "\n", `CC_INTEGRITY="` + claudeCodeIntegrity + `"`} {
 		if !strings.Contains(s, want) {
 			t.Errorf("hack/vz/inputs.sh lacks %s", want)

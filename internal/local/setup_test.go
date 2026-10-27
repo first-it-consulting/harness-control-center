@@ -345,7 +345,7 @@ func TestServiceStop(t *testing.T) {
 	if _, err := s.Install(context.Background(), "/bin/hcc", Layout{Dir: dir}, false); err != nil {
 		t.Fatal(err)
 	}
-	if fi, err := os.Stat(s.Plist); err != nil || fi.Mode().Perm() != 0o644 {
+	if fi, err := os.Stat(s.Plist); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o644) {
 		t.Fatalf("plist: %v %v", fi, err)
 	}
 	if err := s.Stop(context.Background()); err != nil {
