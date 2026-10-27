@@ -1,0 +1,8 @@
+#!/bin/sh
+# SUDO_ASKPASS helper for installing a runner from the Control Center
+# (see install-runner.sh): hands sudo the password the install's remote
+# shell read on its stdin. The password is only in that shell's
+# environment, never in a file; this helper is removed with the install
+# directory.
+[ -n "${HCC_SUDO_PASSWORD:-}" ] || exit 1
+printf '%s\n' "$HCC_SUDO_PASSWORD"

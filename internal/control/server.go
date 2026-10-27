@@ -43,6 +43,8 @@ var webFS embed.FS
 //	DELETE /api/runners/{runner}                 remove a runner (from this list only)
 //	POST   /api/runners/{runner}/kill            kill switch on one runner
 //	POST   /api/runners/{runner}/resume
+//	GET    /api/runners/{runner}/install         installation progress
+//	POST   /api/runners/{runner}/install         install or update the runner over ssh
 //	POST   /api/kill                             kill switch on every runner
 //	GET    /api/jobs                             jobs of every runner
 //	GET    /api/runners/{runner}/jobs/{id}
@@ -86,6 +88,8 @@ type Server struct {
 
 	// local is the runner on this Mac, which the Control Center can set up.
 	local *localRunner
+	// installs are remote runner installations started from the UI.
+	installs *runnerInstaller
 
 	mu      sync.Mutex
 	cfg     *Config
@@ -99,7 +103,7 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfgPath: cfgPath, lib: NewLibrary(libDir), auth: newAuth(), log: log, cfg: cfg, clients: map[RunnerRef]*runnerd.Client{}, local: newLocalRunner()}
+	s := &Server{cfgPath: cfgPath, lib: NewLibrary(libDir), auth: newAuth(), log: log, cfg: cfg, clients: map[RunnerRef]*runnerd.Client{}, local: newLocalRunner(), installs: newRunnerInstaller()}
 	if home, err := os.UserHomeDir(); err == nil {
 		s.sshConfig = filepath.Join(home, ".ssh", "config")
 	}
@@ -120,6 +124,8 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("DELETE /api/runners/{runner}", s.removeRunner)
 	mux.HandleFunc("POST /api/runners/{runner}/kill", s.killRunner)
 	mux.HandleFunc("POST /api/runners/{runner}/resume", s.resumeRunner)
+	mux.HandleFunc("GET /api/runners/{runner}/install", s.runnerInstallState)
+	mux.HandleFunc("POST /api/runners/{runner}/install", s.startRunnerInstall)
 	mux.HandleFunc("POST /api/kill", s.killAll)
 	mux.HandleFunc("GET /api/jobs", s.jobs)
 	mux.HandleFunc("GET /api/runners/{runner}/jobs/{id}", s.job)

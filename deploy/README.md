@@ -4,14 +4,16 @@ A runner is `hcc runner serve` on a Linux host with KVM, managed by
 systemd. It listens only on a Unix socket (`/run/hcc/runner.sock`, owner
 only); you reach it over ssh with `hcc --ssh <host>`.
 
-```sh
-# 1. once, on the host: fetch and verify Firecracker, kernel and rootfs
-ssh <host> 'bash -s' < hack/firecracker-poc/run.sh
+From the web UI, add the server under **Runners**, then choose **Install Runner** on its card. The Control Center builds the Linux binaries, uploads this installer, fetches and verifies the pinned assets on the server, asks for the sudo password only if needed, and starts the service. This first UI installer needs the Control Center to be the `bin/hcc` of an hcc source checkout, or `HCC_SOURCE_DIR` set to one (never the working directory: that checkout's installer runs with sudo on the server), and Go to build the Linux binaries. It supports Linux x86_64 hosts. With a sudo password, `install-runner.sh` gets it from a helper (`deploy/sudo-askpass`) that reads it from the install shell's environment: sudo remembers a password per terminal, and the install has none.
 
-# 2. from your machine: build, install and (re)start the runner
+The same installation from a checkout:
+
+```sh
+# 1. from your machine: build, install and (re)start the runner
+#    (the installer fetches and verifies missing pinned assets on the host)
 make deploy-runner HOST=<host> TARGET=server:<name>
 
-# 3. run a harness whose spec.target is server:<name>
+# 2. run a harness whose spec.target is server:<name>
 hcc run --ssh <host> my-harness.yaml
 ```
 
