@@ -209,3 +209,9 @@ th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 details summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
 details .table-wrap { margin-top: 0.5rem; }
 .small { font-size: 0.8rem; margin: 0.5rem 0 0; }
+
+/* This Mac's runner setup (local.js) */
+.card.local { margin-bottom: 1rem; }
+.card.local h2 { margin: 0 0 0.5rem; font-size: 1rem; }
+.steps { list-style: none; padding: 0; margin: 0.75rem 0; display: grid; gap: 0.35rem; }
+.steps .badge { min-width: 6.5rem; display: inline-block; text-align: center; }

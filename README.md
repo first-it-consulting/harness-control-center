@@ -58,7 +58,8 @@ Risk: high
 On an Apple Silicon Mac, agents run locally in VMs of Apple's own
 Virtualization framework: no server, no root rights, and the agent's VM
 has no network device at all (see [ADR-0016](docs/adr/0016-macos-sandbox.md)).
-One command sets everything up:
+In the Control Center (`hcc control serve`), click **Set up this Mac** on
+the dashboard. It shows each step as it runs. Or use one command:
 
 ```sh
 hcc local up       # VM images, Claude Code, settings, and the runner as a background service

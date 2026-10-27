@@ -60,6 +60,9 @@ var webFS embed.FS
 //	GET    /api/harnesses/{name}
 //	PUT    /api/harnesses                        save (named by its metadata.name)
 //	DELETE /api/harnesses/{name}
+//	GET    /api/local                            the runner on this Mac: what is set up, and the setup's progress
+//	POST   /api/local/setup                      set it up (in the background) and add it here
+//	POST   /api/local/stop                       stop its background service
 
 // Timeouts for calls to runners.
 const (
@@ -78,6 +81,9 @@ type Server struct {
 	// sshConfig is the user's ssh configuration, read for host suggestions.
 	sshConfig string
 
+	// local is the runner on this Mac, which the Control Center can set up.
+	local *localRunner
+
 	mu      sync.Mutex
 	cfg     *Config
 	clients map[RunnerRef]*runnerd.Client
@@ -90,7 +96,7 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfgPath: cfgPath, lib: NewLibrary(libDir), auth: newAuth(), log: log, cfg: cfg, clients: map[RunnerRef]*runnerd.Client{}}
+	s := &Server{cfgPath: cfgPath, lib: NewLibrary(libDir), auth: newAuth(), log: log, cfg: cfg, clients: map[RunnerRef]*runnerd.Client{}, local: newLocalRunner()}
 	if home, err := os.UserHomeDir(); err == nil {
 		s.sshConfig = filepath.Join(home, ".ssh", "config")
 	}
@@ -129,6 +135,9 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /api/harnesses/{name}", s.harness)
 	mux.HandleFunc("PUT /api/harnesses", s.saveHarness)
 	mux.HandleFunc("DELETE /api/harnesses/{name}", s.deleteHarness)
+	mux.HandleFunc("GET /api/local", s.localState)
+	mux.HandleFunc("POST /api/local/setup", s.localSetup)
+	mux.HandleFunc("POST /api/local/stop", s.localStop)
 	s.handler = s.auth.guard(mux)
 	return s, nil
 }
