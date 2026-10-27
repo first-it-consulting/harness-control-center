@@ -1,0 +1,40 @@
+name: vz images
+
+# Builds the macOS sandbox's guest kernel and images (ADR-0016) on an
+# arm64 runner and hands them on as the "vz-images" artifact. Called by
+# CI (to test the build) and by the release (to publish them).
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "The commit or tag to build (default: the caller's)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # The kernel takes long to build and changes rarely.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/vz/out/kernel
+          key: vz-kernel-${{ hashFiles('deploy/images/kernel/**', 'hack/vz/inputs.sh', 'hack/vz/build-in-container.sh') }}
+      - run: hack/vz/release-images.sh "$RUNNER_TEMP/vz-images"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vz-images
+          path: ${{ runner.temp }}/vz-images
+          retention-days: 3
+          if-no-files-found: error

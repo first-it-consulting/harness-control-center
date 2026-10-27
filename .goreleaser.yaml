@@ -13,6 +13,10 @@ builds:
       - CGO_ENABLED=0
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    # Apple Silicon Macs get the build below.
+    ignore:
+      - goos: darwin
+        goarch: arm64
     flags:
       - -trimpath
     ldflags:
@@ -22,6 +26,33 @@ builds:
       - -X github.com/first-it-consulting/harness-control-center/internal/version.Date={{ .CommitDate }}
     # Reproducible builds: timestamps come from the commit, not the clock.
     mod_timestamp: "{{ .CommitTimestamp }}"
+
+  # Apple Silicon: the macOS sandbox (ADR-0016) uses Apple's
+  # Virtualization framework through cgo, so this is built on macOS and
+  # signed ad hoc with the virtualization entitlement. It also carries the
+  # checksums of this release's VM images, which it verifies downloads
+  # against.
+  - id: hcc-macos
+    main: ./cmd/hcc
+    binary: hcc
+    env:
+      - CGO_ENABLED=1
+      - CGO_CFLAGS=-mmacosx-version-min=13.0
+      - CGO_LDFLAGS=-mmacosx-version-min=13.0
+    goos: [darwin]
+    goarch: [arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/first-it-consulting/harness-control-center/internal/version.Version={{ .Version }}
+      - -X github.com/first-it-consulting/harness-control-center/internal/version.Commit={{ .Commit }}
+      - -X github.com/first-it-consulting/harness-control-center/internal/version.Date={{ .CommitDate }}
+      - -X github.com/first-it-consulting/harness-control-center/internal/local.releaseImages={{ envOrDefault "HCC_VZ_IMAGES" "" }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    hooks:
+      post:
+        - cmd: codesign --force --sign - --entitlements hack/vz/entitlements.plist "{{ .Path }}"
 
   # The runner's only root-side code; Linux only.
   - id: hcc-helper
@@ -64,6 +95,10 @@ archives:
 
 checksum:
   name_template: checksums.txt
+  # The macOS sandbox's images (built by the vz-images workflow into
+  # vz-images/), so the signed checksums cover them too.
+  extra_files:
+    - glob: ./vz-images/*
 
 # One SPDX SBOM per archive (requires syft).
 sboms:
@@ -87,6 +122,8 @@ changelog:
   disable: true
 
 release:
+  extra_files:
+    - glob: ./vz-images/*
   mode: keep-existing
   # A hand-run rebuild of a release (reproducible: the same bytes) may
   # replace what an earlier, partly failed run uploaded.

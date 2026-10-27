@@ -58,9 +58,17 @@ stay the same; only the provider differs.
   devices VZ provides built in, and **module loading disabled**, so
   nothing in the guest can add kernel code.
 - **arm64 images.** The images are the same as on Linux, built for arm64
-  (Alpine aarch64, Claude Code's arm64 musl build). They are built in a
-  Linux container until the release pipeline publishes them signed
-  (next step); on a Mac nothing but the download is needed then.
+  (Alpine aarch64, Claude Code's arm64 musl build). Every release builds
+  them on an arm64 runner from the pinned inputs (`hack/vz/inputs.sh`)
+  and attaches them, covered by the release's signed checksums, with the
+  kernel's source and configuration (the kernel is GPL-2.0). The Apple
+  Silicon build of `hcc` carries their checksums itself, so it can verify
+  what it downloads without trusting the download location. **Claude
+  Code is not in the release images**: it is Anthropic's software, not
+  ours to redistribute, so `hcc` fetches it on the user's Mac from the
+  npm registry, checked against a pinned integrity value. Developers
+  can still build complete images in a Linux container
+  (`hack/vz/build-images.sh`).
 - **The runner runs as the user**, its socket and state in the user's
   own directory (owner-only), and the Control Center reaches it through
   that socket (`target: local`).

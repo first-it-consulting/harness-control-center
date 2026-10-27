@@ -54,6 +54,9 @@ Runner:
   runner serve --config <file>   run the runner daemon
   runner stdio [--socket path]   relay stdin/stdout to the daemon (used over ssh)
 
+Agents on this Mac:
+  local images             the VM images this release downloads, with their checksums
+
   version                  print version information
 
 Run "hcc <command> -h" for a command's flags.
@@ -86,6 +89,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdPlugins(cmd, rest, stdin, stdout, stderr)
 	case "runner":
 		return cmdRunner(rest, stdin, stdout, stderr)
+	case "local":
+		return cmdLocal(rest, stdout, stderr)
 	case "control":
 		return cmdControl(rest, stdin, stdout, stderr)
 	case "version", "--version":

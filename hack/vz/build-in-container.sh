@@ -3,6 +3,9 @@
 # root. Inputs (checked by the caller) are in /cache, sources in /src,
 # results go to /out. No mounts and no privileges are needed: packages go
 # into the image trees with "apk --root".
+#
+# With CC_VERSION empty, the claude-code image is built without Claude
+# Code itself (release images: hcc adds it on the user's machine).
 set -eu
 
 apk add --no-cache -q bash e2fsprogs xz tar >/dev/null
@@ -65,8 +68,9 @@ else
 	finish base "$b_inputs"
 fi
 
-echo "== image 'claude-code' (Claude Code $CC_VERSION)"
-CC_TGZ=/cache/claude-code-linux-arm64-musl-$CC_VERSION.tgz
+echo "== image 'claude-code' (Claude Code ${CC_VERSION:-left out})"
+CC_TGZ=/dev/null
+[ -z "$CC_VERSION" ] || CC_TGZ=/cache/claude-code-linux-arm64-musl-$CC_VERSION.tgz
 c_inputs=$(echo "$CC_VERSION tools: $TOOLS" | stamp - /src/images/common.sh /src/images/claude-code/init /src/images/claude-code/hcc-subagent "$MINIROOT" "$CC_TGZ" /cache/hcc-guest-linux-arm64 /src/build.sh)
 if uptodate claude-code "$c_inputs"; then
 	echo "   up to date"
@@ -75,13 +79,15 @@ else
 	tree $t
 	install -m 0755 /src/images/claude-code/init $t/init
 	install -m 0755 /src/images/claude-code/hcc-subagent $t/usr/local/bin/hcc-subagent
-	tar -xzf "$CC_TGZ" -C /tmp package/claude
-	install -m 0755 /tmp/package/claude $t/usr/local/bin/claude
+	if [ -n "$CC_VERSION" ]; then
+		tar -xzf "$CC_TGZ" -C /tmp package/claude
+		install -m 0755 /tmp/package/claude $t/usr/local/bin/claude
+	fi
 	# Signed Alpine packages, verified against the tree's own keys.
 	apk_root() { apk --root $t --keys-dir $t/etc/apk/keys --repositories-file $t/etc/apk/repositories --arch aarch64 "$@"; }
 	apk_root add --no-cache -q bash git jq ripgrep libgcc libstdc++ ca-certificates >/dev/null
 	chroot $t /usr/sbin/adduser -D -u 1000 -s /bin/bash -h /home/agent agent
-	chroot $t /usr/local/bin/claude --version
+	[ -z "$CC_VERSION" ] || chroot $t /usr/local/bin/claude --version
 
 	mkdir -p /out/claude-code
 	rm -f /out/claude-code/tools.ext4 /out/claude-code/tools.txt
