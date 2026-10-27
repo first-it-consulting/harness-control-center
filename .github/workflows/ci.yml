@@ -77,7 +77,35 @@ jobs:
           go-version-file: go.mod
       - run: make fuzz FUZZTIME=60s
 
+  # The VM images take long to build (the kernel above all), so a pull
+  # request builds them, and runs the release dry run, only if it changes
+  # what goes into them or into the release. On main they always run.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.diff.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then echo "release=true" >>"$GITHUB_OUTPUT"; exit 0; fi
+          changed=$(git diff --name-only "$BASE"...HEAD)
+          echo "$changed"
+          if echo "$changed" | grep -qE '^(deploy/images/|hack/vz/|cmd/hcc-guest/|\.goreleaser\.yaml$|\.github/workflows/|go\.(mod|sum)$)'; then
+            echo "release=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "release=false" >>"$GITHUB_OUTPUT"
+          fi
+
   vz-images:
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
     uses: ./.github/workflows/vz-images.yml
 
   # The release's build on the release's runner (macOS: cgo and codesign

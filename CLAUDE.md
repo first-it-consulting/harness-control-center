@@ -65,6 +65,6 @@ Web UI (`internal/control/web`, embedded with `go:embed`): plain ES modules, no 
 - Tests come with the code, including the denied and failure paths. Security-relevant parsing/matching code gets a fuzz target (add it to `make fuzz`).
 - No secrets in sandboxes, logs or errors.
 - Big decisions get an ADR in `docs/adr/`; a change to the threat model updates `docs/threat-model.md` in the same commit.
-- Every change goes through a pull request on its own branch and is merged only with green CI; never push to `main`. Merging the release-please PR is what releases.
+- Every change goes through a pull request on its own branch and is merged only with green CI; never push to `main`. Merging the release-please PR is what releases. `main` is protected (the tests, lint, vuln and fuzz must pass). GitHub starts no workflows for release-please's own updates, so before merging its PR, close and reopen it (`gh pr close N && gh pr reopen N`) to run the checks.
 - Conventional Commits (`feat:`, `fix:`, `docs:` …): release-please builds releases and the changelog from them. Releases are tagged plain `vX.Y.Z` and built by GoReleaser (signed checksums, SBOMs).
 - `examples/` harnesses are tested to stay valid.
