@@ -2,6 +2,7 @@
 
 import { dashboardView } from "./dashboard.js";
 import { localPanel } from "./local.js";
+import { credentialsView } from "./credentials.js";
 //
 // Everything shown here may come from an agent (job errors, console
 // output, file names), so the DOM is only ever built with textContent and
@@ -195,6 +196,7 @@ function route() {
     harness: () => harnessView(parts[1]),
     new: () => harnessView(""),
     runners: () => runnersView(),
+    credentials: () => credentialsView({ h, api, set, show, fail, say }),
     schedules: () => schedulesView(),
   };
   (routes[parts[0]] || routes.dashboard)();

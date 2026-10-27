@@ -47,6 +47,7 @@ func (l Layout) tools() string        { return l.path("images", "claude-code", "
 func (l Layout) toolsList() string    { return l.path("images", "claude-code", "tools.txt") }
 func (l Layout) downloads() string    { return l.path("downloads") }
 func (l Layout) installed() string    { return l.path("images", "installed.yaml") }
+func (l Layout) credentials() string  { return l.path("credentials.yaml") }
 
 // localConfig is the part of runner.yaml (runnerd.Config) the local
 // runner sets.
@@ -60,6 +61,7 @@ type localConfig struct {
 	VZ            runnerd.VZConfig      `yaml:"vz"`
 	Images        map[string]localImage `yaml:"images"`
 	Network       localNetwork          `yaml:"network"`
+	Credentials   string                `yaml:"credentials"`
 }
 
 type localNetwork struct {
@@ -73,8 +75,8 @@ type localImage struct {
 }
 
 // runnerConfig is the local runner's runner.yaml: provider vz, this
-// user, everything inside the layout. No credentials yet (they come when
-// the user enters one).
+// user, everything inside the layout, and an empty credential store the
+// Control Center fills (ADR-0017).
 func (l Layout) runnerConfig() (*localConfig, error) {
 	u, err := user.Current()
 	if err != nil {
@@ -99,6 +101,7 @@ func (l Layout) runnerConfig() (*localConfig, error) {
 		VZ:            runnerd.VZConfig{StagingDir: l.path("staging"), ImageRoot: l.images()},
 		Images:        images,
 		Network:       localNetwork{ProxyPort: 3128},
+		Credentials:   l.credentials(),
 	}, nil
 }
 
@@ -120,6 +123,9 @@ func (l Layout) writeConfig() (created bool, err error) {
 			return false, err
 		}
 		if err := writeExclusive(l.Config(), append([]byte(configHeader), data...)); err != nil {
+			return false, err
+		}
+		if err := writeExclusive(l.credentials(), []byte("{}\n")); err != nil && !errors.Is(err, os.ErrExist) {
 			return false, err
 		}
 		created = true

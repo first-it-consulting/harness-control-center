@@ -169,7 +169,7 @@ func TestSessionsExpire(t *testing.T) {
 
 func TestStaticFilesAndHeaders(t *testing.T) {
 	ts := newTestServer(t)
-	for path, ctype := range map[string]string{"/": "text/html", "/app.js": "javascript", "/dashboard.js": "javascript", "/local.js": "javascript", "/style.css": "text/css", "/icon.svg": "image/svg+xml"} {
+	for path, ctype := range map[string]string{"/": "text/html", "/app.js": "javascript", "/dashboard.js": "javascript", "/local.js": "javascript", "/credentials.js": "javascript", "/style.css": "text/css", "/icon.svg": "image/svg+xml"} {
 		rec := ts.raw(http.MethodGet, path, "", nil)
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Type"), ctype) {
 			t.Errorf("%s: %d %s", path, rec.Code, rec.Header().Get("Content-Type"))
@@ -363,7 +363,14 @@ func startRunner(t *testing.T) string {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { _ = runnerd.NewServer(r, state, log).Serve(ctx, l); close(done) }()
+	// An empty credential store of the user's, as on the Mac.
+	store := filepath.Join(dir, "credentials.yaml")
+	if err := os.WriteFile(store, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := runnerd.NewServer(r, state, log)
+	srv.EnableCredentials(store)
+	go func() { _ = srv.Serve(ctx, l); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
 	return sock
 }

@@ -165,8 +165,13 @@ func TestUpSetsEverythingUp(t *testing.T) {
 	if err != nil || !strings.Contains(string(cfg), "provider: vz") || !strings.Contains(string(cfg), "target: local") {
 		t.Fatalf("runner.yaml: %s %v", cfg, err)
 	}
-	if fi, _ := os.Stat(l.Config()); fi.Mode().Perm() != 0o600 {
-		t.Errorf("runner.yaml mode %v", fi.Mode().Perm())
+	for _, p := range []string{l.Config(), l.credentials()} {
+		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("%s: %v %v", p, fi, err)
+		}
+	}
+	if !strings.Contains(string(cfg), "credentials: "+l.credentials()) {
+		t.Errorf("runner.yaml names no credential store:\n%s", cfg)
 	}
 	if !f.launchd.loaded {
 		t.Error("service not started")
