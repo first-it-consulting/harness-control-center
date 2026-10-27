@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.1](https://github.com/first-it-consulting/harness-control-center/compare/v0.1.0...v0.1.1) (2026-10-27)
+
+
+### Features
+
+* **credentials:** edit the credential store, write-only (ADR-0017) ([#7](https://github.com/first-it-consulting/harness-control-center/issues/7)) ([0174a72](https://github.com/first-it-consulting/harness-control-center/commit/0174a72c3d4298cc300666ed5d664861ffdd3d50))
+* **local:** hcc local up sets up agents on this Mac ([#5](https://github.com/first-it-consulting/harness-control-center/issues/5)) ([58565bb](https://github.com/first-it-consulting/harness-control-center/commit/58565bb5800598e8505a6f45adb3e5b66dcb1fc5))
+* **release:** Apple Silicon build with the macOS sandbox, and its VM images ([#4](https://github.com/first-it-consulting/harness-control-center/issues/4)) ([1cca66d](https://github.com/first-it-consulting/harness-control-center/commit/1cca66def228c88a238a5e8e68d632fb33b99926))
+* run agents locally on macOS with Apple's Virtualization framework ([88addbb](https://github.com/first-it-consulting/harness-control-center/commit/88addbbafda100b68aea27a6a89b73e31e79a3b6))
+* **web:** a Credentials page for every runner (ADR-0017) ([#8](https://github.com/first-it-consulting/harness-control-center/issues/8)) ([fa81671](https://github.com/first-it-consulting/harness-control-center/commit/fa81671fd0cde40e81b03159a7a3133eb95e1c10))
+* **web:** set up this Mac's runner with one button ([#6](https://github.com/first-it-consulting/harness-control-center/issues/6)) ([5775cda](https://github.com/first-it-consulting/harness-control-center/commit/5775cdaaf98bd300cb4be28c60256eadd1768b5d))
+
+
+### Bug Fixes
+
+* **runner:** a cron run that ends at once no longer stops its schedule ([4f5d8a3](https://github.com/first-it-consulting/harness-control-center/commit/4f5d8a3adbf09206fc94ae98818c5b1c8f20f19c))
+
 ## 0.1.0 (2026-10-26)
 
 
