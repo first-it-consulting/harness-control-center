@@ -137,9 +137,10 @@ func fetchTo(r io.Reader, check Check, dest string, gz bool, progress func(int64
 	if err != nil {
 		return err
 	}
+	closed := false
 	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
+		if !closed {
+			_ = f.Close()
 		}
 		if err != nil {
 			_ = os.Remove(part)
@@ -172,7 +173,9 @@ func fetchTo(r io.Reader, check Check, dest string, gz bool, progress func(int64
 	if !ok(h.Sum(nil)) {
 		return errors.New("CHECKSUM MISMATCH: the downloaded file is not the one this hcc release expects")
 	}
-	if err := f.Sync(); err != nil {
+	// Closed before the rename: Windows cannot rename an open file.
+	closed = true
+	if err := errors.Join(f.Sync(), f.Close()); err != nil {
 		return err
 	}
 	return os.Rename(part, dest)
