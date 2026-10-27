@@ -11,3 +11,5 @@ coverage.out
 *.key
 /hcc
 /hcc-helper
+.cache/
+/vz-images/

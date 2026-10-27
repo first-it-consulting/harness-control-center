@@ -83,7 +83,7 @@ func TestValidateListsEveryProblem(t *testing.T) {
 }
 
 func TestUsageErrors(t *testing.T) {
-	for _, args := range [][]string{{}, {"bogus"}, {"validate"}, {"explain", "a", "b"}} {
+	for _, args := range [][]string{{}, {"bogus"}, {"validate"}, {"explain", "a", "b"}, {"local"}, {"local", "bogus"}} {
 		if code, _, _ := runCLI(args...); code != exitUsage {
 			t.Errorf("run(%q) = %d, want %d", args, code, exitUsage)
 		}
@@ -102,5 +102,12 @@ func TestVersionAndHelp(t *testing.T) {
 	}
 	if code, out, _ := runCLI("help"); code != exitOK || !strings.Contains(out, "explain") {
 		t.Errorf("help: %d %q", code, out)
+	}
+}
+
+func TestLocalImagesInADevelopmentBuild(t *testing.T) {
+	code, _, stderr := runCLI("local", "images")
+	if code != exitInvalid || !strings.Contains(stderr, "build-images.sh") {
+		t.Errorf("exit %d: %q", code, stderr)
 	}
 }
