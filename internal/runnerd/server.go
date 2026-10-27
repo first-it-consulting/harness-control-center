@@ -47,6 +47,7 @@ import (
 //	POST /v1/plugins[?confirm=SHA256]  preview a plugin bundle (tar), or install it
 //	DELETE /v1/plugins/{name}
 //	GET  /v1/plugins/{name}/log the plugin's last run's console
+//	GET  /v1/credentials        the credentials it can broker, without secrets
 //
 // Every request counts as contact (runner.Runner.Contact).
 

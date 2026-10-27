@@ -68,6 +68,7 @@ Living document. Update it in the same PR as any change that affects it.
 | Tampered release | Keyless cosign signatures, SBOMs, SLSA provenance, SHA-pinned actions, least-privilege workflow tokens. | pipeline done |
 | Tampered VM images for the Mac (the release's kernel and root file systems, downloaded by `hcc`) | Built in the release run from pinned, checksummed inputs; covered by the signed checksums; the Apple Silicon `hcc` of the same run carries their SHA-256 sums and checks downloads against them, so a swapped download is deleted, never used. Claude Code is not in them; it is fetched on the user's Mac against a pinned integrity value and added in a setup VM without network (ADR-0016). | done |
 | Log leakage | Credentials format without their secret (`%v`, `%#v`); the broker logs credential names, hosts, paths and status codes only (tested). Logs stay on the user's machines. | done |
+| Secrets entered in the Control Center (ADR-0017) | Write-only: never shown, listed or returned again, by the UI or the runner (the runner's list has no secrets and no secret paths; tested). Changes run as the store's owner (`sudo` over the user's ssh on a server, so the runner's user still cannot change the store), arrive on stdin, are checked as the runner checks them before the store switches in one rename (tested: invalid changes change nothing). A sudo password is used for that one call and kept nowhere. The Control Center itself is loopback-only with session and origin checks. | done |
 
 ## Known limitations
 

@@ -120,6 +120,7 @@ func startDaemonIn(t *testing.T, dir string) *testDaemon {
 	srv := NewServer(r, state, log)
 	store := plugins.NewStore(filepath.Join(state, "plugins"))
 	srv.EnablePlugins(store, plugins.NewManager(plugins.Config{Store: store}))
+	srv.EnableCredentials(filepath.Join(dir, "credentials.yaml"))
 	go func() { d.done <- srv.Serve(ctx, l) }()
 	t.Cleanup(func() {
 		cancel()

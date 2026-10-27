@@ -166,6 +166,7 @@ func serve(configPath string, log *slog.Logger) error {
 		"maxConcurrent", cfg.MaxConcurrent, "maxPluginVMs", cfg.PluginVMs(), "network", cfg.Network != nil)
 	srv := runnerd.NewServer(r, cfg.StateDir, log)
 	srv.EnablePlugins(pluginStore, mgr)
+	srv.EnableCredentials(cfg.Credentials)
 	err = srv.Serve(ctx, l)
 	<-pluginsDone
 	log.Info("runner stopped; all jobs and plugins were stopped")
