@@ -7,7 +7,7 @@
 #   install-runner.sh <hcc-binary> <hcc-helper-binary> <hcc-guest-binary> <assets-dir> <target>
 #
 # <assets-dir> holds firecracker, jailer, vmlinux and
-# alpine-minirootfs.tar.gz, checksum-verified by hack/firecracker-poc/run.sh.
+# alpine-minirootfs.tar.gz. Missing pinned assets are fetched and verified.
 # <target> is this runner's name as harnesses address it, e.g.
 # server:hcc-dev.
 #
@@ -30,6 +30,54 @@ IMAGES=$LIB/images
 
 [[ $TARGET =~ ^server:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { echo "invalid target: $TARGET" >&2; exit 1; }
 [[ $(id -u) -ne 0 ]] || { echo "run as an admin user with sudo, not as root" >&2; exit 1; }
+
+# Installed from the Control Center with the user's sudo password: sudo
+# remembers a password per terminal, or without one per calling process,
+# so it would not reach this script's own sudo calls. The Control Center
+# then sets SUDO_ASKPASS to a helper that hands sudo the password, and
+# every sudo here asks it (-A).
+if [[ -n ${SUDO_ASKPASS:-} ]]; then
+	sudo() { command sudo -A "$@"; }
+fi
+
+# Pinned runner assets. When they are missing (the usual web-UI install),
+# fetch and verify them here; when install-runner.sh is called by
+# hack/firecracker-poc/run.sh, its already checked files are reused.
+FC_VERSION="v1.17.0"
+FC_SHA256="06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558"
+KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261023-dd7c24b0d165-0/x86_64/vmlinux-6.1.188"
+KERNEL_SHA256="fc7a33d23a629d64db61ddf12789c737c12edb1702a5ce9d5546b95ca21dc6ca"
+ALPINE_VERSION="3.24.3"
+ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz"
+ALPINE_SHA256="f8e1cafba9b1b283b5d30d06f9885c8d2bc161ffe9083ade8e2e157813a53407"
+
+fetch_asset() { # url sha256 dest
+	local url=$1 sum=$2 dest=$3
+	if [[ -f $dest ]] && echo "$sum  $dest" | sha256sum -c --quiet - 2>/dev/null; then
+		return 0
+	fi
+	echo "== fetching $(basename "$dest")"
+	curl -fsSL --proto '=https' --tlsv1.2 -o "$dest.part" "$url"
+	echo "$sum  $dest.part" | sha256sum -c --quiet - || { echo "CHECKSUM MISMATCH for $url" >&2; rm -f "$dest.part"; exit 1; }
+	mv "$dest.part" "$dest"
+}
+
+[[ $(uname -m) == x86_64 ]] || { echo "runner installation currently supports Linux x86_64 hosts, not $(uname -m)" >&2; exit 1; }
+for tool in curl sha256sum tar; do
+	command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 1; }
+done
+mkdir -p "$ASSETS"
+if [[ ! -x $ASSETS/firecracker || ! -x $ASSETS/jailer ]]; then
+	fetch_asset "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz" \
+		"$FC_SHA256" "$ASSETS/firecracker-${FC_VERSION}.tgz"
+	tar -xzf "$ASSETS/firecracker-${FC_VERSION}.tgz" -C "$ASSETS"
+	install -m 0755 "$ASSETS/release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" "$ASSETS/firecracker"
+	install -m 0755 "$ASSETS/release-${FC_VERSION}-x86_64/jailer-${FC_VERSION}-x86_64" "$ASSETS/jailer"
+	rm -rf "$ASSETS/release-${FC_VERSION}-x86_64"
+fi
+fetch_asset "$KERNEL_URL" "$KERNEL_SHA256" "$ASSETS/vmlinux"
+fetch_asset "$ALPINE_URL" "$ALPINE_SHA256" "$ASSETS/alpine-minirootfs.tar.gz"
+
 for p in $TOOLS; do
 	[[ $p =~ ^[a-z0-9][a-z0-9._+-]{0,127}$ ]] || { echo "invalid tool package name: $p" >&2; exit 1; }
 done
