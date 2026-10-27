@@ -99,6 +99,28 @@ func (c *Config) Runner(name string) (RunnerRef, bool) {
 	return c.Runners[i], true
 }
 
+// LocalRunnerName is what the Control Center calls the runner on this Mac.
+const LocalRunnerName = "local"
+
+// WithLocalRunner returns c with the local runner (on socket) added,
+// unless a runner already uses that socket. It fails if the name is taken
+// by another runner. added says whether c changed.
+func (c *Config) WithLocalRunner(socket string) (next *Config, added bool, err error) {
+	for _, r := range c.Runners {
+		if r.Socket == socket {
+			return c, false, nil
+		}
+	}
+	if _, taken := c.Runner(LocalRunnerName); taken {
+		return c, false, fmt.Errorf("a runner called %s exists already; rename it to add this Mac's runner", LocalRunnerName)
+	}
+	next = &Config{Runners: append(append([]RunnerRef(nil), c.Runners...), RunnerRef{Name: LocalRunnerName, Socket: socket})}
+	if err := next.Validate(); err != nil {
+		return c, false, err
+	}
+	return next, true, nil
+}
+
 // DefaultDir is where the Control Center keeps its files:
 // <user config dir>/hcc (e.g. ~/.config/hcc).
 func DefaultDir() (string, error) {

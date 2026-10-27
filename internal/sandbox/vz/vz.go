@@ -376,6 +376,68 @@ func (p *Provider) stage(dir string, spec *sandbox.Spec, img Image) (MachineConf
 	return mc, nil
 }
 
+// Utility is a VM outside of any sandbox run: a setup task of the local
+// runner (internal/local), booted from one of our own images with drives
+// the caller prepared, no network and no vsock.
+type Utility struct {
+	Kernel string
+	// Disks in the order the guest sees them; the first is the root file
+	// system (read-only).
+	Disks     []Disk
+	BootArgs  []string
+	CPUs      int
+	MemoryMiB int
+	Timeout   time.Duration
+	Console   io.Writer
+	// NewMachine defaults to the Virtualization framework.
+	NewMachine func(MachineConfig) (Machine, error)
+}
+
+// RunUtility boots u and waits until the guest shuts itself down; after
+// u.Timeout or when ctx ends, it stops the VM and fails.
+func RunUtility(ctx context.Context, u Utility) error {
+	if len(u.Disks) == 0 || !u.Disks[0].ReadOnly {
+		return errors.New("vz: a utility VM needs a read-only root drive")
+	}
+	if u.Timeout <= 0 {
+		return errors.New("vz: a utility VM needs a timeout")
+	}
+	newM := u.NewMachine
+	if newM == nil {
+		newM = newMachine
+	}
+	m, err := newM(MachineConfig{
+		Kernel: u.Kernel, CmdLine: strings.Join(append(append([]string{}, baseBootArgs...), u.BootArgs...), " "),
+		CPUs: u.CPUs, MemoryMiB: u.MemoryMiB, Disks: u.Disks, Console: u.Console,
+	})
+	if err != nil {
+		return fmt.Errorf("vz: %w", err)
+	}
+	if err := m.Start(); err != nil {
+		return fmt.Errorf("vz: start: %w", err)
+	}
+	runCtx, cancel := context.WithTimeout(ctx, u.Timeout)
+	defer cancel()
+	select {
+	case <-m.Done():
+		if err := m.Err(); err != nil {
+			return fmt.Errorf("vz: vm: %w", err)
+		}
+		return nil
+	case <-runCtx.Done():
+	}
+	serr := m.Stop()
+	select {
+	case <-m.Done():
+	case <-time.After(DefaultStopGrace):
+		return errors.Join(errors.New("vz: the VM did not stop"), serr)
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return errors.New("vz: the VM did not finish in time")
+}
+
 // Recover removes what runs of a previous runner process left behind.
 // Their VMs ended with that process (they belong to it), so only the
 // staging directories remain.
