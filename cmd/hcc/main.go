@@ -54,7 +54,10 @@ Runner:
   runner serve --config <file>   run the runner daemon
   runner stdio [--socket path]   relay stdin/stdout to the daemon (used over ssh)
 
-Agents on this Mac:
+Agents on this Mac (Apple Silicon):
+  local up [--from dir]    set up and start the runner here: VM images, Claude Code, settings, background service
+  local status             what is set up and whether the runner answers
+  local down               stop the runner (it no longer starts at login)
   local images             the VM images this release downloads, with their checksums
 
   version                  print version information

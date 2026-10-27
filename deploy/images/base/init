@@ -26,6 +26,24 @@ case " $(cat /proc/cmdline) " in
 	mkfifo /tmp/out/fifo
 	hcc_save_results /tmp/out
 	;;
+*" hcc.mode=install-claude "*)
+	# Local setup on a Mac (internal/local): Claude Code is not in the
+	# release images, so hcc fetched its npm package (and checked it) onto
+	# vdb, hcc.size bytes long, and this adds the binary to the claude-code
+	# image on vdc. No network; nothing runs but this.
+	size=$(hcc_arg hcc.size)
+	case "$size" in '' | *[!0-9]*) echo "HCC-INSTALL-ERROR invalid size"; hcc_shutdown ;; esac
+	if mount -t ext4 /dev/vdc /mnt &&
+		head -c "$size" /dev/vdb | tar -xzO package/claude >/mnt/usr/local/bin/claude &&
+		chmod 0755 /mnt/usr/local/bin/claude &&
+		mount -t tmpfs tmpfs /mnt/tmp && mount -t proc proc /mnt/proc && mount --bind /dev /mnt/dev &&
+		v=$(HOME=/tmp chroot /mnt /usr/local/bin/claude --version 2>&1); then
+		v=$(echo "$v" | head -n 1)
+		umount /mnt/dev /mnt/proc /mnt/tmp && umount /mnt && echo "HCC-INSTALL-OK $v"
+	else
+		echo "HCC-INSTALL-ERROR could not add Claude Code to the image"
+	fi
+	;;
 esac
 echo "HCC-GUEST-DONE no agent runtime in this image; shutting down"
 hcc_shutdown

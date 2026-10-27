@@ -80,6 +80,30 @@ stay the same; only the provider differs.
   Gatekeeper warning for files downloaded with a browser) can come
   later. Homebrew and command-line downloads are not affected.
 
+### Setup
+
+`hcc local up` (and the Control Center's button for it) sets the
+runner up with nothing but `hcc` itself, step by step, and only does
+what is not done yet:
+
+1. It downloads the release's images over https and checks each against
+   the checksums inside `hcc`. A download that does not match is deleted,
+   never used. Images are unpacked as sparse files.
+2. It fetches Claude Code from the npm registry and checks it against its
+   pinned integrity value. Then it boots a **setup VM** from the `base`
+   image: no network, the base image read-only as root, the package
+   read-only, and a fresh copy of the `claude-code` image writable. That
+   VM copies the binary in and checks that it runs. macOS cannot write
+   ext4 itself, and this way no Docker and no privileges are needed. The
+   finished image replaces the old one in one rename.
+3. It writes `runner.yaml` (owner-only) unless one exists: the user's
+   settings win.
+4. It installs the runner as a launchd agent of the user's: it starts at
+   login and again after a crash, as the user, never as root, and its log
+   is in the same directory. `hcc local down` removes it.
+5. It waits until the runner answers, then adds it to the Control Center
+   as `local`.
+
 ### A model on the runner's own machine
 
 The egress proxy refuses every address of the runner's own machine, so

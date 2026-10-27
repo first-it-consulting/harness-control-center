@@ -58,14 +58,24 @@ Risk: high
 On an Apple Silicon Mac, agents run locally in VMs of Apple's own
 Virtualization framework: no server, no root rights, and the agent's VM
 has no network device at all (see [ADR-0016](docs/adr/0016-macos-sandbox.md)).
-A one-command setup is coming; until then, with Go and Docker:
+One command sets everything up:
 
 ```sh
-hack/vz/build-images.sh            # the guest kernel and images, built in Docker
-make build                         # bin/hcc, signed to use the Virtualization framework
-cp deploy/runner-macos.example.yaml ~/Library/Application\ Support/hcc/local/runner.yaml   # then edit it
-bin/hcc runner serve --config ~/Library/Application\ Support/hcc/local/runner.yaml
+hcc local up       # VM images, Claude Code, settings, and the runner as a background service
+hcc local status   # what is set up, and whether the runner answers
+hcc local down     # stop it (it no longer starts at login)
 ```
+
+`hcc local up` downloads this release's VM images and checks each one
+against the checksums built into `hcc`. Claude Code isn't part of our
+release, so it is fetched from npm and checked against a pinned integrity
+value. A short VM adds it to the image. The runner then runs as you, in
+the background, and the Control Center lists it as `local`. Running the
+command again only fetches what changed.
+
+Developers can build the images themselves (Go and Docker):
+`hack/vz/build-images.sh`, then `make build` (which signs `bin/hcc` to use
+the Virtualization framework) and `bin/hcc local up`.
 
 Harnesses for this runner use `target: local`. A model server on the same
 Mac (oMLX, Ollama, LM Studio) is reachable as the harness's model endpoint
