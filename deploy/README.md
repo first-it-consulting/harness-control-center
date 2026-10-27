@@ -37,6 +37,17 @@ hcc run --ssh <host> my-harness.yaml
 Secrets live on the runner host and never enter a sandbox; the egress
 proxy adds them to requests for their hosts (ADR-0005).
 
+The Control Center's **Credentials** page does this for you (ADR-0017).
+On the runner host itself, `hcc credentials` does the same; the
+credential, secret included, is read as JSON on stdin:
+
+```sh
+sudo hcc credentials set <<<'{"name":"anthropic","hosts":["api.anthropic.com"],"header":"x-api-key","secret":"sk-ant-..."}'
+sudo hcc credentials list
+```
+
+Or by hand:
+
 ```sh
 # on the runner host
 sudo install -o root -g hcc-runner -m 0640 /dev/stdin /etc/hcc/secrets/anthropic <<<"sk-ant-..."

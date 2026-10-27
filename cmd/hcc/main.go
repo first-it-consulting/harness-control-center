@@ -53,6 +53,8 @@ Control Center:
 Runner:
   runner serve --config <file>   run the runner daemon
   runner stdio [--socket path]   relay stdin/stdout to the daemon (used over ssh)
+  credentials list|set|remove [--config file]   edit the runner's credential store (as its owner,
+                                 e.g. with sudo; set reads the credential as JSON on stdin)
 
 Agents on this Mac (Apple Silicon):
   local up [--from dir]    set up and start the runner here: VM images, Claude Code, settings, background service
@@ -94,6 +96,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdRunner(rest, stdin, stdout, stderr)
 	case "local":
 		return cmdLocal(rest, stdout, stderr)
+	case "credentials":
+		return cmdCredentials(rest, stdin, stdout, stderr)
 	case "control":
 		return cmdControl(rest, stdin, stdout, stderr)
 	case "version", "--version":
