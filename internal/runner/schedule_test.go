@@ -97,10 +97,15 @@ func scheduleDoc(trigger string) []byte {
 	return []byte(baseHarness + "  trigger: " + trigger + "\n")
 }
 
-// at moves the clock and starts whatever is due (here, or in the
-// background scheduler, which may win the race).
+// at moves the clock and starts whatever is due (see fire).
 func (e *schedEnv) at(when string) {
 	e.clock.set(when)
+	e.fire()
+}
+
+// fire starts whatever is due, here or in the background scheduler
+// (which may win the race), and waits until the start is recorded.
+func (e *schedEnv) fire() {
 	e.r.fireDue()
 	e.settle()
 }
@@ -181,7 +186,7 @@ func TestCronScheduleRunsAndNeverOverlaps(t *testing.T) {
 	if j, _ := e.r.Get(first); j.Schedule != s.ID {
 		t.Errorf("job not linked to its schedule: %+v", j)
 	}
-	e.r.fireDue() // the same due time again: no second start
+	e.fire() // the same due time again: no second start
 	waitState(t, e.r, first, StateRunning)
 	e.at("2026-10-25 12:00")
 	s = e.sched(s.ID)
@@ -202,7 +207,7 @@ func TestLoopRunsUntilMaxIterations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.r.fireDue() // the first run is due at once
+	e.fire() // the first run is due at once
 	for i := 1; i <= 3; i++ {
 		s = e.sched(s.ID)
 		if s.Runs != i {
@@ -233,7 +238,7 @@ func TestLoopStopsOnFailureOrDone(t *testing.T) {
 	e := defaultSchedEnv(t)
 	e.p.err = errors.New("boom")
 	s, _ := e.r.AddSchedule(scheduleDoc("{loop: {maxIterations: 5}}"))
-	e.r.fireDue()
+	e.fire()
 	e.waitJobEnd(e.sched(s.ID).LastJob)
 	if s = e.sched(s.ID); s.State != ScheduleFinished || !strings.Contains(s.Message, "ended failed") || s.Runs != 1 {
 		t.Errorf("after a failed run: %+v", s)
@@ -242,7 +247,7 @@ func TestLoopStopsOnFailureOrDone(t *testing.T) {
 	e2 := defaultSchedEnv(t)
 	e2.p.console = "agent output\n" + LoopDoneMarker + "\nHCC-RESULT-END exit=0\n"
 	s, _ = e2.r.AddSchedule(scheduleDoc("{loop: {maxIterations: 5}}"))
-	e2.r.fireDue()
+	e2.fire()
 	j := e2.waitJobEnd(e2.sched(s.ID).LastJob)
 	if s = e2.sched(s.ID); s.State != ScheduleFinished || !strings.Contains(s.Message, "done") || !j.LoopDone {
 		t.Errorf("after a done run: %+v (job %+v)", s, j)
@@ -259,7 +264,7 @@ func TestLoopDoneCannotBeFaked(t *testing.T) {
 		e := defaultSchedEnv(t)
 		e.p.console = console
 		s, _ := e.r.AddSchedule(scheduleDoc("{loop: {maxIterations: 1}}"))
-		e.r.fireDue()
+		e.fire()
 		if j := e.waitJobEnd(e.sched(s.ID).LastJob); j.LoopDone {
 			t.Errorf("%s: counted as done", name)
 		}
@@ -308,7 +313,7 @@ func TestSchedulesSurviveRestartWithoutCatchUp(t *testing.T) {
 	cronS, _ := e.r.AddSchedule(scheduleDoc("{schedule: '0 * * * *'}"))
 	e.p.block = true
 	loopS, _ := e.r.AddSchedule(scheduleDoc("{loop: {maxIterations: 5}}"))
-	e.r.fireDue()
+	e.fire()
 	waitState(t, e.r, e.sched(loopS.ID).LastJob, StateRunning)
 	// The runner dies with the loop's run going; it comes back hours later.
 	stored := newMemStore()
@@ -327,7 +332,7 @@ func TestSchedulesSurviveRestartWithoutCatchUp(t *testing.T) {
 	if c.State != ScheduleActive || !c.NextRun.Equal(time.Date(2026, 10, 25, 16, 0, 0, 0, time.UTC)) {
 		t.Errorf("cron after restart = %+v (want the next hour, no catch-up)", c)
 	}
-	e2.r.fireDue()
+	e2.fire()
 	if len(e2.r.List()) != 1 { // only the interrupted loop run, marked failed
 		t.Errorf("jobs right after restart: %v", e2.r.List())
 	}
