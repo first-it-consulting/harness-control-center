@@ -1,6 +1,7 @@
 // Harness Control Center UI.
 
 import { dashboardView } from "./dashboard.js";
+import { localPanel } from "./local.js";
 //
 // Everything shown here may come from an agent (job errors, console
 // output, file names), so the DOM is only ever built with textContent and
@@ -187,7 +188,7 @@ function route() {
     a.classList.toggle("active", a.dataset.nav === (parts[0] || "dashboard"));
   }
   const routes = {
-    dashboard: () => dashboardView({ h, api, set, show, every, fail, badge, fmtTime, fmtDuration }),
+    dashboard: () => dashboardView({ h, api, set, show, every, fail, say, badge, fmtTime, fmtDuration, localPanel }),
     jobs: () => jobsView(),
     job: () => jobView(parts[1], parts[2]),
     harnesses: () => harnessesView(),
@@ -654,6 +655,7 @@ async function runnersView() {
   show(
     h("div", { class: "head" }, h("div", {}, h("h1", {}, "Runners"),
       h("p", { class: "muted" }, "Machines that run harnesses. Runners enforce every limit themselves; this list only says how to reach them."))),
+    localPanel({ h, api, set, fail, say }),
     list,
     h("h2", {}, "Add a runner"),
     h("p", { class: "muted" }, "The runner must already be installed (see deploy/README.md). Over ssh, your own ssh configuration and keys are used."),

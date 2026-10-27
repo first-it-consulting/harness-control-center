@@ -103,7 +103,7 @@ function bucketLabel(b, range) {
 }
 
 export async function dashboardView(ui) {
-  const { h, api, set, show, every, fail, badge, fmtTime, fmtDuration } = ui;
+  const { h, api, set, show, every, fail, badge, fmtTime, fmtDuration, localPanel } = ui;
   const prefs = loadPrefs();
   let range = RANGES.find((r) => r.id === prefs.range) || RANGES[0];
   let runnerFilter = prefs.runner || "";
@@ -125,6 +125,8 @@ export async function dashboardView(ui) {
   show(
     h("div", { class: "head" }, h("div", {}, h("h1", {}, "Dashboard"),
       h("p", { class: "muted" }, "What needs you, what runs now, and how jobs went. Updated every 15 seconds, from what the runners keep (up to 30 days)."))),
+    // Until this Mac runs agents, offer to set it up.
+    localPanel(ui, true),
     h("div", { class: "filters" }, h("div", { class: "segmented", role: "group", "aria-label": "Time range" }, ...rangeButtons), runnerSelect),
     body);
 
