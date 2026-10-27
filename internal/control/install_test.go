@@ -171,7 +171,8 @@ func TestRunnerInstallValidationAndFailure(t *testing.T) {
 	}
 
 	fake := &fakeInstallCommands{failOn: "go"}
-	ts.s.installs.findSource = func() (string, error) { return t.TempDir(), nil }
+	src := t.TempDir() // not in the callback: it runs in the background
+	ts.s.installs.findSource = func() (string, error) { return src, nil }
 	ts.s.installs.runCommand = fake.run
 	if code := ts.do(http.MethodPost, "/api/runners/ssh-runner/install", map[string]any{"confirmed": true}, &out); code != http.StatusAccepted {
 		t.Fatalf("start: %d %v", code, out)
@@ -184,6 +185,7 @@ func TestRunnerInstallValidationAndFailure(t *testing.T) {
 	if code := ts.do(http.MethodPost, "/api/runners/ssh-runner/install", map[string]any{"confirmed": true}, &out); code != http.StatusAccepted {
 		t.Fatalf("after failure, a retry must be possible: %d %v", code, out)
 	}
+	waitRunnerInstall(t, ts, "ssh-runner") // nothing may run on after the test
 }
 
 func TestRunnerInstallOnlyOverSSH(t *testing.T) {
@@ -199,7 +201,8 @@ func TestRunnerInstallOnlyOverSSH(t *testing.T) {
 func TestRunnerInstallPasswordIsCleared(t *testing.T) {
 	release := make(chan struct{})
 	inst := newRunnerInstaller()
-	inst.findSource = func() (string, error) { return t.TempDir(), nil }
+	src := t.TempDir()
+	inst.findSource = func() (string, error) { return src, nil }
 	inst.runCommand = func(_ context.Context, _, name string, args, _ []string, _ []byte, out io.Writer) error {
 		if name == "ssh" && strings.Contains(strings.Join(args, " "), "mktemp") {
 			_, _ = fmt.Fprintln(out, fakeRemoteDir)
