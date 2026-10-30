@@ -45,6 +45,7 @@ var webFS embed.FS
 //	POST   /api/runners/{runner}/resume
 //	GET    /api/runners/{runner}/install         installation progress
 //	POST   /api/runners/{runner}/install         install or update the runner over ssh
+//	GET    /api/runner-version                   the version an install or update would put on a server
 //	POST   /api/kill                             kill switch on every runner
 //	GET    /api/jobs                             jobs of every runner
 //	GET    /api/runners/{runner}/jobs/{id}
@@ -104,6 +105,7 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{cfgPath: cfgPath, lib: NewLibrary(libDir), auth: newAuth(), log: log, cfg: cfg, clients: map[RunnerRef]*runnerd.Client{}, local: newLocalRunner(), installs: newRunnerInstaller()}
+	s.installs.activeJobs = s.activeJobs
 	if home, err := os.UserHomeDir(); err == nil {
 		s.sshConfig = filepath.Join(home, ".ssh", "config")
 	}
@@ -126,6 +128,7 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("POST /api/runners/{runner}/resume", s.resumeRunner)
 	mux.HandleFunc("GET /api/runners/{runner}/install", s.runnerInstallState)
 	mux.HandleFunc("POST /api/runners/{runner}/install", s.startRunnerInstall)
+	mux.HandleFunc("GET /api/runner-version", s.runnerVersion)
 	mux.HandleFunc("POST /api/kill", s.killAll)
 	mux.HandleFunc("GET /api/jobs", s.jobs)
 	mux.HandleFunc("GET /api/runners/{runner}/jobs/{id}", s.job)

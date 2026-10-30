@@ -25,6 +25,9 @@ import (
 const (
 	runnerInstallTimeout = 45 * time.Minute
 	maxInstallLogLines   = 300
+	// How long the version a checkout would install is remembered: the
+	// runners page asks every few seconds.
+	installVersionTTL = 30 * time.Second
 )
 
 var runnerTargetRe = regexp.MustCompile(`^server:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -41,9 +44,22 @@ type runnerInstaller struct {
 	mu     sync.Mutex
 	states map[string]*runnerInstallState
 
+	version     installVersion
+	versionTime time.Time
+
 	// Replaceable for tests.
 	findSource func() (string, error)
 	runCommand func(ctx context.Context, dir, name string, args, env []string, stdin []byte, out io.Writer) error
+	// activeJobs is how many jobs run or wait on a runner, or an error if
+	// it does not answer (then nothing runs that an install could stop).
+	activeJobs func(ctx context.Context, name string) (int, error)
+}
+
+// installVersion is what an install or update would put on a server.
+type installVersion struct {
+	Version string `json:"version,omitempty"`
+	// Error says why the Control Center cannot install runners.
+	Error string `json:"error,omitempty"`
 }
 
 func newRunnerInstaller() *runnerInstaller {
@@ -147,8 +163,8 @@ func (m *runnerInstaller) install(ref RunnerRef, st *runnerInstallState, passwor
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 
-	m.logf(st, "Building the Linux/amd64 runner binaries…")
-	ver, commit := m.gitOutput(ctx, root, "describe", "--tags", "--always", "--dirty"), m.gitOutput(ctx, root, "rev-parse", "--short", "HEAD")
+	ver, commit := m.gitOutput(ctx, root, describeArgs...), m.gitOutput(ctx, root, "rev-parse", "--short", "HEAD")
+	m.logf(st, "Building the Linux/amd64 runner binaries, version %s…", ver)
 	const versionPkg = "github.com/first-it-consulting/harness-control-center/internal/version"
 	for _, b := range []struct{ out, pkg, ldflags string }{
 		{"hcc-linux-amd64", "./cmd/hcc", "-s -w -X " + versionPkg + ".Version=" + ver + " -X " + versionPkg + ".Commit=" + commit},
@@ -208,8 +224,31 @@ chmod 0700 "$SUDO_ASKPASS"
 	if err := m.runCommand(ctx, root, "ssh", []string{"-T", "-o", "BatchMode=yes", "--", ref.SSH, "sh -c '" + script + "'"}, nil, stdin, log); err != nil {
 		return fmt.Errorf("install on %s: %w", ref.SSH, err)
 	}
-	m.logf(st, "Runner installed. A new status check should reach it shortly.")
+	m.logf(st, "Runner %s installed. A new status check should reach it shortly.", ver)
 	return nil
+}
+
+// describeArgs is how a checkout's version is named, as the Makefile does.
+var describeArgs = []string{"describe", "--tags", "--always", "--dirty"}
+
+// available is the version an install would put on a server now.
+func (m *runnerInstaller) available(ctx context.Context) installVersion {
+	m.mu.Lock()
+	if !m.versionTime.IsZero() && time.Since(m.versionTime) < installVersionTTL {
+		defer m.mu.Unlock()
+		return m.version
+	}
+	m.mu.Unlock()
+	var v installVersion
+	if root, err := m.findSource(); err != nil {
+		v.Error = err.Error()
+	} else {
+		v.Version = m.gitOutput(ctx, root, describeArgs...)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.version, m.versionTime = v, time.Now()
+	return v
 }
 
 // gitOutput is one word of git's output in the checkout, or "unknown".
@@ -255,6 +294,15 @@ func (s *Server) startRunnerInstall(w http.ResponseWriter, r *http.Request) {
 		password = []byte(*req.SudoPassword)
 		*req.SudoPassword = ""
 	}
+	// An install restarts the runner, which would end its jobs.
+	ctx, cancel := context.WithTimeout(r.Context(), runnerTimeout)
+	n, err := s.installs.activeJobs(ctx, name)
+	cancel()
+	if err == nil && n > 0 {
+		clear(password)
+		writeError(w, http.StatusConflict, fmt.Errorf("%s has %d jobs running or queued: updating restarts it and would end them. Wait until they finish, or stop them first", name, n))
+		return
+	}
 	if err := s.installs.start(ref, req.Target, password); err != nil {
 		clear(password)
 		writeError(w, http.StatusBadRequest, err)
@@ -263,6 +311,23 @@ func (s *Server) startRunnerInstall(w http.ResponseWriter, r *http.Request) {
 	st, _ := s.installs.status(name)
 	s.log.Info("runner installation started", "runner", name, "target", st.Target)
 	writeJSON(w, http.StatusAccepted, st)
+}
+
+func (s *Server) runnerVersion(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.installs.available(r.Context()))
+}
+
+// activeJobs is how many jobs run or wait on the runner called name.
+func (s *Server) activeJobs(ctx context.Context, name string) (int, error) {
+	c, err := s.client(name)
+	if err != nil {
+		return 0, err
+	}
+	st, err := c.Info(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return st.Running + st.Queued, nil
 }
 
 func (s *Server) runnerInstallState(w http.ResponseWriter, r *http.Request) {

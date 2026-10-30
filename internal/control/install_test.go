@@ -152,6 +152,9 @@ func TestRunnerInstallThroughTheUI(t *testing.T) {
 	}
 }
 
+// unreachable is activeJobs for a runner that is not installed yet.
+func unreachable(context.Context, string) (int, error) { return 0, errors.New("connection refused") }
+
 func TestRunnerInstallValidationAndFailure(t *testing.T) {
 	ts := newTestServer(t)
 	var out map[string]any
@@ -280,5 +283,75 @@ func TestRunnerInstallRefusesAnOddRemoteDir(t *testing.T) {
 	ts.do(http.MethodPost, "/api/runners/agent/install", map[string]any{"confirmed": true}, &out)
 	if st := waitRunnerInstall(t, ts, "agent"); !strings.Contains(st.Error, "unexpected install directory") {
 		t.Errorf("state = %+v", st)
+	}
+}
+
+// An update restarts the runner, so it waits until no job runs there.
+func TestRunnerUpdateWaitsForJobs(t *testing.T) {
+	ts := newTestServer(t)
+	fake := &fakeInstallCommands{}
+	ts.s.installs.findSource = func() (string, error) { return "/src/hcc", nil }
+	ts.s.installs.runCommand = fake.run
+	jobs := 2
+	ts.s.installs.activeJobs = func(_ context.Context, name string) (int, error) {
+		if name != "agent" {
+			t.Errorf("asked %q", name)
+		}
+		return jobs, nil
+	}
+	var out map[string]any
+	ts.do(http.MethodPost, "/api/runners", RunnerRef{Name: "agent", SSH: "host"}, &out)
+	body := map[string]any{"target": "server:agent", "confirmed": true}
+	if code := ts.do(http.MethodPost, "/api/runners/agent/install", body, &out); code != http.StatusConflict || !strings.Contains(fmt.Sprint(out), "2 jobs") {
+		t.Fatalf("with jobs: %d %v", code, out)
+	}
+	if got := fake.all(); len(got) != 0 {
+		t.Fatalf("ran with jobs on the runner: %v", got)
+	}
+	if _, ok := ts.s.installs.status("agent"); ok {
+		t.Error("a refused update has a state")
+	}
+	jobs = 0
+	if code := ts.do(http.MethodPost, "/api/runners/agent/install", body, &out); code != http.StatusAccepted {
+		t.Fatalf("idle: %d %v", code, out)
+	}
+	if st := waitRunnerInstall(t, ts, "agent"); st.Error != "" || !strings.Contains(strings.Join(st.Log, "\n"), "v0.1.1-3-gabcdef0") {
+		t.Errorf("state = %+v", st)
+	}
+}
+
+func TestRunnerVersion(t *testing.T) {
+	ts := newTestServer(t)
+	fake := &fakeInstallCommands{}
+	ts.s.installs.findSource = func() (string, error) { return "/src/hcc", nil }
+	ts.s.installs.runCommand = fake.run
+	for range 2 {
+		var v installVersion
+		if code := ts.do(http.MethodGet, "/api/runner-version", nil, &v); code != http.StatusOK || v.Version != "v0.1.1-3-gabcdef0" || v.Error != "" {
+			t.Fatalf("version: %d %+v", code, v)
+		}
+	}
+	if n := len(fake.all()); n != 1 {
+		t.Errorf("git ran %d times; the version is remembered", n)
+	}
+
+	ts = newTestServer(t)
+	ts.s.installs.findSource = func() (string, error) { return "", errors.New("needs the hcc source checkout") }
+	var v installVersion
+	if ts.do(http.MethodGet, "/api/runner-version", nil, &v); v.Version != "" || !strings.Contains(v.Error, "source checkout") {
+		t.Errorf("without a checkout: %+v", v)
+	}
+}
+
+func TestActiveJobs(t *testing.T) {
+	ts := newTestServer(t)
+	sock := startRunner(t)
+	var out map[string]any
+	ts.do(http.MethodPost, "/api/runners", RunnerRef{Name: "r", Socket: sock}, &out)
+	if n, err := ts.s.activeJobs(context.Background(), "r"); n != 0 || err != nil {
+		t.Errorf("idle runner: %d %v", n, err)
+	}
+	if _, err := ts.s.activeJobs(context.Background(), "missing"); err == nil {
+		t.Error("an unknown runner has jobs")
 	}
 }

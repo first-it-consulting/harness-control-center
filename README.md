@@ -107,7 +107,8 @@ hcc control serve
 
 It prints a link; open it in your browser. Add your server under
 **Runners** (its ssh host); if it has no runner yet, its card offers
-**Install Runner**. Write or paste a harness under **Harnesses**,
+**Install Runner**, and **Update runner** when a newer version is
+available. Write or paste a harness under **Harnesses**,
 read what it may do, and start it. **Jobs** shows every run with its
 console, usage and results; **Stop everything** is the kill switch for all
 runners. The UI listens on this computer only; see
