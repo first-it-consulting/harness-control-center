@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.2](https://github.com/first-it-consulting/harness-control-center/compare/v0.1.1...v0.1.2) (2026-10-30)
+
+
+### Features
+
+* **web:** install a runner on a server from the Control Center ([#11](https://github.com/first-it-consulting/harness-control-center/issues/11)) ([9d3ce9c](https://github.com/first-it-consulting/harness-control-center/commit/9d3ce9c14d9e73a16201cbdc45ad255e32c5ac26))
+* **web:** update a runner from the Control Center ([#14](https://github.com/first-it-consulting/harness-control-center/issues/14)) ([e69db09](https://github.com/first-it-consulting/harness-control-center/commit/e69db095062d4cc6767efde2f0a8a5c50c41f9a9))
+
+
+### Bug Fixes
+
+* **runner:** store small results on a nearly full runner ([#13](https://github.com/first-it-consulting/harness-control-center/issues/13)) ([5d5ecef](https://github.com/first-it-consulting/harness-control-center/commit/5d5ecefa6f1b0278b1758bbf90f3dd3eaa8ff94d))
+
 ## [0.1.1](https://github.com/first-it-consulting/harness-control-center/compare/v0.1.0...v0.1.1) (2026-10-27)
 
 
