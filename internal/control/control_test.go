@@ -51,6 +51,8 @@ func newTestServer(t *testing.T) *testServer {
 		t.Fatal(err)
 	}
 	s.auth.setHosts([]string{host, "localhost:7878"})
+	// Tests' ssh runners must never be dialed for real.
+	s.installs.activeJobs = unreachable
 	ts := &testServer{t: t, s: s, dir: dir}
 	rec := ts.raw(http.MethodGet, "/login?token="+s.auth.loginToken, "", nil)
 	loc := rec.Header().Get("Location")

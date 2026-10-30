@@ -5,8 +5,12 @@ FUZZTIME ?= 30s
 
 all: check build
 
+# A checkout's version, as the Control Center's runner installer names it.
+VERSION_PKG = github.com/first-it-consulting/harness-control-center/internal/version
+VERSION_FLAGS = -X $(VERSION_PKG).Version=$$(git describe --tags --always --dirty) -X $(VERSION_PKG).Commit=$$(git rev-parse --short HEAD)
+
 build:
-	$(GO) build -trimpath -o bin/hcc ./cmd/hcc
+	$(GO) build -trimpath -ldflags "$(VERSION_FLAGS)" -o bin/hcc ./cmd/hcc
 ifeq ($(shell uname -s),Darwin)
 	# Ad-hoc signature with the virtualization entitlement (ADR-0016).
 	codesign --force --sign - --entitlements hack/vz/entitlements.plist bin/hcc
@@ -61,11 +65,10 @@ E2E_HOST   ?=
 E2E_ASSETS ?= ~/.cache/hcc-poc
 HOST       ?= $(E2E_HOST)
 TARGET     ?=
-VERSION_PKG = github.com/first-it-consulting/harness-control-center/internal/version
 deploy-runner:
 	@test -n "$(HOST)" -a -n "$(TARGET)" || { echo "set HOST and TARGET"; exit 1; }
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) build -trimpath \
-		-ldflags "-s -w -X $(VERSION_PKG).Version=$$(git describe --tags --always --dirty) -X $(VERSION_PKG).Commit=$$(git rev-parse --short HEAD)" \
+		-ldflags "-s -w $(VERSION_FLAGS)" \
 		-o bin/hcc-linux-amd64 ./cmd/hcc
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o bin/hcc-helper-linux-amd64 ./cmd/hcc-helper
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o bin/hcc-guest-linux-amd64 ./cmd/hcc-guest

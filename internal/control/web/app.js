@@ -660,7 +660,7 @@ async function runnersView() {
     localPanel({ h, api, set, fail, say }),
     list,
     h("h2", {}, "Add a runner"),
-    h("p", { class: "muted" }, "Over ssh, your own ssh configuration and keys are used. If a server is unreachable, its card can install the runner for you."),
+    h("p", { class: "muted" }, "Over ssh, your own ssh configuration and keys are used. If a server is unreachable, its card can install the runner for you, and when a newer version is available, update it."),
     form);
   // Every card shows at once and fills in when its runner answers, so a
   // slow or unreachable runner holds up only its own card.
@@ -685,6 +685,7 @@ async function runnersView() {
   const load = async () => {
     let runners;
     try {
+      installable = await api("GET", "/api/runner-version").catch(() => null);
       runners = await api("GET", "/api/runners?status=false");
     } catch (err) {
       fail(err);
@@ -713,9 +714,20 @@ async function runnersView() {
   every(5000, load);
 }
 
+// installable is the version an install or update would put on a server
+// ({version} or {error}), as the runners page last asked.
+let installable = null;
+
+// updateTo is the version r's runner can be updated to, if it runs another.
+function updateTo(r) {
+  const v = installable && installable.version;
+  return r.ssh && r.status && v && v !== "unknown" && r.status.version !== v ? v : "";
+}
+
 // runnerCard shows a runner; pending while it has not answered yet.
 function runnerCard(r, pending) {
   const st = r.status;
+  const update = updateTo(r);
   const path = "/api/runners/" + encodeURIComponent(r.name);
   const act = (what, msg) => async () => {
     try {
@@ -741,12 +753,13 @@ function runnerCard(r, pending) {
       h("dt", {}, "Images"), h("dd", {}, st.images.join(", ")),
       h("dt", {}, "Tools"), h("dd", {}, Object.keys(st.tools || {}).length === 0 ? "none" : Object.entries(st.tools).map(([img, list]) =>
         h("div", {}, h("span", { class: "muted" }, img), h("ul", { class: "chips" }, list.map((t) => h("li", {}, t)))))),
-      h("dt", {}, "Version"), h("dd", {}, st.version || "–")),
+      h("dt", {}, "Version"), h("dd", {}, st.version || "–", update && h("span", { class: "muted note" }, "Version " + update + " is available."))),
     r.error && h("div", { class: "error-box" }, r.error),
     h("div", { class: "actions" },
       st && !st.killed && h("button", { class: "danger", onclick: act("kill", "Stopping every job on " + r.name + ".") }, "Stop all jobs"),
       st && st.killed && h("button", { onclick: act("resume", r.name + " accepts jobs again. Its schedules stay paused until you resume them.") }, "Accept jobs again"),
       r.ssh && !pending && !st && h("button", { class: "primary", onclick: () => installRunner(r) }, "Install Runner"),
+      update && h("button", { class: "primary", onclick: () => installRunner(r, update) }, "Update runner"),
       h("button", { onclick: () => editRunner(r) }, "Edit"),
       h("button", { onclick: async () => {
         if (!confirm("Remove " + r.name + " from this list? The runner itself keeps running.")) return;
@@ -760,12 +773,15 @@ function runnerCard(r, pending) {
 }
 
 // installRunner asks before making system changes on an ssh host, then
-// follows the installer's progress without blocking the page.
-function installRunner(r) {
-  const target = h("input", { required: true, pattern: "server:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", value: "server:" + r.name, autocomplete: "off" });
+// follows the installer's progress without blocking the page. With
+// version, it updates the runner that answers there, keeping its target.
+function installRunner(r, version) {
+  const st = version ? r.status : null;
+  const target = h("input", { required: true, pattern: "server:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", value: st ? st.target : "server:" + r.name, autocomplete: "off", readonly: !!st });
   const password = h("input", { type: "password", autocomplete: "off", placeholder: "only if sudo asks for one" });
   const confirmBox = h("input", { type: "checkbox" });
-  const start = h("button", { class: "primary", disabled: true }, "Install Runner");
+  const verb = st ? "Update" : "Install";
+  const start = h("button", { class: "primary", disabled: true }, st ? "Update runner" : "Install Runner");
   const problem = h("div");
   const log = h("pre", { class: "console", hidden: true });
   let timer = null;
@@ -805,8 +821,8 @@ function installRunner(r) {
       return;
     }
     succeeded = true;
-    say("Installed the runner on " + r.ssh + ".");
-    set(problem, h("div", { class: "warn-box" }, "Installed. Close this window to refresh the runner card."));
+    say(verb + "d the runner on " + r.ssh + ".");
+    set(problem, h("div", { class: "warn-box" }, verb + "d. Close this window to refresh the runner card."));
   };
 
   const form = h("form", { method: "dialog", onsubmit: async (ev) => {
@@ -826,13 +842,18 @@ function installRunner(r) {
       set(problem, h("div", { class: "error-box" }, err.message));
     }
   } },
-  h("h1", {}, "Install Runner on " + r.name),
-  h("p", {}, "This installs the Linux x86_64 runner on ", h("code", {}, r.ssh), ": it creates the unprivileged hcc-runner user, grants it one sudo rule for hcc-helper, builds the VM images, and starts its systemd service."),
+  h("h1", {}, verb + " runner on " + r.name),
+  st
+    ? h("p", {}, "This updates the runner on ", h("code", {}, r.ssh), " from " + (st.version || "an unknown version") + " to " + version +
+      ": it replaces its programs, rebuilds the VM images if they changed, and restarts its service. Its credentials stay; its runner settings are written anew.")
+    : h("p", {}, "This installs the Linux x86_64 runner on ", h("code", {}, r.ssh), ": it creates the unprivileged hcc-runner user, grants it one sudo rule for hcc-helper, builds the VM images, and starts its systemd service."),
+  st && st.running + st.queued > 0 && h("div", { class: "warn-box" },
+    "Jobs are running or queued there. Restarting would end them, so the update waits until they are done (or stopped)."),
   h("p", { class: "muted" }, "Your ssh keys are used. The sudo password, if needed, is sent once over that ssh connection and is not stored. This first installer needs the Control Center to be the bin/hcc of an hcc source checkout (or HCC_SOURCE_DIR set to one)."),
   h("div", { class: "form-stack" },
     h("label", {}, "Target name used by harnesses", target),
     h("label", {}, "Sudo password on " + r.ssh, password),
-    h("label", { class: "check" }, confirmBox, "I want to make these system changes on " + r.ssh + ".")),
+    h("label", { class: "check" }, confirmBox, "I want to " + verb.toLowerCase() + " the runner and make these system changes on " + r.ssh + ".")),
   problem,
   log,
   h("div", { class: "actions" }, start, h("button", { type: "button", onclick: () => dialog.close() }, "Close")));
