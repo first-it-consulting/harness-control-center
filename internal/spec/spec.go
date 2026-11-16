@@ -130,6 +130,16 @@ type Model struct {
 	// the runtime does not know (it then assumes one; Claude Code assumes
 	// 200k). Zero leaves it to the runtime.
 	ContextWindow int `yaml:"contextWindow,omitempty"`
+	// SmallModel is the model at the same endpoint the runtime uses for
+	// quick side tasks (Claude Code: summaries, titles); empty means Name.
+	SmallModel string `yaml:"smallModel,omitempty"`
+	// MaxOutputTokens bounds one answer of the model; zero leaves it to
+	// the runtime.
+	MaxOutputTokens int `yaml:"maxOutputTokens,omitempty"`
+	// ThinkingTokens is the budget for the model's extended thinking per
+	// answer; zero leaves it to the runtime (Claude Code: no thinking
+	// unless asked). It must be below MaxOutputTokens when both are set.
+	ThinkingTokens int `yaml:"thinkingTokens,omitempty"`
 }
 
 // EndpointHostPort returns the endpoint's host and port (default 443 for

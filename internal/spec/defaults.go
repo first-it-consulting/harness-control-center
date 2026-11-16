@@ -34,7 +34,12 @@ const (
 	// Bounds of spec.model.contextWindow, in tokens.
 	MinContextWindow = 8 * 1024
 	MaxContextWindow = 1_000_000
-	MaxA2AAgents     = 16
+	// Bounds of spec.model.maxOutputTokens and thinkingTokens, in tokens.
+	MinOutputTokens   = 1024
+	MaxOutputTokens   = 256 * 1024
+	MinThinkingTokens = 1024
+	MaxThinkingTokens = 256 * 1024
+	MaxA2AAgents      = 16
 )
 
 // ApplyDefaults fills omitted fields in place. It never widens a

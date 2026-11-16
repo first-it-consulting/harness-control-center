@@ -344,6 +344,13 @@ func TestModelEndpointMustBeAllowed(t *testing.T) {
 			t.Errorf("explanation missing %q:\n%s", want, explained)
 		}
 	}
+	params := mustEngine(t, strings.Replace(modelHarness, "    contextWindow: 262144\n", "    contextWindow: 262144\n    smallModel: qwen3-4b\n    maxOutputTokens: 32000\n    thinkingTokens: 16000\n", 1))
+	explained = strings.Join(params.Explain(), "\n")
+	for _, want := range []string{"Quick side tasks use qwen3-4b at the same endpoint", "at most 32,000 tokens long", "think for up to 16,000 tokens per answer"} {
+		if !strings.Contains(explained, want) {
+			t.Errorf("explanation missing %q:\n%s", want, explained)
+		}
+	}
 	notAllowed := strings.Replace(modelHarness, "ports: [4000]", "ports: [443]", 1)
 	h, err := spec.Parse([]byte(notAllowed))
 	if err != nil {

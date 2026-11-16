@@ -173,6 +173,19 @@ func validateModel(m *Model, p *Permissions, add addFunc) {
 	if w := m.ContextWindow; w != 0 && (w < MinContextWindow || w > MaxContextWindow) {
 		add("spec.model.contextWindow", "must be between %d and %d tokens", MinContextWindow, MaxContextWindow)
 	}
+	if m.SmallModel != "" && !modelNameRe.MatchString(m.SmallModel) {
+		add("spec.model.smallModel", "invalid model name %q", m.SmallModel)
+	}
+	if n := m.MaxOutputTokens; n != 0 && (n < MinOutputTokens || n > MaxOutputTokens) {
+		add("spec.model.maxOutputTokens", "must be between %d and %d tokens", MinOutputTokens, MaxOutputTokens)
+	}
+	if n := m.ThinkingTokens; n != 0 && (n < MinThinkingTokens || n > MaxThinkingTokens) {
+		add("spec.model.thinkingTokens", "must be between %d and %d tokens", MinThinkingTokens, MaxThinkingTokens)
+	}
+	// Thinking counts toward an answer's output.
+	if m.ThinkingTokens != 0 && m.MaxOutputTokens != 0 && m.ThinkingTokens >= m.MaxOutputTokens {
+		add("spec.model.thinkingTokens", "must be less than maxOutputTokens (%d)", m.MaxOutputTokens)
+	}
 }
 
 func validateMCP(m *MCP, p *Permissions, add addFunc) {
