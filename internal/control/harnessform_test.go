@@ -22,7 +22,7 @@ func TestFormRoundTripsTheExamples(t *testing.T) {
 		t.Fatalf("examples: %v %v", files, err)
 	}
 	for _, f := range files {
-		data, err := os.ReadFile(f) //nolint:gosec // test data
+		data, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
 		}
