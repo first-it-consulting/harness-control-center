@@ -725,6 +725,12 @@ function updateTo(r) {
   return r.ssh && r.status && v && v !== "unknown" && r.status.version !== v ? v : "";
 }
 
+// elapsed says how long ago an ISO time was, in minutes and seconds.
+function elapsed(since) {
+  const secs = Math.max(0, Math.round((Date.now() - new Date(since).getTime()) / 1000));
+  return secs < 60 ? secs + " s" : Math.floor(secs / 60) + " min " + (secs % 60) + " s";
+}
+
 // runnerCard shows a runner; pending while it has not answered yet.
 function runnerCard(r, pending) {
   const st = r.status;
@@ -742,9 +748,10 @@ function runnerCard(r, pending) {
   return h("div", { class: "card" },
     h("h3", {}, r.name, " ", r.installing ? badge(st ? "updating…" : "installing…", "queued")
       : pending ? badge("checking…", "queued") : st ? (st.killed ? badge("stopped", "killed") : badge("ready", "succeeded")) : badge("unreachable", "failed")),
-    r.installing && h("p", { class: "muted" }, st
-      ? "The runner is being updated. It restarts at the end; until then it may stop answering for a moment."
-      : "The runner is being installed. This takes several minutes (it builds the VM images)."),
+    r.installing && h("div", { class: "notice-box" },
+      h("p", {}, (st ? "Updating" : "Installing") + " for " + elapsed(r.installing.started) +
+        (st ? ". The runner restarts at the end." : ". Building the VM images can take several minutes.")),
+      r.installing.step && h("p", { class: "muted" }, "Now: " + r.installing.step)),
     h("p", { class: "muted" }, r.ssh ? "ssh " + r.ssh : r.socket),
     st && h("dl", { class: "facts" },
       h("dt", {}, "Target"), h("dd", {}, st.target),

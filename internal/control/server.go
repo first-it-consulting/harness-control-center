@@ -302,9 +302,9 @@ type RunnerView struct {
 	Status  *runner.Status       `json:"status,omitempty"`
 	Plugins []runnerd.PluginView `json:"plugins,omitempty"`
 	Error   string               `json:"error,omitempty"`
-	// Installing: this Control Center is installing or updating the
-	// runner right now (its card says so and follows the progress).
-	Installing bool `json:"installing,omitempty"`
+	// Installing is set while this Control Center installs or updates
+	// the runner (its card says so and shows the progress).
+	Installing *installProgress `json:"installing,omitempty"`
 }
 
 // eachRunner calls fn for every configured runner concurrently.
