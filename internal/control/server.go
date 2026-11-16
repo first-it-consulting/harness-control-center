@@ -66,6 +66,8 @@ var webFS embed.FS
 //	GET    /api/runners/{runner}/credentials     the credentials it can broker, without secrets
 //	PUT    /api/runners/{runner}/credentials/{name}   add or change one (the secret is write-only)
 //	DELETE /api/runners/{runner}/credentials/{name}
+//	GET    /api/models                           the model catalog (endpoints, models) and which harnesses use each model
+//	PUT    /api/models                           replace it (validated like a harness's spec.model)
 //	GET    /api/runners/{runner}/settings        its settings and the bounds the UI may set them within
 //	PUT    /api/runners/{runner}/settings        change them (written as the file's owner) and restart it
 //	GET    /api/local                            the runner on this Mac: what is set up, and the setup's progress
@@ -97,6 +99,9 @@ type Server struct {
 	mu      sync.Mutex
 	cfg     *Config
 	clients map[RunnerRef]*runnerd.Client
+
+	// modelsMu serializes the model catalog's reads and writes.
+	modelsMu sync.Mutex
 }
 
 // NewServer returns a Control Center using the config file at cfgPath and
@@ -152,6 +157,8 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /api/runners/{runner}/credentials", s.credentialList)
 	mux.HandleFunc("PUT /api/runners/{runner}/credentials/{name}", s.credentialSet)
 	mux.HandleFunc("DELETE /api/runners/{runner}/credentials/{name}", s.credentialRemove)
+	mux.HandleFunc("GET /api/models", s.modelsGet)
+	mux.HandleFunc("PUT /api/models", s.modelsPut)
 	mux.HandleFunc("GET /api/runners/{runner}/settings", s.settingsGet)
 	mux.HandleFunc("PUT /api/runners/{runner}/settings", s.settingsSet)
 	mux.HandleFunc("GET /api/local", s.localState)

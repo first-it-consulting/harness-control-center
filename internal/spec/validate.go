@@ -143,6 +143,25 @@ var (
 	urlPathRe   = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)*/?$`)
 )
 
+// ValidateModel checks m as spec.model is checked in a harness that
+// grants its credential and, with allowPrivate, private networks: for
+// models kept outside a harness (the Control Center's model catalog).
+func ValidateModel(m *Model, allowPrivate bool) error {
+	var errs []error
+	add := func(path, format string, args ...any) {
+		errs = append(errs, &FieldError{Path: path, Msg: fmt.Sprintf(format, args...)})
+	}
+	p := &Permissions{Network: Network{AllowPrivateNetworks: allowPrivate}}
+	if m.Credential != "" {
+		if !nameRe.MatchString(m.Credential) {
+			add("spec.model.credential", "invalid credential name %q", m.Credential)
+		}
+		p.Credentials = []string{m.Credential}
+	}
+	validateModel(m, p, add)
+	return errors.Join(errs...)
+}
+
 func validateModel(m *Model, p *Permissions, add addFunc) {
 	if !modelNameRe.MatchString(m.Name) {
 		add("spec.model.name", "invalid model name %q", m.Name)
