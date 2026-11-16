@@ -152,7 +152,12 @@ build_catalog() {
 	mkdir -p "$out/files"
 	installed=$(sudo chroot "$tree" /sbin/apk info -v 2>/dev/null)
 	echo "# name version file... (built by install-runner.sh)" >"$out/tools.txt"
+	local n=0 total
+	total=$(wc -w <<<"$TOOLS")
 	for p in $TOOLS; do
+		# Downloading can take minutes: say which tool, so the log moves.
+		n=$((n + 1))
+		echo "   tool catalog: fetching $p ($n of $total)"
 		dir=hcc-fetch-$p
 		sudo mkdir "$tree/$dir"
 		sudo chroot "$tree" /sbin/apk fetch --no-cache --recursive --quiet -o "/$dir" "$p"

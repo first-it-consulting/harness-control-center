@@ -32,7 +32,7 @@ fetch "$KERNEL_URL" "sha256:$KERNEL_SHA256" "$CACHE/linux-$KERNEL_VERSION.tar.xz
 fetch "$ALPINE_URL" "sha256:$ALPINE_SHA256" "$CACHE/alpine-minirootfs-$ALPINE_VERSION-aarch64.tar.gz"
 
 echo "== hcc-guest (linux/arm64)"
-(cd "$REPO" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$CACHE/hcc-guest-linux-arm64" ./cmd/hcc-guest)
+(cd "$REPO" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-s -w" -o "$CACHE/hcc-guest-linux-arm64" ./cmd/hcc-guest)
 
 echo "== building in $BUILDER"
 docker run --rm --platform linux/arm64 \
