@@ -188,3 +188,18 @@ func withField(s runnerd.Settings, field string, value any) map[string]any {
 	m[field] = value
 	return m
 }
+
+// A runner older than the settings API is asked to be updated, not
+// reported as a bare 404.
+func TestSettingsOfAnOlderRunner(t *testing.T) {
+	ts := newTestServer(t)
+	sock := startRunner(t) // serves no /v1/settings
+	if code := ts.do(http.MethodPost, "/api/runners", RunnerRef{Name: "old", Socket: sock}, nil); code != http.StatusCreated {
+		t.Fatalf("add runner: %d", code)
+	}
+	var out map[string]any
+	if code := ts.do(http.MethodGet, "/api/runners/old/settings", nil, &out); code != http.StatusConflict || out["needUpdate"] != true ||
+		!strings.Contains(out["error"].(string), "update the runner") {
+		t.Errorf("GET: %d %v", code, out)
+	}
+}

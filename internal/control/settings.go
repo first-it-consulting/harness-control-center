@@ -31,6 +31,10 @@ func (s *Server) settingsGet(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), runnerTimeout)
 	defer cancel()
 	v, err := c.Settings(ctx)
+	if errors.Is(err, runnerd.ErrNoSettings) {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "needUpdate": true})
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return

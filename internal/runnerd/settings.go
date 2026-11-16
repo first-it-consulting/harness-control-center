@@ -304,8 +304,16 @@ func (s *Server) EnableSettings(config string, cfg *Config) {
 	})
 }
 
-// Settings returns the runner's settings and bounds.
+// ErrNoSettings is returned by a runner older than its settings API.
+var ErrNoSettings = errors.New("this runner's version cannot report or change its settings yet: update the runner first")
+
+// Settings returns the runner's settings and bounds (ErrNoSettings from
+// a runner without the API).
 func (c *Client) Settings(ctx context.Context) (SettingsView, error) {
 	var v SettingsView
-	return v, c.do(ctx, http.MethodGet, "/v1/settings", nil, &v)
+	err := c.do(ctx, http.MethodGet, "/v1/settings", nil, &v)
+	if apiErr := (*APIError)(nil); errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+		return v, ErrNoSettings
+	}
+	return v, err
 }

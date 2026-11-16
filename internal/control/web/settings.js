@@ -19,7 +19,9 @@ export function runnerSettings(ui, r, done) {
   dialog.showModal();
   api("GET", "/api/runners/" + encodeURIComponent(r.name) + "/settings").then(
     (v) => set(dialog, settingsForm(ui, r, v, done)),
-    (err) => set(body, h("div", { class: "error-box" }, "Could not ask " + r.name + ": " + err.message)));
+    (err) => set(body, err.data && err.data.needUpdate
+      ? h("div", { class: "notice-box" }, r.name + " runs an older version that cannot change its settings from here yet. Update it first: close this window and press “Update runner” on its card.")
+      : h("div", { class: "error-box" }, "Could not ask " + r.name + ": " + err.message)));
 }
 
 function settingsForm(ui, r, v, done) {
