@@ -40,6 +40,9 @@ type Options struct {
 	Service    Service
 	// Progress gets every change of a step (optional).
 	Progress func(Step)
+	// Restart restarts a running runner even if its service is
+	// unchanged: it runs an older hcc than Executable is now.
+	Restart bool
 	// NewMachine defaults to the Virtualization framework.
 	NewMachine func(vz.MachineConfig) (vz.Machine, error)
 
@@ -155,7 +158,7 @@ func Up(ctx context.Context, o Options) error {
 		return err
 	}
 	return step("service", "Start the runner", func(func(Step)) (string, error) {
-		started, err := o.Service.Install(ctx, o.Executable, l, false)
+		started, err := o.Service.Install(ctx, o.Executable, l, o.Restart)
 		if err != nil {
 			return "", err
 		}

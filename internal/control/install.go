@@ -33,11 +33,12 @@ const (
 var runnerTargetRe = regexp.MustCompile(`^server:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 type runnerInstallState struct {
-	Target   string   `json:"target"`
-	Running  bool     `json:"running"`
-	Finished bool     `json:"finished"`
-	Log      []string `json:"log,omitempty"`
-	Error    string   `json:"error,omitempty"`
+	Target   string    `json:"target"`
+	Started  time.Time `json:"started"`
+	Running  bool      `json:"running"`
+	Finished bool      `json:"finished"`
+	Log      []string  `json:"log,omitempty"`
+	Error    string    `json:"error,omitempty"`
 }
 
 type runnerInstaller struct {
@@ -89,7 +90,7 @@ func (m *runnerInstaller) start(ref RunnerRef, target string, password []byte) e
 	if st := m.states[ref.Name]; st != nil && st.Running {
 		return errors.New("the runner installation is running already")
 	}
-	st := &runnerInstallState{Target: target, Running: true}
+	st := &runnerInstallState{Target: target, Started: time.Now(), Running: true}
 	m.states[ref.Name] = st
 	go m.run(ref, st, password)
 	return nil
@@ -311,6 +312,27 @@ func (s *Server) startRunnerInstall(w http.ResponseWriter, r *http.Request) {
 	st, _ := s.installs.status(name)
 	s.log.Info("runner installation started", "runner", name, "target", st.Target)
 	writeJSON(w, http.StatusAccepted, st)
+}
+
+// installProgress is what a runner's card shows while it is being
+// installed or updated: since when, and the installer's latest line.
+type installProgress struct {
+	Started time.Time `json:"started"`
+	Step    string    `json:"step,omitempty"`
+}
+
+// installing returns the progress of the install or update of the runner
+// called name, or nil if none runs.
+func (s *Server) installing(name string) *installProgress {
+	st, ok := s.installs.status(name)
+	if !ok || !st.Running {
+		return nil
+	}
+	p := &installProgress{Started: st.Started}
+	if n := len(st.Log); n > 0 {
+		p.Step = st.Log[n-1] // safetext.Line'd by logf
+	}
+	return p
 }
 
 func (s *Server) runnerVersion(w http.ResponseWriter, r *http.Request) {

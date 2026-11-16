@@ -171,7 +171,7 @@ func TestSessionsExpire(t *testing.T) {
 
 func TestStaticFilesAndHeaders(t *testing.T) {
 	ts := newTestServer(t)
-	for path, ctype := range map[string]string{"/": "text/html", "/app.js": "javascript", "/dashboard.js": "javascript", "/local.js": "javascript", "/credentials.js": "javascript", "/style.css": "text/css", "/icon.svg": "image/svg+xml"} {
+	for path, ctype := range map[string]string{"/": "text/html", "/app.js": "javascript", "/dashboard.js": "javascript", "/local.js": "javascript", "/credentials.js": "javascript", "/settings.js": "javascript", "/style.css": "text/css", "/icon.svg": "image/svg+xml"} {
 		rec := ts.raw(http.MethodGet, path, "", nil)
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Type"), ctype) {
 			t.Errorf("%s: %d %s", path, rec.Code, rec.Header().Get("Content-Type"))

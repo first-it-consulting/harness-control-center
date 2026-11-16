@@ -3,6 +3,7 @@
 import { dashboardView } from "./dashboard.js";
 import { localPanel } from "./local.js";
 import { credentialsView } from "./credentials.js";
+import { runnerSettings } from "./settings.js";
 //
 // Everything shown here may come from an agent (job errors, console
 // output, file names), so the DOM is only ever built with textContent and
@@ -724,10 +725,16 @@ function updateTo(r) {
   return r.ssh && r.status && v && v !== "unknown" && r.status.version !== v ? v : "";
 }
 
+// elapsed says how long ago an ISO time was, in minutes and seconds.
+function elapsed(since) {
+  const secs = Math.max(0, Math.round((Date.now() - new Date(since).getTime()) / 1000));
+  return secs < 60 ? secs + " s" : Math.floor(secs / 60) + " min " + (secs % 60) + " s";
+}
+
 // runnerCard shows a runner; pending while it has not answered yet.
 function runnerCard(r, pending) {
   const st = r.status;
-  const update = updateTo(r);
+  const update = updateTo(r) || r.localUpdate || "";
   const path = "/api/runners/" + encodeURIComponent(r.name);
   const act = (what, msg) => async () => {
     try {
@@ -739,7 +746,12 @@ function runnerCard(r, pending) {
     }
   };
   return h("div", { class: "card" },
-    h("h3", {}, r.name, " ", pending ? badge("checking…", "queued") : st ? (st.killed ? badge("stopped", "killed") : badge("ready", "succeeded")) : badge("unreachable", "failed")),
+    h("h3", {}, r.name, " ", r.installing ? badge(st ? "updating…" : "installing…", "queued")
+      : pending ? badge("checking…", "queued") : st ? (st.killed ? badge("stopped", "killed") : badge("ready", "succeeded")) : badge("unreachable", "failed")),
+    r.installing && h("div", { class: "notice-box" },
+      h("p", {}, (st ? "Updating" : "Installing") + " for " + elapsed(r.installing.started) +
+        (st ? ". The runner restarts at the end." : ". Building the VM images can take several minutes.")),
+      r.installing.step && h("p", { class: "muted" }, "Now: " + r.installing.step)),
     h("p", { class: "muted" }, r.ssh ? "ssh " + r.ssh : r.socket),
     st && h("dl", { class: "facts" },
       h("dt", {}, "Target"), h("dd", {}, st.target),
@@ -753,13 +765,16 @@ function runnerCard(r, pending) {
       h("dt", {}, "Images"), h("dd", {}, st.images.join(", ")),
       h("dt", {}, "Tools"), h("dd", {}, Object.keys(st.tools || {}).length === 0 ? "none" : Object.entries(st.tools).map(([img, list]) =>
         h("div", {}, h("span", { class: "muted" }, img), h("ul", { class: "chips" }, list.map((t) => h("li", {}, t)))))),
-      h("dt", {}, "Version"), h("dd", {}, st.version || "–", update && h("span", { class: "muted note" }, "Version " + update + " is available."))),
+      h("dt", {}, "Version"), h("dd", {}, st.version || "–", update && h("span", { class: "muted note" },
+        r.localUpdate ? "This Control Center is " + update + "; the runner still runs the older one until it restarts." : "Version " + update + " is available."))),
     r.error && h("div", { class: "error-box" }, r.error),
     h("div", { class: "actions" },
       st && !st.killed && h("button", { class: "danger", onclick: act("kill", "Stopping every job on " + r.name + ".") }, "Stop all jobs"),
       st && st.killed && h("button", { onclick: act("resume", r.name + " accepts jobs again. Its schedules stay paused until you resume them.") }, "Accept jobs again"),
-      r.ssh && !pending && !st && h("button", { class: "primary", onclick: () => installRunner(r) }, "Install Runner"),
-      update && h("button", { class: "primary", onclick: () => installRunner(r, update) }, "Update runner"),
+      r.installing && r.ssh && h("button", { class: "primary", onclick: () => installRunner(r, update || (st && st.version)) }, "Show progress"),
+      !r.installing && r.ssh && !pending && !st && h("button", { class: "primary", onclick: () => installRunner(r) }, "Install Runner"),
+      !r.installing && update && h("button", { class: "primary", onclick: () => r.localUpdate ? updateLocal(r) : installRunner(r, update) }, "Update runner"),
+      !r.installing && st && h("button", { onclick: () => runnerSettings({ h, api, set, say }, r, runnersView) }, "Settings"),
       h("button", { onclick: () => editRunner(r) }, "Edit"),
       h("button", { onclick: async () => {
         if (!confirm("Remove " + r.name + " from this list? The runner itself keeps running.")) return;
@@ -770,6 +785,24 @@ function runnerCard(r, pending) {
           fail(err);
         }
       } }, "Remove")));
+}
+
+// updateLocal restarts the Mac's own runner with this Control Center's
+// hcc (it runs the same program file), after the usual setup checks.
+async function updateLocal(r) {
+  const st = r.status;
+  if (st && st.running + st.queued > 0) {
+    fail(new Error("Jobs are running or queued on " + r.name + ". Updating restarts it and would end them: wait until they finish, or stop them first."));
+    return;
+  }
+  if (!confirm("Update the runner on this Mac to " + r.localUpdate + "? It restarts; its jobs history, schedules and settings stay.")) return;
+  try {
+    await api("POST", "/api/local/setup");
+    say("Updating the runner on this Mac…");
+  } catch (err) {
+    fail(err);
+  }
+  runnersView();
 }
 
 // installRunner asks before making system changes on an ssh host, then
@@ -845,7 +878,7 @@ function installRunner(r, version) {
   h("h1", {}, verb + " runner on " + r.name),
   st
     ? h("p", {}, "This updates the runner on ", h("code", {}, r.ssh), " from " + (st.version || "an unknown version") + " to " + version +
-      ": it replaces its programs, rebuilds the VM images if they changed, and restarts its service. Its credentials stay; its runner settings are written anew.")
+      ": it replaces its programs, rebuilds the VM images if they changed, and restarts its service. Its credentials and settings stay.")
     : h("p", {}, "This installs the Linux x86_64 runner on ", h("code", {}, r.ssh), ": it creates the unprivileged hcc-runner user, grants it one sudo rule for hcc-helper, builds the VM images, and starts its systemd service."),
   st && st.running + st.queued > 0 && h("div", { class: "warn-box" },
     "Jobs are running or queued there. Restarting would end them, so the update waits until they are done (or stopped)."),
@@ -859,6 +892,14 @@ function installRunner(r, version) {
   h("div", { class: "actions" }, start, h("button", { type: "button", onclick: () => dialog.close() }, "Close")));
   set(dialog, form);
   dialog.showModal();
+  // Already running (started earlier, or in another tab): follow it.
+  if (r.installing) {
+    confirmBox.checked = true;
+    confirmBox.disabled = true;
+    log.hidden = false;
+    log.textContent = "Following the " + verb.toLowerCase() + " in progress…";
+    poll();
+  }
 }
 
 function pathForInstall(r) {

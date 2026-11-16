@@ -66,6 +66,8 @@ var webFS embed.FS
 //	GET    /api/runners/{runner}/credentials     the credentials it can broker, without secrets
 //	PUT    /api/runners/{runner}/credentials/{name}   add or change one (the secret is write-only)
 //	DELETE /api/runners/{runner}/credentials/{name}
+//	GET    /api/runners/{runner}/settings        its settings and the bounds the UI may set them within
+//	PUT    /api/runners/{runner}/settings        change them (written as the file's owner) and restart it
 //	GET    /api/local                            the runner on this Mac: what is set up, and the setup's progress
 //	POST   /api/local/setup                      set it up (in the background) and add it here
 //	POST   /api/local/stop                       stop its background service
@@ -150,6 +152,8 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /api/runners/{runner}/credentials", s.credentialList)
 	mux.HandleFunc("PUT /api/runners/{runner}/credentials/{name}", s.credentialSet)
 	mux.HandleFunc("DELETE /api/runners/{runner}/credentials/{name}", s.credentialRemove)
+	mux.HandleFunc("GET /api/runners/{runner}/settings", s.settingsGet)
+	mux.HandleFunc("PUT /api/runners/{runner}/settings", s.settingsSet)
 	mux.HandleFunc("GET /api/local", s.localState)
 	mux.HandleFunc("POST /api/local/setup", s.localSetup)
 	mux.HandleFunc("POST /api/local/stop", s.localStop)
@@ -298,6 +302,26 @@ type RunnerView struct {
 	Status  *runner.Status       `json:"status,omitempty"`
 	Plugins []runnerd.PluginView `json:"plugins,omitempty"`
 	Error   string               `json:"error,omitempty"`
+	// Installing is set while this Control Center installs or updates
+	// the runner (its card says so and shows the progress).
+	Installing *installProgress `json:"installing,omitempty"`
+	// LocalUpdate is set on the Mac's own runner when it runs another
+	// version than this Control Center: the version an update brings.
+	LocalUpdate string `json:"localUpdate,omitempty"`
+}
+
+// fillLocal sets what only the Mac's own runner's card shows.
+func (s *Server) fillLocal(v *RunnerView) {
+	l := s.local
+	if l == nil || l.socket == "" || v.Socket != l.socket {
+		return
+	}
+	if p := l.localProgress(); p != nil {
+		v.Installing = p
+	}
+	if v.Status != nil && versioned(l.version) && v.Status.Version != l.version {
+		v.LocalUpdate = l.version
+	}
 }
 
 // eachRunner calls fn for every configured runner concurrently.
@@ -346,6 +370,8 @@ func (s *Server) runners(w http.ResponseWriter, r *http.Request) {
 	})
 	for i := range views {
 		views[i].Status, views[i].Plugins = got[views[i].Name].Status, got[views[i].Name].Plugins
+		views[i].Installing = s.installing(views[i].Name)
+		s.fillLocal(&views[i])
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -359,7 +385,7 @@ func (s *Server) oneRunner(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errNotFound("no runner called "+name))
 		return
 	}
-	v := RunnerView{RunnerRef: ref}
+	v := RunnerView{RunnerRef: ref, Installing: s.installing(name)}
 	c, err := s.client(name)
 	if err == nil {
 		ctx, cancel := context.WithTimeout(r.Context(), runnerTimeout)
@@ -371,6 +397,7 @@ func (s *Server) oneRunner(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		v.Error = err.Error()
 	}
+	s.fillLocal(&v)
 	writeJSON(w, http.StatusOK, v)
 }
 

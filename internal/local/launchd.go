@@ -116,6 +116,11 @@ func (s Service) Running(ctx context.Context) bool {
 	return s.Launchctl(ctx, "print", serviceTarget()) == nil
 }
 
+// Restart restarts the running agent (after its settings changed).
+func (s Service) Restart(ctx context.Context) error {
+	return s.Launchctl(ctx, "kickstart", "-k", serviceTarget())
+}
+
 // Stop unloads the agent and removes its definition, so it does not come
 // back at the next login; "hcc local up" starts it again.
 func (s Service) Stop(ctx context.Context) error {

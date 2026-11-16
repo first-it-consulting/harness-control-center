@@ -355,3 +355,53 @@ func TestActiveJobs(t *testing.T) {
 		t.Error("an unknown runner has jobs")
 	}
 }
+
+// While an install runs, the runner's card says so (and a second start
+// is refused rather than run twice).
+func TestRunnerShowsItIsInstalling(t *testing.T) {
+	ts := newTestServer(t)
+	fake := &fakeInstallCommands{}
+	release := make(chan struct{})
+	ts.s.installs.findSource = func() (string, error) { return "/src/hcc", nil }
+	ts.s.installs.runCommand = func(ctx context.Context, dir, name string, args, env []string, stdin []byte, out io.Writer) error {
+		if name == "go" {
+			<-release
+		}
+		return fake.run(ctx, dir, name, args, env, stdin, out)
+	}
+	ts.s.installs.activeJobs = func(context.Context, string) (int, error) { return 0, nil }
+	ts.do(http.MethodPost, "/api/runners", RunnerRef{Name: "agent", SSH: "host"}, nil)
+	var v RunnerView
+	if ts.do(http.MethodGet, "/api/runners/agent", nil, &v); v.Installing != nil {
+		t.Fatal("installing before any install")
+	}
+	body := map[string]any{"target": "server:agent", "confirmed": true}
+	if code := ts.do(http.MethodPost, "/api/runners/agent/install", body, nil); code != http.StatusAccepted && code != http.StatusOK {
+		t.Fatalf("start: %d", code)
+	}
+	// The installer blocks in "go build", right after saying so.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		v = RunnerView{}
+		ts.do(http.MethodGet, "/api/runners/agent", nil, &v)
+		if v.Installing != nil && strings.Contains(v.Installing.Step, "Building") || time.Now().After(deadline) {
+			break
+		}
+	}
+	if v.Installing == nil || v.Installing.Started.IsZero() || !strings.Contains(v.Installing.Step, "Building") {
+		t.Errorf("single view: %+v", v.Installing)
+	}
+	var all []RunnerView
+	if ts.do(http.MethodGet, "/api/runners", nil, &all); len(all) != 1 || all[0].Installing == nil {
+		t.Errorf("list: %+v", all)
+	}
+	var out map[string]any
+	if code := ts.do(http.MethodPost, "/api/runners/agent/install", body, &out); code == http.StatusOK || code == http.StatusAccepted {
+		t.Errorf("second start: %d %v", code, out)
+	}
+	close(release)
+	waitRunnerInstall(t, ts, "agent")
+	v = RunnerView{}
+	if ts.do(http.MethodGet, "/api/runners/agent", nil, &v); v.Installing != nil {
+		t.Error("still installing after it finished")
+	}
+}

@@ -237,6 +237,25 @@ retention:
 
 The daemon's own log goes to journald, which rotates it.
 
+## Runner settings
+
+The Control Center's **Settings** button on a runner's card changes how
+many jobs and plugin VMs run at once, the largest job disk, how long
+finished jobs are kept, how long approvals wait, when schedules pause,
+how often they may run, and model prices (ADR-0018). Saving restarts the
+runner, so it waits until no job runs there. From a shell:
+
+```sh
+hcc runner settings get --config /etc/hcc/runner.yaml
+hcc runner settings get --config /etc/hcc/runner.yaml | jq '.maxConcurrent = 3' |
+  sudo hcc runner settings set --config /etc/hcc/runner.yaml --restart
+```
+
+The UI and this command allow at most as many jobs and plugin VMs at
+once as the host has CPUs, and never `contactTimeout: off`. Editing
+`runner.yaml` as root allows anything the file accepts. An update keeps
+these settings.
+
 ## Images
 
 | Image | Contents | Use |

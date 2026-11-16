@@ -53,6 +53,8 @@ Control Center:
 Runner:
   runner serve --config <file>   run the runner daemon
   runner stdio [--socket path]   relay stdin/stdout to the daemon (used over ssh)
+  runner settings get|set [--config file] [--restart]
+                                 show or change the runner's settings (set reads JSON on stdin)
   credentials list|set|remove [--config file]   edit the runner's credential store (as its owner,
                                  e.g. with sudo; set reads the credential as JSON on stdin)
 
