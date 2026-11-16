@@ -263,10 +263,19 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, 1<<20))
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes))
 	if err != nil {
 		return nil, err
 	}
+	return parseConfig(data, path)
+}
+
+// maxConfigBytes bounds runner.yaml.
+const maxConfigBytes = 1 << 20
+
+// parseConfig decodes, defaults and validates runner.yaml's contents
+// (read from path, which only names it in errors).
+func parseConfig(data []byte, path string) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var c Config
@@ -411,7 +420,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, err)
 	}
 	for model, p := range c.Pricing {
-		if p.InputPerMTok < 0 || p.OutputPerMTok < 0 || p.InputPerMTok > 1e4 || p.OutputPerMTok > 1e4 {
+		if !validPrice(p.InputPerMTok) || !validPrice(p.OutputPerMTok) {
 			add("pricing for %q must be between 0 and 10000 USD per million tokens", model)
 		}
 	}

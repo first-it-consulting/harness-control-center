@@ -31,7 +31,7 @@ import (
 
 func cmdRunner(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintf(stderr, "hcc runner: expected serve or stdio\n\n%s", usage)
+		fmt.Fprintf(stderr, "hcc runner: expected serve, stdio or settings\n\n%s", usage)
 		return exitUsage
 	}
 	switch args[0] {
@@ -39,6 +39,8 @@ func cmdRunner(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdServe(args[1:], stderr)
 	case "stdio":
 		return cmdStdio(args[1:], stdin, stdout, stderr)
+	case "settings":
+		return cmdRunnerSettings(args[1:], stdin, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "hcc runner: unknown command %q\n", args[0])
 		return exitUsage
@@ -167,6 +169,7 @@ func serve(configPath string, log *slog.Logger) error {
 	srv := runnerd.NewServer(r, cfg.StateDir, log)
 	srv.EnablePlugins(pluginStore, mgr)
 	srv.EnableCredentials(cfg.Credentials)
+	srv.EnableSettings(configPath, cfg)
 	err = srv.Serve(ctx, l)
 	<-pluginsDone
 	log.Info("runner stopped; all jobs and plugins were stopped")

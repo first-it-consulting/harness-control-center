@@ -3,6 +3,7 @@
 import { dashboardView } from "./dashboard.js";
 import { localPanel } from "./local.js";
 import { credentialsView } from "./credentials.js";
+import { runnerSettings } from "./settings.js";
 //
 // Everything shown here may come from an agent (job errors, console
 // output, file names), so the DOM is only ever built with textContent and
@@ -760,6 +761,7 @@ function runnerCard(r, pending) {
       st && st.killed && h("button", { onclick: act("resume", r.name + " accepts jobs again. Its schedules stay paused until you resume them.") }, "Accept jobs again"),
       r.ssh && !pending && !st && h("button", { class: "primary", onclick: () => installRunner(r) }, "Install Runner"),
       update && h("button", { class: "primary", onclick: () => installRunner(r, update) }, "Update runner"),
+      st && h("button", { onclick: () => runnerSettings({ h, api, set, say }, r, runnersView) }, "Settings"),
       h("button", { onclick: () => editRunner(r) }, "Edit"),
       h("button", { onclick: async () => {
         if (!confirm("Remove " + r.name + " from this list? The runner itself keeps running.")) return;
@@ -845,7 +847,7 @@ function installRunner(r, version) {
   h("h1", {}, verb + " runner on " + r.name),
   st
     ? h("p", {}, "This updates the runner on ", h("code", {}, r.ssh), " from " + (st.version || "an unknown version") + " to " + version +
-      ": it replaces its programs, rebuilds the VM images if they changed, and restarts its service. Its credentials stay; its runner settings are written anew.")
+      ": it replaces its programs, rebuilds the VM images if they changed, and restarts its service. Its credentials and settings stay.")
     : h("p", {}, "This installs the Linux x86_64 runner on ", h("code", {}, r.ssh), ": it creates the unprivileged hcc-runner user, grants it one sudo rule for hcc-helper, builds the VM images, and starts its systemd service."),
   st && st.running + st.queued > 0 && h("div", { class: "warn-box" },
     "Jobs are running or queued there. Restarting would end them, so the update waits until they are done (or stopped)."),

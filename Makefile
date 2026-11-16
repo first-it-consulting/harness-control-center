@@ -31,6 +31,7 @@ fuzz:
 	$(GO) test ./internal/tools -run='^$$' -fuzz=FuzzParse -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/mcp -run='^$$' -fuzz=FuzzToolCalls -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/mcp -run='^$$' -fuzz=FuzzStrictJSON -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/runnerd -run='^$$' -fuzz=FuzzWithSettings -fuzztime=$(FUZZTIME)
 
 lint:
 	golangci-lint run

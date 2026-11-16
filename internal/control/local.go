@@ -15,10 +15,14 @@ import (
 // Center can set up itself: the "Run agents on this Mac" button.
 type localRunner struct {
 	// up runs the setup (local.Up), status reads the state, stop
-	// removes the service; replaceable for tests.
-	up     func(ctx context.Context, progress func(local.Step)) error
-	status func(ctx context.Context) local.Status
-	stop   func(ctx context.Context) error
+	// removes the service, restart restarts it; replaceable for tests.
+	up      func(ctx context.Context, progress func(local.Step)) error
+	status  func(ctx context.Context) local.Status
+	stop    func(ctx context.Context) error
+	restart func(ctx context.Context) error
+	// config is the local runner's runner.yaml: the only configuration
+	// the Control Center writes itself (its settings, ADR-0018).
+	config string
 
 	mu       sync.Mutex
 	running  bool
@@ -35,6 +39,7 @@ func newLocalRunner() *localRunner {
 		l.status = func(context.Context) local.Status { return local.Status{Supported: err.Error()} }
 		l.up = func(context.Context, func(local.Step)) error { return err }
 		l.stop = func(context.Context) error { return err }
+		l.restart = l.stop
 		return l
 	}
 	l.status = func(ctx context.Context) local.Status { return local.GetStatus(ctx, layout, svc) }
@@ -42,6 +47,8 @@ func newLocalRunner() *localRunner {
 		return local.Up(ctx, local.Options{Layout: layout, Version: version.Version, Service: svc, Progress: progress})
 	}
 	l.stop = svc.Stop
+	l.restart = svc.Restart
+	l.config = layout.Config()
 	return l
 }
 

@@ -265,8 +265,17 @@ if ! sudo test -e /etc/hcc/credentials.yaml; then
 fi
 sudo chown root:"$RUN_USER" /etc/hcc/credentials.yaml
 sudo chmod 0640 /etc/hcc/credentials.yaml
+# The settings changeable from the Control Center (maxConcurrent,
+# retention, timeouts, pricing …) survive an update: saved here, put back
+# below.
+settings=
+if sudo test -f /etc/hcc/runner.yaml; then
+	settings=$(sudo /usr/local/bin/hcc runner settings get --config /etc/hcc/runner.yaml 2>/dev/null) ||
+		{ echo "note: the previous runner settings could not be read; using the defaults"; settings=; }
+fi
 sudo tee /etc/hcc/runner.yaml >/dev/null <<CONF
-# Managed by install-runner.sh.
+# Managed by install-runner.sh. Change the settings from the Control
+# Center (or with "hcc runner settings"); an update keeps them.
 target: $TARGET
 maxConcurrent: 2
 # Plugin sandboxes running at once, besides the jobs (ADR-0013).
@@ -301,6 +310,10 @@ network:
   proxyPort: 3128
 CONF
 sudo chmod 0644 /etc/hcc/runner.yaml
+if [[ -n $settings ]]; then
+	printf '%s\n' "$settings" | sudo /usr/local/bin/hcc runner settings set --restore --config /etc/hcc/runner.yaml >/dev/null ||
+		echo "note: the previous runner settings did not fit the new configuration; using the defaults"
+fi
 
 echo "== systemd unit (User=$RUN_USER)"
 sed -e "s/@RUN_USER@/$RUN_USER/" -e "s/@GROUP@/$GROUP/" "$HERE/hcc-runner.service" | sudo tee /etc/systemd/system/hcc-runner.service >/dev/null

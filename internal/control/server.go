@@ -66,6 +66,8 @@ var webFS embed.FS
 //	GET    /api/runners/{runner}/credentials     the credentials it can broker, without secrets
 //	PUT    /api/runners/{runner}/credentials/{name}   add or change one (the secret is write-only)
 //	DELETE /api/runners/{runner}/credentials/{name}
+//	GET    /api/runners/{runner}/settings        its settings and the bounds the UI may set them within
+//	PUT    /api/runners/{runner}/settings        change them (written as the file's owner) and restart it
 //	GET    /api/local                            the runner on this Mac: what is set up, and the setup's progress
 //	POST   /api/local/setup                      set it up (in the background) and add it here
 //	POST   /api/local/stop                       stop its background service
@@ -150,6 +152,8 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /api/runners/{runner}/credentials", s.credentialList)
 	mux.HandleFunc("PUT /api/runners/{runner}/credentials/{name}", s.credentialSet)
 	mux.HandleFunc("DELETE /api/runners/{runner}/credentials/{name}", s.credentialRemove)
+	mux.HandleFunc("GET /api/runners/{runner}/settings", s.settingsGet)
+	mux.HandleFunc("PUT /api/runners/{runner}/settings", s.settingsSet)
 	mux.HandleFunc("GET /api/local", s.localState)
 	mux.HandleFunc("POST /api/local/setup", s.localSetup)
 	mux.HandleFunc("POST /api/local/stop", s.localStop)

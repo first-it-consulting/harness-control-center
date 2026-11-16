@@ -82,3 +82,16 @@ func checkNotWorldReadable(path string) error {
 	}
 	return nil
 }
+
+// sameOwner gives f the owner of old (a no-op unless it differs, so a
+// user can rewrite their own file).
+func sameOwner(f *os.File, old os.FileInfo) error {
+	st, ok := old.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("cannot read the owner of %s", old.Name())
+	}
+	if int(st.Uid) == os.Geteuid() && int(st.Gid) == os.Getegid() {
+		return nil
+	}
+	return f.Chown(int(st.Uid), int(st.Gid))
+}
