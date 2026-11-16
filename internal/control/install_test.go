@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -112,6 +113,11 @@ func TestRunnerInstallThroughTheUI(t *testing.T) {
 			}
 			if c.args[len(c.args)-1] == "./cmd/hcc" && !strings.Contains(strings.Join(c.args, " "), "Version=v0.1.1-3-gabcdef0") {
 				t.Errorf("no version flags: %v", c.args)
+			}
+			// The guest's bytes must not change with every commit: they
+			// decide whether the claude-code image is rebuilt.
+			if c.args[len(c.args)-1] == "./cmd/hcc-guest" && !slices.Contains(c.args, "-buildvcs=false") {
+				t.Errorf("guest built with a version control stamp: %v", c.args)
 			}
 		case c.name == "scp":
 			scp++

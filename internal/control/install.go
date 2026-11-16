@@ -166,12 +166,23 @@ func (m *runnerInstaller) install(ref RunnerRef, st *runnerInstallState, passwor
 	ver, commit := m.gitOutput(ctx, root, describeArgs...), m.gitOutput(ctx, root, "rev-parse", "--short", "HEAD")
 	m.logf(st, "Building the Linux/amd64 runner binaries, version %s…", ver)
 	const versionPkg = "github.com/first-it-consulting/harness-control-center/internal/version"
-	for _, b := range []struct{ out, pkg, ldflags string }{
-		{"hcc-linux-amd64", "./cmd/hcc", "-s -w -X " + versionPkg + ".Version=" + ver + " -X " + versionPkg + ".Commit=" + commit},
-		{"hcc-helper-linux-amd64", "./cmd/hcc-helper", "-s -w"},
-		{"hcc-guest-linux-amd64", "./cmd/hcc-guest", "-s -w"},
+	for _, b := range []struct {
+		out, pkg, ldflags string
+		// unstamped: no version control stamp. The guest goes into the
+		// claude-code image, which is rebuilt whenever the guest's bytes
+		// change, and should not be for every commit.
+		unstamped bool
+	}{
+		{"hcc-linux-amd64", "./cmd/hcc", "-s -w -X " + versionPkg + ".Version=" + ver + " -X " + versionPkg + ".Commit=" + commit, false},
+		{"hcc-helper-linux-amd64", "./cmd/hcc-helper", "-s -w", false},
+		{"hcc-guest-linux-amd64", "./cmd/hcc-guest", "-s -w", true},
 	} {
-		if err := m.runCommand(ctx, root, "go", []string{"build", "-trimpath", "-ldflags", b.ldflags, "-o", filepath.Join(tmp, b.out), b.pkg}, linuxBuild, nil, log); err != nil {
+		args := []string{"build", "-trimpath"}
+		if b.unstamped {
+			args = append(args, "-buildvcs=false")
+		}
+		args = append(args, "-ldflags", b.ldflags, "-o", filepath.Join(tmp, b.out), b.pkg)
+		if err := m.runCommand(ctx, root, "go", args, linuxBuild, nil, log); err != nil {
 			return fmt.Errorf("build %s: %w", b.pkg, err)
 		}
 	}

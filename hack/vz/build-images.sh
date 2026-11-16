@@ -33,7 +33,7 @@ fetch "$ALPINE_URL" "sha256:$ALPINE_SHA256" "$CACHE/alpine-minirootfs-$ALPINE_VE
 fetch "$CC_URL" "$CC_INTEGRITY" "$CACHE/claude-code-linux-arm64-musl-$CC_VERSION.tgz"
 
 echo "== hcc-guest (linux/arm64)"
-(cd "$REPO" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$CACHE/hcc-guest-linux-arm64" ./cmd/hcc-guest)
+(cd "$REPO" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-s -w" -o "$CACHE/hcc-guest-linux-arm64" ./cmd/hcc-guest)
 
 echo "== building in $BUILDER"
 docker run --rm --platform linux/arm64 \
