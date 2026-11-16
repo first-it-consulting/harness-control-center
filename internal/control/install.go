@@ -313,6 +313,13 @@ func (s *Server) startRunnerInstall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, st)
 }
 
+// installing reports whether the runner called name is being installed
+// or updated.
+func (s *Server) installing(name string) bool {
+	st, ok := s.installs.status(name)
+	return ok && st.Running
+}
+
 func (s *Server) runnerVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.installs.available(r.Context()))
 }

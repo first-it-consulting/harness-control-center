@@ -302,6 +302,9 @@ type RunnerView struct {
 	Status  *runner.Status       `json:"status,omitempty"`
 	Plugins []runnerd.PluginView `json:"plugins,omitempty"`
 	Error   string               `json:"error,omitempty"`
+	// Installing: this Control Center is installing or updating the
+	// runner right now (its card says so and follows the progress).
+	Installing bool `json:"installing,omitempty"`
 }
 
 // eachRunner calls fn for every configured runner concurrently.
@@ -350,6 +353,7 @@ func (s *Server) runners(w http.ResponseWriter, r *http.Request) {
 	})
 	for i := range views {
 		views[i].Status, views[i].Plugins = got[views[i].Name].Status, got[views[i].Name].Plugins
+		views[i].Installing = s.installing(views[i].Name)
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -363,7 +367,7 @@ func (s *Server) oneRunner(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errNotFound("no runner called "+name))
 		return
 	}
-	v := RunnerView{RunnerRef: ref}
+	v := RunnerView{RunnerRef: ref, Installing: s.installing(name)}
 	c, err := s.client(name)
 	if err == nil {
 		ctx, cancel := context.WithTimeout(r.Context(), runnerTimeout)

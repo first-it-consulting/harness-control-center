@@ -740,7 +740,11 @@ function runnerCard(r, pending) {
     }
   };
   return h("div", { class: "card" },
-    h("h3", {}, r.name, " ", pending ? badge("checking…", "queued") : st ? (st.killed ? badge("stopped", "killed") : badge("ready", "succeeded")) : badge("unreachable", "failed")),
+    h("h3", {}, r.name, " ", r.installing ? badge(st ? "updating…" : "installing…", "queued")
+      : pending ? badge("checking…", "queued") : st ? (st.killed ? badge("stopped", "killed") : badge("ready", "succeeded")) : badge("unreachable", "failed")),
+    r.installing && h("p", { class: "muted" }, st
+      ? "The runner is being updated. It restarts at the end; until then it may stop answering for a moment."
+      : "The runner is being installed. This takes several minutes (it builds the VM images)."),
     h("p", { class: "muted" }, r.ssh ? "ssh " + r.ssh : r.socket),
     st && h("dl", { class: "facts" },
       h("dt", {}, "Target"), h("dd", {}, st.target),
@@ -759,9 +763,10 @@ function runnerCard(r, pending) {
     h("div", { class: "actions" },
       st && !st.killed && h("button", { class: "danger", onclick: act("kill", "Stopping every job on " + r.name + ".") }, "Stop all jobs"),
       st && st.killed && h("button", { onclick: act("resume", r.name + " accepts jobs again. Its schedules stay paused until you resume them.") }, "Accept jobs again"),
-      r.ssh && !pending && !st && h("button", { class: "primary", onclick: () => installRunner(r) }, "Install Runner"),
-      update && h("button", { class: "primary", onclick: () => installRunner(r, update) }, "Update runner"),
-      st && h("button", { onclick: () => runnerSettings({ h, api, set, say }, r, runnersView) }, "Settings"),
+      r.installing && h("button", { class: "primary", onclick: () => installRunner(r, update || (st && st.version)) }, "Show progress"),
+      !r.installing && r.ssh && !pending && !st && h("button", { class: "primary", onclick: () => installRunner(r) }, "Install Runner"),
+      !r.installing && update && h("button", { class: "primary", onclick: () => installRunner(r, update) }, "Update runner"),
+      !r.installing && st && h("button", { onclick: () => runnerSettings({ h, api, set, say }, r, runnersView) }, "Settings"),
       h("button", { onclick: () => editRunner(r) }, "Edit"),
       h("button", { onclick: async () => {
         if (!confirm("Remove " + r.name + " from this list? The runner itself keeps running.")) return;
@@ -861,6 +866,14 @@ function installRunner(r, version) {
   h("div", { class: "actions" }, start, h("button", { type: "button", onclick: () => dialog.close() }, "Close")));
   set(dialog, form);
   dialog.showModal();
+  // Already running (started earlier, or in another tab): follow it.
+  if (r.installing) {
+    confirmBox.checked = true;
+    confirmBox.disabled = true;
+    log.hidden = false;
+    log.textContent = "Following the " + verb.toLowerCase() + " in progress…";
+    poll();
+  }
 }
 
 function pathForInstall(r) {
