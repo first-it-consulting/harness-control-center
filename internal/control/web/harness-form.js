@@ -228,12 +228,12 @@ function render(ed) {
     section(ed, "Task", task(ed)),
     section(ed, "Model", model(ed)),
     section(ed, "When it runs", trigger(ed)),
-    section(ed, "Limits", limits(ed)),
+    section(ed, "Safety limits", limits(ed)),
     section(ed, "Internet and network", network(ed)),
-    section(ed, "API keys", credentials(ed)),
+    section(ed, "Credentials", credentials(ed)),
     section(ed, "Tools", tools(ed)),
-    section(ed, "Helpers and approvals", helpers(ed)),
-    h("details", { class: "form-section" }, h("summary", {}, "Advanced: MCP servers and other agents"), ...advanced(ed)));
+    section(ed, "Ask me first", approvals(ed)),
+    h("details", { class: "form-section card" }, h("summary", {}, "Advanced: helper agents, MCP servers, other agents"), ...advanced(ed)));
 }
 
 function section(ed, title, children) {
@@ -454,15 +454,20 @@ function limits(ed) {
   const { h } = ed.ui;
   const l = ed.ctx.limits;
   return [
+    h("p", { class: "muted" }, "An agent works without anyone watching. These limits stop a run as soon as one of them is reached, so a stuck or runaway agent cannot go on forever or spend too much. Empty fields use the default shown."),
     h("div", { class: "row" },
-      h("label", {}, "Stop after", select(ed, "spec.sandbox.timeout", [["", "Default (" + short(l.defaults.timeout) + ")"], ...TIMEOUTS.map((t) => [t, t])])),
-      h("label", {}, "Spend at most (USD)", number(ed, "spec.budget.maxCostUSD", { min: "0.01", max: String(l.maxCostUSD), placeholder: String(l.defaults.maxCostUSD) })),
-      h("label", {}, "Tokens at most", number(ed, "spec.budget.maxTokens", { min: "1", max: String(l.maxTokens), step: "1", placeholder: l.defaults.maxTokens.toLocaleString("en-US") }))),
-    h("details", {}, h("summary", {}, "Computer size"),
+      h("label", {}, "Longest run time", select(ed, "spec.sandbox.timeout", [["", "Default (" + short(l.defaults.timeout) + ")"], ...TIMEOUTS.map((t) => [t, t])]),
+        help(h, "The sandbox is switched off after this.")),
+      h("label", {}, "Most money (USD)", number(ed, "spec.budget.maxCostUSD", { min: "0.01", max: String(l.maxCostUSD), placeholder: String(l.defaults.maxCostUSD) }),
+        help(h, "What the model's use may cost. Counted for models the runner has a price for (runner settings).")),
+      h("label", {}, "Most tokens", number(ed, "spec.budget.maxTokens", { min: "1", max: String(l.maxTokens), step: "1", placeholder: l.defaults.maxTokens.toLocaleString("en-US") }),
+        help(h, "Text the model reads and writes, in tokens (about ¾ of a word each). Counted for every model."))),
+    h("details", {}, h("summary", {}, "Size of the sandbox"),
       h("div", { class: "row" },
         h("label", {}, "CPUs", number(ed, "spec.sandbox.cpus", { min: "1", max: String(l.maxCPUs), step: "1", placeholder: String(l.defaults.cpus) })),
         h("label", {}, "Memory", select(ed, "spec.sandbox.memoryMiB", [["", "Default (" + l.defaults.memoryMiB + " MiB)"], ...MEMORY.map((m) => [m, m >= 1024 ? m / 1024 + " GiB" : m + " MiB"])])),
-        h("label", {}, "Files it can hand back (MiB)", number(ed, "spec.sandbox.diskMiB", { min: "1", max: String(l.maxDiskMiB), step: "1", placeholder: String(l.defaults.diskMiB) })))),
+        h("label", {}, "Results it can hand back (MiB)", number(ed, "spec.sandbox.diskMiB", { min: "1", max: String(l.maxDiskMiB), step: "1", placeholder: String(l.defaults.diskMiB) }),
+          help(h, "Files the agent leaves in its work folder are returned when it finishes, up to this size.")))),
   ];
 }
 
@@ -495,17 +500,18 @@ function network(ed) {
   });
   const private_ = get(ed.doc, "spec.permissions.network.allowPrivateNetworks") === true;
   return [
-    rules.length === 0 ? h("p", { class: "muted" }, "No internet: the agent cannot reach anything.") : help(h, "Only these hosts, only these ports (443 if none). Use *.example.com for all its subdomains."),
+    rules.length === 0 ? h("p", { class: "muted" }, "No internet: the agent cannot reach anything.") : help(h, "The agent can reach only these hosts, on these ports (443, the usual one for https, if none). *.example.com means all of example.com's subdomains."),
     list,
     h("div", { class: "actions" }, h("button", { type: "button", onclick: () => {
       put(ed.doc, "spec.permissions.network.egress", [...rules, { host: "" }]);
       changed(ed, true);
     } }, "Allow a host")),
-    checkbox(ed, "It may also reach my own network (names like nas.lan)", private_, (on) => {
+    checkbox(ed, "Some of these hosts are in my own network (e.g. nas.lan, a model server at home)", private_, (on) => {
       put(ed.doc, "spec.permissions.network.allowPrivateNetworks", on || undefined);
       changed(ed, true);
     }),
-    private_ && h("div", { class: "error-box" }, "Your own network is open to the agent for the hosts above: routers, NAS, other computers. Allow only what it needs."),
+    help(h, "Needed for names that only exist at home. Without it, the agent can only reach public internet hosts."),
+    private_ && h("div", { class: "error-box" }, "Hosts in your own network (a NAS, a router, other computers) can be reached if they are listed above. List only what the agent needs."),
   ];
 }
 
@@ -561,21 +567,17 @@ function toolLabel(t) {
 
 // --- helpers and approvals ---
 
-function helpers(ed) {
+function approvals(ed) {
   const { h } = ed.ui;
-  const l = ed.ctx.limits;
   const required = get(ed.doc, "spec.approvals.requireFor") || [];
-  const actions = [...new Set([...l.approvalActions, ...required])];
+  const actions = [...new Set([...ed.ctx.limits.approvalActions, ...required])];
   return [
-    h("label", {}, "Helper agents it may start", number(ed, "spec.permissions.subagents.max", { min: "0", max: String(l.maxSubagents), step: "1", placeholder: "0 (none)" }),
-      help(h, "Each helper runs in its own sandbox with at most this harness's permissions, and shares its budget.")),
-    h("p", {}, "Ask me first before it does any of these:"),
+    h("p", { class: "muted" }, "The agent pauses before these and waits for you: you approve or deny on the dashboard. Without an answer it is denied after a while (30 minutes, unless the runner is set otherwise). For a scheduled run, only choose what you will be around to answer."),
     h("div", { class: "checks" }, actions.map((a) => checkbox(ed, APPROVAL_LABELS[a] || a, required.includes(a), (on) => {
       const next = on ? [...required, a] : required.filter((x) => x !== a);
       put(ed.doc, "spec.approvals.requireFor", next);
       changed(ed);
     }))),
-    help(h, "The agent waits until you approve or deny on the dashboard."),
   ];
 }
 
@@ -583,7 +585,11 @@ function helpers(ed) {
 
 function advanced(ed) {
   const { h } = ed.ui;
+  const l = ed.ctx.limits;
   return [
+    [h("h3", {}, "Helper agents"),
+      help(h, "The agent can split a big task and start helper agents for parts of it by itself; you do not talk to them. Each helper runs in its own sandbox with at most this harness's permissions and shares its limits. Leave it at 0 unless the task is large."),
+      h("label", {}, "Helper agents it may start", number(ed, "spec.permissions.subagents.max", { min: "0", max: String(l.maxSubagents), step: "1", placeholder: "0 (it works alone)" }))],
     rows(ed, "MCP servers", "spec.mcp.servers", [["name", "Name", "notes"], ["url", "Address (https://…)", "https://mcp.example.com/mcp"]],
       "Tools the agent may call. Their host must be allowed under Internet and network."),
     rows(ed, "Other agents (A2A)", "spec.a2a.agents", [["name", "Name", "reviewer"], ["url", "Address (https://…)", "https://agent.example.com/a2a"]],
