@@ -66,6 +66,10 @@ var webFS embed.FS
 //	GET    /api/runners/{runner}/credentials     the credentials it can broker, without secrets
 //	PUT    /api/runners/{runner}/credentials/{name}   add or change one (the secret is write-only)
 //	DELETE /api/runners/{runner}/credentials/{name}
+//	GET    /api/credentials                      the Control Center's credentials (never their secrets) and which runners have them
+//	PUT    /api/credentials/{name}               add or change one (the secret is write-only)
+//	DELETE /api/credentials/{name}
+//	POST   /api/credentials/{name}/copy          copy it to a runner now
 //	POST   /api/harness/decode                   a harness's YAML as the form's data
 //	POST   /api/harness/encode                   the form's data as YAML, checked
 //	GET    /api/harness/limits                   the bounds and defaults the form shows
@@ -105,6 +109,8 @@ type Server struct {
 
 	// modelsMu serializes the model catalog's reads and writes.
 	modelsMu sync.Mutex
+	// credMu serializes the credential store and copying from it.
+	credMu sync.Mutex
 }
 
 // NewServer returns a Control Center using the config file at cfgPath and
@@ -160,6 +166,10 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /api/runners/{runner}/credentials", s.credentialList)
 	mux.HandleFunc("PUT /api/runners/{runner}/credentials/{name}", s.credentialSet)
 	mux.HandleFunc("DELETE /api/runners/{runner}/credentials/{name}", s.credentialRemove)
+	mux.HandleFunc("GET /api/credentials", s.credentialsList)
+	mux.HandleFunc("PUT /api/credentials/{name}", s.credentialStore)
+	mux.HandleFunc("DELETE /api/credentials/{name}", s.credentialDelete)
+	mux.HandleFunc("POST /api/credentials/{name}/copy", s.credentialCopy)
 	mux.HandleFunc("POST /api/harness/decode", s.harnessDecode)
 	mux.HandleFunc("POST /api/harness/encode", s.harnessEncode)
 	mux.HandleFunc("GET /api/harness/limits", s.harnessLimits)
@@ -832,12 +842,21 @@ type runRequest struct {
 	// Confirmed must be true: the user saw the explanation of exactly
 	// this document and chose to start it.
 	Confirmed bool `json:"confirmed"`
+	// SudoPassword is for copying credentials to a runner over ssh whose
+	// sudo needs it.
+	SudoPassword *string `json:"sudoPassword,omitempty"`
 }
 
 func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	var req runRequest
 	if !readJSON(w, r, &req) {
 		return
+	}
+	var pw []byte
+	if req.SudoPassword != nil {
+		pw = []byte(*req.SudoPassword)
+		*req.SudoPassword = ""
+		defer clear(pw)
 	}
 	if !req.Confirmed {
 		writeError(w, http.StatusBadRequest, errString("confirm that you reviewed what this harness may do"))
@@ -864,6 +883,20 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("this harness is meant for %q, but runner %s is %q: change spec.target or pick another runner",
 			h.Spec.Target, req.Runner, st.Target))
 		return
+	}
+	// The credentials it is granted go to the runner first (ADR-0019).
+	if names := h.Spec.Permissions.Credentials; len(names) > 0 {
+		cctx, ccancel := context.WithTimeout(r.Context(), adminTimeout)
+		err := s.copyCredentials(cctx, req.Runner, names, pw, false)
+		ccancel()
+		if err != nil {
+			writeCopyResult(w, err, nil)
+			return
+		}
+		// A fresh deadline: copying over ssh may have taken a while.
+		var cancel2 context.CancelFunc
+		ctx, cancel2 = context.WithTimeout(r.Context(), runnerTimeout)
+		defer cancel2()
 	}
 	if chk.Trigger != "" {
 		sc, err := c.AddSchedule(ctx, []byte(req.YAML))
