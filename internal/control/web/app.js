@@ -3,7 +3,7 @@
 import { dashboardView } from "./dashboard.js";
 import { localPanel } from "./local.js";
 import { credentialsView } from "./credentials.js";
-import { runnerSettings } from "./settings.js";
+import { settingsPanel } from "./settings.js";
 import { modelsView } from "./models.js";
 import { harnessEditor } from "./harness-form.js";
 //
@@ -189,7 +189,9 @@ function route() {
   say("");
   const parts = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
   for (const a of document.querySelectorAll("nav a")) {
-    a.classList.toggle("active", a.dataset.nav === (parts[0] || "dashboard"));
+    // A detail page belongs to its list's tab.
+    const tab = { runner: "runners", harness: "harnesses", new: "harnesses", job: "jobs" }[parts[0]] || parts[0] || "dashboard";
+    a.classList.toggle("active", a.dataset.nav === tab);
   }
   const routes = {
     dashboard: () => dashboardView({ h, api, set, show, every, fail, say, badge, fmtTime, fmtDuration, localPanel }),
@@ -199,6 +201,7 @@ function route() {
     harness: () => harnessView(parts[1]),
     new: () => harnessView(""),
     runners: () => runnersView(),
+    runner: () => runnerView(parts[1]),
     credentials: () => credentialsView({ h, api, set, show, fail, say }),
     models: () => modelsView({ h, api, set, show, fail, say }),
     schedules: () => schedulesView(),
@@ -586,7 +589,7 @@ async function runnersView() {
   } catch {
     sshHosts = []; // only suggestions
   }
-  const list = h("div", { class: "grid wide" });
+  const list = h("div", { class: "grid" });
   const fields = runnerFields();
   const form = h("form", { class: "inline", onsubmit: async (ev) => {
     ev.preventDefault();
@@ -676,7 +679,25 @@ function elapsed(since) {
 }
 
 // runnerCard shows a runner; pending while it has not answered yet.
-function runnerCard(r, pending) {
+function runnerBadge(r, pending) {
+  const st = r.status;
+  if (r.installing) return badge(st ? "updating…" : "installing…", "queued");
+  if (pending) return badge("checking…", "queued");
+  if (!st) return badge("unreachable", "failed");
+  return st.killed ? badge("stopped", "killed") : badge("ready", "succeeded");
+}
+
+function installingNotice(r) {
+  const st = r.status;
+  return r.installing && h("div", { class: "notice-box" },
+    h("p", {}, (st ? "Updating" : "Installing") + " for " + elapsed(r.installing.started) +
+      (st ? ". The runner restarts at the end." : ". Building the VM images can take several minutes.")),
+    r.installing.step && h("p", { class: "muted" }, "Now: " + r.installing.step));
+}
+
+// runnerActions are the buttons a runner offers wherever it is shown;
+// after is called once one of them changed something.
+function runnerActions(r, pending, after) {
   const st = r.status;
   const update = updateTo(r) || r.localUpdate || "";
   const path = "/api/runners/" + encodeURIComponent(r.name);
@@ -684,56 +705,167 @@ function runnerCard(r, pending) {
     try {
       await api("POST", path + "/" + what);
       say(msg);
-      runnersView();
+      after();
     } catch (err) {
       fail(err);
     }
   };
-  return h("div", { class: "card" },
-    h("h3", {}, r.name, " ", r.installing ? badge(st ? "updating…" : "installing…", "queued")
-      : pending ? badge("checking…", "queued") : st ? (st.killed ? badge("stopped", "killed") : badge("ready", "succeeded")) : badge("unreachable", "failed")),
-    r.installing && h("div", { class: "notice-box" },
-      h("p", {}, (st ? "Updating" : "Installing") + " for " + elapsed(r.installing.started) +
-        (st ? ". The runner restarts at the end." : ". Building the VM images can take several minutes.")),
-      r.installing.step && h("p", { class: "muted" }, "Now: " + r.installing.step)),
-    h("p", { class: "muted" }, r.ssh ? "ssh " + r.ssh : r.socket),
+  return [
+    st && !st.killed && h("button", { class: "danger", onclick: act("kill", "Stopping every job on " + r.name + ".") }, "Stop all jobs"),
+    st && st.killed && h("button", { onclick: act("resume", r.name + " accepts jobs again. Its schedules stay paused until you resume them.") }, "Accept jobs again"),
+    r.installing && r.ssh && h("button", { class: "primary", onclick: () => installRunner(r, update || (st && st.version), after) }, "Show progress"),
+    !r.installing && r.ssh && !pending && !st && h("button", { class: "primary", onclick: () => installRunner(r, undefined, after) }, "Install Runner"),
+    !r.installing && update && h("button", { class: "primary", onclick: () => r.localUpdate ? updateLocal(r, after) : installRunner(r, update, after) }, "Update runner"),
+  ];
+}
+
+// runnerCard is a runner on the overview: the essentials, the actions,
+// and a click away from its page.
+function runnerCard(r, pending) {
+  const st = r.status;
+  const update = updateTo(r) || r.localUpdate || "";
+  const href = "#/runner/" + encodeURIComponent(r.name);
+  const card = h("div", { class: "card clickable" },
+    h("h3", {}, h("a", { href }, r.name), " ", runnerBadge(r, pending)),
+    h("p", { class: "muted" }, r.ssh ? "ssh " + r.ssh : st && st.target === "local" ? "This Mac" : "On this computer"),
+    installingNotice(r),
     st && h("dl", { class: "facts" },
       h("dt", {}, "Target"), h("dd", {}, st.target),
-      h("dt", {}, "Jobs"), h("dd", {}, st.running + " running, " + st.queued + " queued (at most " + st.maxConcurrent + " at once)"),
-      h("dt", {}, "Schedules"), h("dd", {}, String(st.schedules), st.contactTimeout && h("span", { class: "muted note" },
-        "Paused if nobody contacts this runner for " + st.contactTimeout + "; this Control Center does every 5 minutes while it runs.")),
-      h("dt", {}, "Last contact"), h("dd", {}, fmtTime(st.lastContact)),
-      h("dt", {}, "Plugins"), h("dd", {}, (r.plugins || []).length === 0 ? "none" : h("ul", { class: "explain" },
-        r.plugins.map((p) => h("li", {}, p.name + " " + p.version + " (" + p.type + ", risk " + p.risk + ")",
-          p.status && p.status.lastResult ? " – last run " + fmtTime(p.status.lastRun) + ": " + p.status.lastResult : "")))),
-      h("dt", {}, "Images"), h("dd", {}, st.images.join(", ")),
-      h("dt", {}, "Tools"), h("dd", {}, Object.keys(st.tools || {}).length === 0 ? "none" : Object.entries(st.tools).map(([img, list]) =>
-        h("div", {}, h("span", { class: "muted" }, img), h("ul", { class: "chips" }, list.map((t) => h("li", {}, t)))))),
-      h("dt", {}, "Version"), h("dd", {}, st.version || "–", update && h("span", { class: "muted note" },
-        r.localUpdate ? "This Control Center is " + update + "; the runner still runs the older one until it restarts." : "Version " + update + " is available."))),
+      h("dt", {}, "Jobs"), h("dd", {}, st.running + " of " + st.maxConcurrent + " running" + (st.queued ? ", " + st.queued + " waiting" : "")),
+      h("dt", {}, "Schedules"), h("dd", {}, String(st.schedules)),
+      h("dt", {}, "Version"), h("dd", {}, st.version || "–", update && " ", update && badge("update available", "queued"))),
     r.error && h("div", { class: "error-box" }, r.error),
-    h("div", { class: "actions" },
-      st && !st.killed && h("button", { class: "danger", onclick: act("kill", "Stopping every job on " + r.name + ".") }, "Stop all jobs"),
-      st && st.killed && h("button", { onclick: act("resume", r.name + " accepts jobs again. Its schedules stay paused until you resume them.") }, "Accept jobs again"),
-      r.installing && r.ssh && h("button", { class: "primary", onclick: () => installRunner(r, update || (st && st.version)) }, "Show progress"),
-      !r.installing && r.ssh && !pending && !st && h("button", { class: "primary", onclick: () => installRunner(r) }, "Install Runner"),
-      !r.installing && update && h("button", { class: "primary", onclick: () => r.localUpdate ? updateLocal(r) : installRunner(r, update) }, "Update runner"),
-      !r.installing && st && h("button", { onclick: () => runnerSettings({ h, api, set, say }, r, runnersView) }, "Settings"),
-      h("button", { onclick: () => editRunner(r) }, "Edit"),
-      h("button", { onclick: async () => {
-        if (!confirm("Remove " + r.name + " from this list? The runner itself keeps running.")) return;
-        try {
-          await api("DELETE", path);
-          runnersView();
-        } catch (err) {
-          fail(err);
-        }
-      } }, "Remove")));
+    h("div", { class: "actions" }, ...runnerActions(r, pending, runnersView), h("a", { class: "button", href }, "Open")));
+  // The whole card opens the runner's page, except its buttons and links.
+  card.addEventListener("click", (ev) => {
+    if (!ev.target.closest("button, a, input, select, textarea, summary")) location.hash = href;
+  });
+  return card;
+}
+
+// runnerView is one runner's page: status, settings, connection, tools
+// and plugins. The status parts follow the runner; the forms stay as the
+// person left them.
+async function runnerView(name) {
+  try {
+    sshHosts = (await api("GET", "/api/ssh-hosts")).hosts;
+  } catch {
+    sshHosts = [];
+  }
+  const path = "/api/runners/" + encodeURIComponent(name);
+  let r;
+  try {
+    r = await api("GET", path);
+  } catch (err) {
+    fail(err);
+    return;
+  }
+  const head = h("div", { class: "head" });
+  const status = h("div", { class: "card" });
+  const tools = h("div", { class: "card" });
+  const plugins = h("div", { class: "card" });
+  const jobs = h("div", { class: "card" }, h("h2", {}, "Recent jobs"), h("p", { class: "muted" }, "Loading…"));
+  const reload = async () => {
+    try {
+      r = await api("GET", path);
+    } catch (err) {
+      if (err.status === 404) location.hash = "#/runners";
+      return;
+    }
+    paint();
+    loadJobs();
+  };
+  // The runner's last jobs, newest first.
+  const loadJobs = async () => {
+    let data;
+    try {
+      data = await api("GET", "/api/jobs");
+    } catch {
+      return;
+    }
+    const mine = data.jobs.filter((j) => j.runner === name).slice(0, 8);
+    set(jobs, h("h2", {}, "Recent jobs"),
+      mine.length === 0 ? h("p", { class: "muted" }, "No jobs on " + name + " yet.") : h("div", { class: "table-wrap" }, h("table", {},
+        h("tbody", {}, mine.map((j) => {
+          const href = "#/job/" + encodeURIComponent(j.runner) + "/" + encodeURIComponent(j.id);
+          return h("tr", { class: "link", onclick: () => { location.hash = href; } },
+            h("td", {}, badge(j.state)), h("td", {}, h("a", { href }, j.harness)), h("td", {}, fmtTime(j.started || j.created)),
+            h("td", {}, fmtDuration(j.started, j.finished)));
+        })))),
+      mine.length > 0 && h("p", {}, h("a", { href: "#/jobs" }, "All jobs")));
+  };
+  const paint = () => {
+    const st = r.status;
+    const update = updateTo(r) || r.localUpdate || "";
+    set(head,
+      h("div", {}, h("h1", {}, r.name, " ", runnerBadge(r, false)), h("p", { class: "muted" }, r.ssh ? "Reached over ssh: " + r.ssh : "On this computer: " + r.socket)),
+      h("div", { class: "actions" }, ...runnerActions(r, false, reload),
+        h("button", { onclick: async () => {
+          if (!confirm("Remove " + r.name + " from this list? The runner itself keeps running.")) return;
+          try {
+            await api("DELETE", path);
+            location.hash = "#/runners";
+          } catch (err) {
+            fail(err);
+          }
+        } }, "Remove"),
+        h("a", { class: "button", href: "#/runners" }, "Back")));
+    set(status, h("h2", {}, "Status"), installingNotice(r),
+      r.error && h("div", { class: "error-box" }, r.error),
+      st ? h("dl", { class: "facts" },
+        h("dt", {}, "Runs harnesses for"), h("dd", {}, st.target, h("span", { class: "muted note" }, "Harnesses choose this runner with this target.")),
+        h("dt", {}, "Jobs"), h("dd", {}, st.running + " running, " + st.queued + " waiting (at most " + st.maxConcurrent + " at once)"),
+        h("dt", {}, "Schedules"), h("dd", {}, String(st.schedules), st.contactTimeout && h("span", { class: "muted note" },
+          "Paused if nobody contacts this runner for " + st.contactTimeout + "; this Control Center does every 5 minutes while it runs.")),
+        h("dt", {}, "Last contact"), h("dd", {}, fmtTime(st.lastContact)),
+        h("dt", {}, "Sandbox images"), h("dd", {}, st.images.join(", ")),
+        h("dt", {}, "Version"), h("dd", {}, st.version || "–", update && h("span", { class: "muted note" },
+          r.localUpdate ? "This Control Center is " + update + "; the runner still runs the older one until it is updated." : "Version " + update + " is available.")))
+        : h("p", { class: "muted" }, "The runner does not answer."));
+    set(tools, h("h2", {}, "Tools"),
+      h("p", { class: "muted" }, "Packages a harness may install into its sandbox, per image. They come from the runner's checked package list."),
+      !st || Object.keys(st.tools || {}).length === 0 ? h("p", { class: "muted" }, "none") : Object.entries(st.tools).map(([img, list]) =>
+        h("div", {}, h("h3", {}, img), h("ul", { class: "chips" }, list.map((t) => h("li", {}, t))))));
+    set(plugins, h("h2", {}, "Plugins"),
+      (r.plugins || []).length === 0 ? h("p", { class: "muted" }, "No plugins installed.") : h("ul", { class: "explain" },
+        r.plugins.map((p) => h("li", {}, p.name + " " + p.version + " (" + p.type + ", risk " + p.risk + ")",
+          p.status && p.status.lastResult ? " – last run " + fmtTime(p.status.lastRun) + ": " + p.status.lastResult : ""))));
+  };
+  paint();
+  loadJobs();
+
+  // The forms are made once: a refresh must not undo what is being typed.
+  const settings = h("div", { class: "card" }, h("h2", {}, "Settings"),
+    r.status ? settingsPanel({ h, api, set, say }, r, reload) : h("p", { class: "muted" }, "Settings can be changed while the runner answers."));
+  const fields = runnerFields(r);
+  const problem = h("div", {});
+  const connection = h("form", { class: "card", onsubmit: async (ev) => {
+    ev.preventDefault();
+    set(problem);
+    const ref = fields.read();
+    try {
+      await api("PUT", path, ref);
+      say("Saved runner " + ref.name + ".");
+      if (ref.name !== name) location.hash = "#/runner/" + encodeURIComponent(ref.name);
+      else reload();
+    } catch (err) {
+      set(problem, h("div", { class: "error-box" }, err.message));
+    }
+  } },
+  h("h2", {}, "Connection"),
+  h("p", { class: "muted" }, "How this Control Center reaches the runner. Harnesses address a runner by its target (" +
+    (r.status ? r.status.target : "set when it was installed") + "), which stays the same."),
+  h("div", { class: "form-stack" }, ...fields.labels),
+  problem,
+  h("div", { class: "actions" }, h("button", { class: "primary" }, "Save")));
+
+  show(head, h("div", { class: "detail-grid" }, h("div", { class: "stack" }, status, jobs, settings), h("div", { class: "stack" }, connection, tools, plugins)));
+  every(5000, reload);
 }
 
 // updateLocal restarts the Mac's own runner with this Control Center's
 // hcc (it runs the same program file), after the usual setup checks.
-async function updateLocal(r) {
+async function updateLocal(r, after = runnersView) {
   const st = r.status;
   if (st && st.running + st.queued > 0) {
     fail(new Error("Jobs are running or queued on " + r.name + ". Updating restarts it and would end them: wait until they finish, or stop them first."));
@@ -746,13 +878,13 @@ async function updateLocal(r) {
   } catch (err) {
     fail(err);
   }
-  runnersView();
+  after();
 }
 
 // installRunner asks before making system changes on an ssh host, then
 // follows the installer's progress without blocking the page. With
 // version, it updates the runner that answers there, keeping its target.
-function installRunner(r, version) {
+function installRunner(r, version, after = runnersView) {
   const st = version ? r.status : null;
   const target = h("input", { required: true, pattern: "server:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", value: st ? st.target : "server:" + r.name, autocomplete: "off", readonly: !!st });
   const password = h("input", { type: "password", autocomplete: "off", placeholder: "only if sudo asks for one" });
@@ -770,7 +902,7 @@ function installRunner(r, version) {
   };
   dialog.addEventListener("close", () => {
     clearTimer();
-    if (succeeded) runnersView();
+    if (succeeded) after();
   }, { once: true });
   confirmBox.addEventListener("change", () => { start.disabled = !confirmBox.checked; });
 
@@ -848,31 +980,6 @@ function installRunner(r, version) {
 
 function pathForInstall(r) {
   return "/api/runners/" + encodeURIComponent(r.name) + "/install";
-}
-
-function editRunner(r) {
-  const fields = runnerFields(r);
-  const problem = h("div", {});
-  const form = h("form", { method: "dialog", onsubmit: async (ev) => {
-    ev.preventDefault();
-    const ref = fields.read();
-    try {
-      await api("PUT", "/api/runners/" + encodeURIComponent(r.name), ref);
-      dialog.close();
-      say("Saved runner " + ref.name + ".");
-      runnersView();
-    } catch (err) {
-      set(problem, h("div", { class: "error-box" }, err.message));
-    }
-  } },
-  h("h1", {}, "Edit " + r.name),
-  h("p", { class: "muted" }, "This only changes how this Control Center reaches the runner. Harnesses address a runner by its own target name (" +
-    (r.status ? r.status.target : "set when it was installed") + "), which stays the same."),
-  h("div", { class: "form-stack" }, ...fields.labels),
-  problem,
-  h("div", { class: "actions" }, h("button", { class: "primary" }, "Save"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
-  set(dialog, form);
-  dialog.showModal();
 }
 
 // --- approvals (shown on every page) ---

@@ -242,3 +242,9 @@ textarea.prompt { width: 100%; min-height: 8rem; font: inherit; resize: vertical
 /* The explanation stays in view beside a long form. */
 .editor > .card { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: auto; }
 input.ports { max-width: 8rem; }
+
+/* Runner cards open the runner's page; its page has two columns. */
+.card.clickable { cursor: pointer; }
+.card.clickable:hover { border-color: var(--accent); }
+.detail-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; align-items: start; }
+@media (max-width: 900px) { .detail-grid { grid-template-columns: 1fr; } }
