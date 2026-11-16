@@ -734,7 +734,7 @@ function elapsed(since) {
 // runnerCard shows a runner; pending while it has not answered yet.
 function runnerCard(r, pending) {
   const st = r.status;
-  const update = updateTo(r);
+  const update = updateTo(r) || r.localUpdate || "";
   const path = "/api/runners/" + encodeURIComponent(r.name);
   const act = (what, msg) => async () => {
     try {
@@ -765,14 +765,15 @@ function runnerCard(r, pending) {
       h("dt", {}, "Images"), h("dd", {}, st.images.join(", ")),
       h("dt", {}, "Tools"), h("dd", {}, Object.keys(st.tools || {}).length === 0 ? "none" : Object.entries(st.tools).map(([img, list]) =>
         h("div", {}, h("span", { class: "muted" }, img), h("ul", { class: "chips" }, list.map((t) => h("li", {}, t)))))),
-      h("dt", {}, "Version"), h("dd", {}, st.version || "–", update && h("span", { class: "muted note" }, "Version " + update + " is available."))),
+      h("dt", {}, "Version"), h("dd", {}, st.version || "–", update && h("span", { class: "muted note" },
+        r.localUpdate ? "This Control Center is " + update + "; the runner still runs the older one until it restarts." : "Version " + update + " is available."))),
     r.error && h("div", { class: "error-box" }, r.error),
     h("div", { class: "actions" },
       st && !st.killed && h("button", { class: "danger", onclick: act("kill", "Stopping every job on " + r.name + ".") }, "Stop all jobs"),
       st && st.killed && h("button", { onclick: act("resume", r.name + " accepts jobs again. Its schedules stay paused until you resume them.") }, "Accept jobs again"),
-      r.installing && h("button", { class: "primary", onclick: () => installRunner(r, update || (st && st.version)) }, "Show progress"),
+      r.installing && r.ssh && h("button", { class: "primary", onclick: () => installRunner(r, update || (st && st.version)) }, "Show progress"),
       !r.installing && r.ssh && !pending && !st && h("button", { class: "primary", onclick: () => installRunner(r) }, "Install Runner"),
-      !r.installing && update && h("button", { class: "primary", onclick: () => installRunner(r, update) }, "Update runner"),
+      !r.installing && update && h("button", { class: "primary", onclick: () => r.localUpdate ? updateLocal(r) : installRunner(r, update) }, "Update runner"),
       !r.installing && st && h("button", { onclick: () => runnerSettings({ h, api, set, say }, r, runnersView) }, "Settings"),
       h("button", { onclick: () => editRunner(r) }, "Edit"),
       h("button", { onclick: async () => {
@@ -784,6 +785,24 @@ function runnerCard(r, pending) {
           fail(err);
         }
       } }, "Remove")));
+}
+
+// updateLocal restarts the Mac's own runner with this Control Center's
+// hcc (it runs the same program file), after the usual setup checks.
+async function updateLocal(r) {
+  const st = r.status;
+  if (st && st.running + st.queued > 0) {
+    fail(new Error("Jobs are running or queued on " + r.name + ". Updating restarts it and would end them: wait until they finish, or stop them first."));
+    return;
+  }
+  if (!confirm("Update the runner on this Mac to " + r.localUpdate + "? It restarts; its jobs history, schedules and settings stay.")) return;
+  try {
+    await api("POST", "/api/local/setup");
+    say("Updating the runner on this Mac…");
+  } catch (err) {
+    fail(err);
+  }
+  runnersView();
 }
 
 // installRunner asks before making system changes on an ssh host, then

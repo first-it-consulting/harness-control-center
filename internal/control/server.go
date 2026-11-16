@@ -305,6 +305,23 @@ type RunnerView struct {
 	// Installing is set while this Control Center installs or updates
 	// the runner (its card says so and shows the progress).
 	Installing *installProgress `json:"installing,omitempty"`
+	// LocalUpdate is set on the Mac's own runner when it runs another
+	// version than this Control Center: the version an update brings.
+	LocalUpdate string `json:"localUpdate,omitempty"`
+}
+
+// fillLocal sets what only the Mac's own runner's card shows.
+func (s *Server) fillLocal(v *RunnerView) {
+	l := s.local
+	if l == nil || l.socket == "" || v.Socket != l.socket {
+		return
+	}
+	if p := l.localProgress(); p != nil {
+		v.Installing = p
+	}
+	if v.Status != nil && versioned(l.version) && v.Status.Version != l.version {
+		v.LocalUpdate = l.version
+	}
 }
 
 // eachRunner calls fn for every configured runner concurrently.
@@ -354,6 +371,7 @@ func (s *Server) runners(w http.ResponseWriter, r *http.Request) {
 	for i := range views {
 		views[i].Status, views[i].Plugins = got[views[i].Name].Status, got[views[i].Name].Plugins
 		views[i].Installing = s.installing(views[i].Name)
+		s.fillLocal(&views[i])
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -379,6 +397,7 @@ func (s *Server) oneRunner(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		v.Error = err.Error()
 	}
+	s.fillLocal(&v)
 	writeJSON(w, http.StatusOK, v)
 }
 
