@@ -14,6 +14,12 @@ spec:
     name: claude-sonnet-5-5
     endpoint: https://api.anthropic.com
     credential: anthropic
+    # Optional: a faster model for quick side tasks (same endpoint), the
+    # longest answer, and how much the model may think per answer (must be
+    # less than maxOutputTokens). Leave them out for Claude Code's defaults.
+    smallModel: claude-haiku-5-5
+    maxOutputTokens: 32000
+    thinkingTokens: 8000
   target: server:my-runner
   sandbox:
     image: claude-code

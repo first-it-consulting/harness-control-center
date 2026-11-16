@@ -1065,6 +1065,10 @@ type TaskModel struct {
 	Name          string `json:"name"`
 	Endpoint      string `json:"endpoint"`
 	ContextWindow int    `json:"contextWindow,omitempty"`
+	// SmallModel, MaxOutputTokens and ThinkingTokens: see spec.Model.
+	SmallModel      string `json:"smallModel,omitempty"`
+	MaxOutputTokens int    `json:"maxOutputTokens,omitempty"`
+	ThinkingTokens  int    `json:"thinkingTokens,omitempty"`
 }
 
 // modelName is the model a harness uses, "" for none.
@@ -1087,7 +1091,8 @@ func taskFor(h *spec.Harness, loop *TaskLoop, tools *TaskTools) ([]byte, error) 
 		t.A2A = append(t.A2A, TaskA2A{Name: a.Name, URL: a.URL})
 	}
 	if m := h.Spec.Model; m != nil {
-		t.Model = &TaskModel{Name: m.Name, Endpoint: m.Endpoint, ContextWindow: m.ContextWindow}
+		t.Model = &TaskModel{Name: m.Name, Endpoint: m.Endpoint, ContextWindow: m.ContextWindow,
+			SmallModel: m.SmallModel, MaxOutputTokens: m.MaxOutputTokens, ThinkingTokens: m.ThinkingTokens}
 	}
 	b, err := json.Marshal(t)
 	if err != nil {

@@ -107,6 +107,15 @@ func (e *Engine) Explain() []string {
 			line += ", with a context window of " + groupDigits(int64(m.ContextWindow)) + " tokens"
 		}
 		line += "."
+		if m.SmallModel != "" && m.SmallModel != m.Name {
+			line += " Quick side tasks use " + m.SmallModel + " at the same endpoint (its tokens count toward the budget; the cost limit uses " + m.Name + "'s price)."
+		}
+		if m.MaxOutputTokens > 0 {
+			line += " Each answer is at most " + groupDigits(int64(m.MaxOutputTokens)) + " tokens long."
+		}
+		if m.ThinkingTokens > 0 {
+			line += " It may think for up to " + groupDigits(int64(m.ThinkingTokens)) + " tokens per answer (they count toward the budget)."
+		}
 		if scheme, _, _ := m.EndpointHostPort(); scheme == "http" {
 			line += " UNENCRYPTED: prompts, code and the credential cross the network in clear text."
 		}

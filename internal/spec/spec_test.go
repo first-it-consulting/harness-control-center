@@ -262,6 +262,12 @@ func TestModel(t *testing.T) {
 	if h.Spec.Model.ContextWindow != 262144 {
 		t.Errorf("contextWindow = %d", h.Spec.Model.ContextWindow)
 	}
+	params := strings.Replace(with, "    contextWindow: 262144\n", "    contextWindow: 262144\n    smallModel: qwen3-4b\n    maxOutputTokens: 32000\n    thinkingTokens: 16000\n", 1)
+	if h, err := Parse([]byte(params)); err != nil {
+		t.Fatal(err)
+	} else if m := h.Spec.Model; m.SmallModel != "qwen3-4b" || m.MaxOutputTokens != 32000 || m.ThinkingTokens != 16000 {
+		t.Errorf("model = %+v", m)
+	}
 	scheme, host, port := h.Spec.Model.EndpointHostPort()
 	if scheme != "http" || host != "llm.example" || port != 4000 {
 		t.Errorf("EndpointHostPort = %s %s %d", scheme, host, port)
@@ -287,6 +293,12 @@ func TestModel(t *testing.T) {
 		"large window":     {"{name: m, endpoint: 'https://a.example', contextWindow: 1000001}", "contextWindow"},
 		"negative window":  {"{name: m, endpoint: 'https://a.example', contextWindow: -1}", "contextWindow"},
 		"text window":      {"{name: m, endpoint: 'https://a.example', contextWindow: 256k}", "cannot unmarshal"},
+		"bad small model":  {"{name: m, endpoint: 'https://a.example', smallModel: 'a; rm -rf /'}", "smallModel"},
+		"few output":       {"{name: m, endpoint: 'https://a.example', maxOutputTokens: 1023}", "maxOutputTokens"},
+		"much output":      {"{name: m, endpoint: 'https://a.example', maxOutputTokens: 262145}", "maxOutputTokens"},
+		"few thinking":     {"{name: m, endpoint: 'https://a.example', thinkingTokens: 100}", "thinkingTokens"},
+		"much thinking":    {"{name: m, endpoint: 'https://a.example', thinkingTokens: 262145}", "thinkingTokens"},
+		"thinking >= out":  {"{name: m, endpoint: 'https://a.example', maxOutputTokens: 8192, thinkingTokens: 8192}", "less than maxOutputTokens"},
 	}
 	for name, tt := range bad {
 		t.Run(name, func(t *testing.T) {
