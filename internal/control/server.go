@@ -66,6 +66,9 @@ var webFS embed.FS
 //	GET    /api/runners/{runner}/credentials     the credentials it can broker, without secrets
 //	PUT    /api/runners/{runner}/credentials/{name}   add or change one (the secret is write-only)
 //	DELETE /api/runners/{runner}/credentials/{name}
+//	POST   /api/harness/decode                   a harness's YAML as the form's data
+//	POST   /api/harness/encode                   the form's data as YAML, checked
+//	GET    /api/harness/limits                   the bounds and defaults the form shows
 //	GET    /api/models                           the model catalog (endpoints, models) and which harnesses use each model
 //	PUT    /api/models                           replace it (validated like a harness's spec.model)
 //	GET    /api/runners/{runner}/settings        its settings and the bounds the UI may set them within
@@ -157,6 +160,9 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /api/runners/{runner}/credentials", s.credentialList)
 	mux.HandleFunc("PUT /api/runners/{runner}/credentials/{name}", s.credentialSet)
 	mux.HandleFunc("DELETE /api/runners/{runner}/credentials/{name}", s.credentialRemove)
+	mux.HandleFunc("POST /api/harness/decode", s.harnessDecode)
+	mux.HandleFunc("POST /api/harness/encode", s.harnessEncode)
+	mux.HandleFunc("GET /api/harness/limits", s.harnessLimits)
 	mux.HandleFunc("GET /api/models", s.modelsGet)
 	mux.HandleFunc("PUT /api/models", s.modelsPut)
 	mux.HandleFunc("GET /api/runners/{runner}/settings", s.settingsGet)

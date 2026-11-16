@@ -5,6 +5,7 @@ import { localPanel } from "./local.js";
 import { credentialsView } from "./credentials.js";
 import { runnerSettings } from "./settings.js";
 import { modelsView } from "./models.js";
+import { harnessEditor } from "./harness-form.js";
 //
 // Everything shown here may come from an agent (job errors, console
 // output, file names), so the DOM is only ever built with textContent and
@@ -390,67 +391,8 @@ async function harnessesView() {
   }
 }
 
-async function harnessView(name) {
-  let doc = TEMPLATE;
-  if (name) {
-    try {
-      doc = (await api("GET", "/api/harnesses/" + encodeURIComponent(name))).yaml;
-    } catch (err) {
-      fail(err);
-      return;
-    }
-  }
-  const text = h("textarea", { class: "yaml", spellcheck: "false", "aria-label": "Harness (YAML)" });
-  text.value = doc;
-  const panel = h("div", { class: "card" });
-  const runBtn = h("button", { class: "primary", onclick: () => runDialog(text.value) }, "Run…");
-  const saveBtn = h("button", { onclick: () => save() }, "Save");
-  const del = name && h("button", { onclick: () => remove() }, "Delete");
-  show(
-    h("div", { class: "head" },
-      h("div", {}, h("h1", {}, name || "New harness"),
-        h("p", { class: "muted" }, "Edit the harness on the left; the right side says in plain words what it may do.")),
-      h("div", { class: "actions" }, saveBtn, runBtn, del, h("a", { class: "button", href: "#/harnesses" }, "Back"))),
-    h("div", { class: "editor" }, text, panel));
-
-  let timer = null;
-  let seq = 0;
-  const check = async () => {
-    const mine = ++seq;
-    try {
-      const c = await api("POST", "/api/check", { yaml: text.value });
-      if (mine !== seq) return;
-      set(panel, ...checkBlock(c));
-      runBtn.disabled = !c.valid;
-      saveBtn.disabled = !c.valid;
-    } catch (err) {
-      fail(err);
-    }
-  };
-  text.addEventListener("input", () => {
-    clearTimeout(timer);
-    timer = setTimeout(check, 300);
-  });
-  await check();
-
-  async function save() {
-    try {
-      const r = await api("PUT", "/api/harnesses", { yaml: text.value });
-      say("Saved " + r.name + ".");
-      if (r.name !== name) location.hash = "#/harness/" + encodeURIComponent(r.name);
-    } catch (err) {
-      fail(err);
-    }
-  }
-  async function remove() {
-    if (!confirm("Delete the harness " + name + "? Jobs that already ran are kept.")) return;
-    try {
-      await api("DELETE", "/api/harnesses/" + encodeURIComponent(name));
-      location.hash = "#/harnesses";
-    } catch (err) {
-      fail(err);
-    }
-  }
+function harnessView(name) {
+  return harnessEditor({ h, api, set, show, fail, say, runDialog, checkBlock }, name, TEMPLATE);
 }
 
 function checkBlock(c) {
