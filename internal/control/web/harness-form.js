@@ -346,7 +346,9 @@ function model(ed) {
   const providers = ed.ctx.providers;
   const m = get(ed.doc, "spec.model");
   const current = providerOf(ed);
-  const opts = [["", "The runtime's default"], ...providers.map((p) => [p.name, p.name + " (" + p.url + ")"])];
+  // Connections switched off on the Models page are not offered (unless
+  // this harness uses one already).
+  const opts = [["", "The runtime's default"], ...providers.filter((p) => !p.disabled || p === current).map((p) => [p.name, p.name + " (" + p.url + ")"])];
   let value = current ? current.name : "";
   if (m && !current) {
     opts.push(["custom", m.endpoint + " (not a provider on the Models page)"]);

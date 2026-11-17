@@ -125,3 +125,31 @@ func fakeProvider(t *testing.T, ts *testServer, handler http.HandlerFunc) {
 	c.Transport = tr
 	ts.s.providerClient = c
 }
+
+func TestUnreachableSaysWhy(t *testing.T) {
+	ts := newTestServer(t)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close() // nothing listens there now
+	c := newProviderClient()
+	c.Transport = &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}}
+	ts.s.providerClient = c
+	_, err = ts.s.fetchModelsWith(context.Background(), Provider{Name: "x", Type: "omlx", URL: "http://mac.lan:4000"}, "", "")
+	want := "nothing is listening at mac.lan:4000"
+	if runtime.GOOS == "windows" {
+		want = "mac.lan:4000" // Windows reports a refusal with its own error number
+	}
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("refused: %v", err)
+	}
+	ts.s.providerClient = newProviderClient()
+	_, err = ts.s.fetchModelsWith(context.Background(), Provider{Name: "x", Type: "other", URL: "https://no-such-host.invalid"}, "", "")
+	if err == nil || !strings.Contains(err.Error(), "is not known") {
+		t.Errorf("unknown name: %v", err)
+	}
+}

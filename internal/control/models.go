@@ -7,12 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -52,6 +56,8 @@ type Provider struct {
 	// needs network.allowPrivateNetworks). Internal names (*.lan …) are
 	// local anyway; this covers a home server with a public-looking name.
 	Local bool `yaml:"local,omitempty" json:"local,omitempty"`
+	// Disabled: kept, but not offered to harnesses.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 // Private reports whether the provider is in the person's own network.
@@ -265,11 +271,16 @@ func (s *Server) providerModels(w http.ResponseWriter, r *http.Request) {
 // fetchModels lists a provider's models: GET <url>/v1/models (Anthropic's
 // and OpenAI-style APIs), or Ollama's /api/tags.
 func (s *Server) fetchModels(ctx context.Context, p Provider) ([]ProviderModel, error) {
-	base := strings.TrimSuffix(p.URL, "/")
 	header, value, err := s.providerAuth(p)
 	if err != nil {
 		return nil, err
 	}
+	return s.fetchModelsWith(ctx, p, header, value)
+}
+
+// fetchModelsWith lists p's models, sending header: value (if any).
+func (s *Server) fetchModelsWith(ctx context.Context, p Provider, header, value string) ([]ProviderModel, error) {
+	base := strings.TrimSuffix(p.URL, "/")
 	get := func(path string) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 		if err != nil {
@@ -290,7 +301,7 @@ func (s *Server) fetchModels(ctx context.Context, p Provider) ([]ProviderModel, 
 		resp, err = get("/api/tags")
 	}
 	if err != nil {
-		return nil, errors.New("the provider does not answer")
+		return nil, whyUnreachable(p.URL, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxModelsBody+1))
@@ -345,6 +356,27 @@ func (s *Server) fetchModels(ctx context.Context, p Provider) ([]ProviderModel, 
 	return out, nil
 }
 
+// whyUnreachable says why a provider could not be reached, in words that
+// point at the fix.
+func whyUnreachable(rawURL string, err error) error {
+	where := rawURL
+	if _, host, port := (&spec.Model{Endpoint: rawURL}).EndpointHostPort(); host != "" {
+		where = host + ":" + strconv.Itoa(port)
+	}
+	var dns *net.DNSError
+	var ne net.Error
+	switch {
+	case errors.As(err, &dns):
+		return fmt.Errorf("the name %s is not known: check the address", dns.Name)
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return fmt.Errorf("nothing is listening at %s: is the server running, and on this port?", where)
+	case errors.As(err, &ne) && ne.Timeout():
+		return fmt.Errorf("no answer from %s in time: is the address right, or is a firewall in the way?", where)
+	default:
+		return fmt.Errorf("cannot reach %s", where)
+	}
+}
+
 // providerAuth is the header a provider's models are asked with: its
 // credential from the store, but only if that credential may go to the
 // provider's host and port (never anywhere else).
@@ -364,6 +396,66 @@ func (s *Server) providerAuth(p Provider) (header, value string, err error) {
 		return "", "", fmt.Errorf("the credential %s is not for %s://%s:%d", p.Credential, scheme, host, port)
 	}
 	return e.Header, e.Prefix + secret, nil
+}
+
+// providerTestRequest is POST /api/providers/test: a connection as it
+// is being edited, with a key typed for it (sent only to its own URL)
+// or the name of a stored credential.
+type providerTestRequest struct {
+	Provider
+	Auth *struct {
+		Header string `json:"header"`
+		Prefix string `json:"prefix"`
+		Key    string `json:"key"`
+	} `json:"auth,omitempty"`
+}
+
+var authHeaderRe = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
+
+// providerTest checks a connection before it is saved: does it answer,
+// and with which models.
+func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) {
+	var req providerTestRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	defer func() {
+		if req.Auth != nil {
+			req.Auth.Key = ""
+		}
+	}()
+	p := req.Provider
+	if p.Name == "" {
+		p.Name = "test"
+	}
+	c := Catalog{Providers: []Provider{p}}
+	if err := c.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	header, value := "", ""
+	switch {
+	case req.Auth != nil && req.Auth.Key != "":
+		if !authHeaderRe.MatchString(req.Auth.Header) || strings.ContainsAny(req.Auth.Prefix+req.Auth.Key, "\r\n\x00") {
+			writeError(w, http.StatusBadRequest, errors.New("invalid header or key"))
+			return
+		}
+		header, value = req.Auth.Header, req.Auth.Prefix+req.Auth.Key
+	case p.Credential != "":
+		var err error
+		if header, value, err = s.providerAuth(p); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), providerTimeout)
+	defer cancel()
+	models, err := s.fetchModelsWith(ctx, p, header, value)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, errors.New(safetext.Line(err.Error())))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
 }
 
 // newProviderClient asks providers: bounded in time, and never following

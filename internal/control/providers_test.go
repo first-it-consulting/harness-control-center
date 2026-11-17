@@ -107,3 +107,35 @@ func TestProviderWithoutCredentialSaysSo(t *testing.T) {
 		t.Errorf("%d %v", code, out)
 	}
 }
+
+// A connection is checked before it is saved, with the key typed for it.
+func TestProviderTestBeforeSaving(t *testing.T) {
+	ts := newTestServer(t)
+	var got string
+	fakeProvider(t, ts, func(w http.ResponseWriter, r *http.Request) {
+		got = r.Host + " " + r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"data":[{"id":"qwen3:8b"}]}`))
+	})
+	body := map[string]any{"type": "litellm", "url": "http://llm.lan:8080", "local": true,
+		"auth": map[string]string{"header": "Authorization", "prefix": "Bearer ", "key": "sk-typed-123"}}
+	var out map[string]any
+	if code := ts.do(http.MethodPost, "/api/providers/test", body, &out); code != http.StatusOK || len(out["models"].([]any)) != 1 {
+		t.Fatalf("test: %d %v", code, out)
+	}
+	if got != "llm.lan:8080 Bearer sk-typed-123" {
+		t.Errorf("sent %q", got)
+	}
+	for name, b := range map[string]map[string]any{
+		"ip address":   {"type": "other", "url": "http://10.0.0.1:8080"},
+		"bad header":   {"type": "other", "url": "https://a.example", "auth": map[string]string{"header": "X: y", "key": "k"}},
+		"key newline":  {"type": "other", "url": "https://a.example", "auth": map[string]string{"header": "X-Key", "key": "k\r\nX-Evil: 1"}},
+		"unknown type": {"type": "gpt", "url": "https://a.example"},
+	} {
+		if code := ts.do(http.MethodPost, "/api/providers/test", b, &out); code != http.StatusBadRequest {
+			t.Errorf("%s: %d %v", name, code, out)
+		}
+	}
+	if rec := ts.rawJSON(http.MethodPost, "/api/providers/test", body); strings.Contains(rec.Body.String(), "sk-typed-123") {
+		t.Error("the key is in the answer")
+	}
+}
