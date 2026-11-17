@@ -454,3 +454,13 @@ func TestSecretsAreHighRiskAndExplained(t *testing.T) {
 		}
 	}
 }
+
+func TestEnvIsExplainedWithoutRisk(t *testing.T) {
+	e := mustEngine(t, base+"  env: {REGION: eu, DB_HOST: db.lan}\n")
+	if risk, why := e.Risk(); risk != RiskLow {
+		t.Errorf("risk %v %v", risk, why)
+	}
+	if got := strings.Join(e.Explain(), "\n"); !strings.Contains(got, "Sets the environment variables DB_HOST, REGION for the agent (not secret") {
+		t.Errorf("explanation:\n%s", got)
+	}
+}

@@ -77,7 +77,8 @@ export async function harnessEditor(ui, name, template) {
       api("POST", "/api/harness/decode", { yaml: yamlText }),
     ]);
     const store = await api("GET", "/api/credentials").then((r) => r.credentials).catch(() => []);
-    ctx = { runners, providers, policies, limits, store, credentials: new Map(), models: new Map() };
+    const variables = await api("GET", "/api/variables").then((r) => r.variables).catch(() => []);
+    ctx = { runners, providers, policies, limits, store, variables, credentials: new Map(), models: new Map() };
     doc = decoded.doc;
   } catch (err) {
     fail(err);
@@ -232,8 +233,10 @@ function render(ed) {
     section(ed, "When it runs", trigger(ed)),
     section(ed, "Safety limits", limits(ed)),
     section(ed, "Internet and network", network(ed)),
-    section(ed, "Credentials", credentials(ed)),
-    section(ed, "Secrets for the agent", secrets(ed)),
+    section(ed, "Secrets and variables", [
+      h("h3", {}, "Secrets the agent reads"), ...secrets(ed),
+      h("h3", {}, "Secrets added to web requests"), ...credentials(ed),
+      h("h3", {}, "Variables"), ...variablesPart(ed)]),
     section(ed, "Tools", tools(ed)),
     section(ed, "Ask me first", approvals(ed)),
     h("details", { class: "form-section card" }, h("summary", {}, "Advanced: helper agents, MCP servers, other agents"), ...advanced(ed)));
@@ -680,6 +683,33 @@ function secrets(ed) {
     ...rows,
     granted.length > 0 && h("div", { class: "error-box" }, "The agent can read " + (granted.length === 1 ? "this secret" : "these secrets") +
       ". A misled agent could send " + (granted.length === 1 ? "it" : "them") + " to any host it may reach, so allow only the hosts it needs."),
+  ];
+}
+
+// --- variables (spec.env): copies of the Secrets and variables page's ---
+
+function variablesPart(ed) {
+  const { h } = ed.ui;
+  const env = get(ed.doc, "spec.env") || {};
+  const kept = new Map(ed.ctx.variables.map((v) => [v.name, v.value]));
+  const names = [...new Set([...kept.keys(), ...Object.keys(env)])].sort();
+  if (names.length === 0) {
+    return [help(h, "Values that are not secret (a region, a host name) for the agent's environment. Add them under Secrets & variables, then choose them here.")];
+  }
+  return [
+    help(h, "Set as environment variables for the agent. Not secret: their values become part of this harness."),
+    h("div", { class: "checks" }, names.map((n) => {
+      const has = Object.prototype.hasOwnProperty.call(env, n);
+      const value = has ? env[n] : kept.get(n);
+      const differs = has && kept.has(n) && kept.get(n) !== env[n];
+      return checkbox(ed, n + " = " + value + (differs ? " (the page now says " + kept.get(n) + ")" : "") + (!kept.has(n) ? " (only in this harness)" : ""), has, (on) => {
+        const next = { ...(get(ed.doc, "spec.env") || {}) };
+        if (on) next[n] = kept.has(n) ? kept.get(n) : value;
+        else delete next[n];
+        put(ed.doc, "spec.env", Object.keys(next).length > 0 ? next : undefined);
+        changed(ed, true);
+      });
+    })),
   ];
 }
 

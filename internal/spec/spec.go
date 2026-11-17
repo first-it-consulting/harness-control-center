@@ -57,6 +57,10 @@ type Spec struct {
 	MCP MCP `yaml:"mcp,omitempty"`
 	// A2A lists the A2A agents the agent may talk to (ADR-0015).
 	A2A A2A `yaml:"a2a,omitempty"`
+	// Env sets environment variables for the agent: values that are not
+	// secret (they are part of the harness, and shown in it). Secrets go
+	// in permissions.secrets.
+	Env map[string]string `yaml:"env,omitempty"`
 }
 
 // A2A lists other agents, reached with the Agent2Agent protocol.

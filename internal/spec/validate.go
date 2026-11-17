@@ -66,6 +66,7 @@ func (h *Harness) Validate() error {
 		validateModel(s.Model, &s.Permissions, add)
 	}
 	validateBudget(&s.Budget, add)
+	validateEnv(s.Env, s.Permissions.Secrets, add)
 	validateMCP(&s.MCP, &s.Permissions, add)
 	validateA2A(&s.A2A, &s.Permissions, add)
 	for i, a := range s.Approvals.RequireFor {
@@ -146,6 +147,41 @@ var (
 	// Files the shell or the agent runtime read as instructions.
 	reservedFileRe = regexp.MustCompile(`^(\.claude(/.*)?|\.claude\.json|\.(bash|zsh)rc|\.profile|\.bash_(profile|login|logout)|\.ssh/(rc|environment|authorized_keys))$`)
 )
+
+// CheckEnvName reports whether name may be given to an agent as a
+// variable (spec.env, permissions.secrets[].env).
+func CheckEnvName(name string) error {
+	switch {
+	case !envNameRe.MatchString(name):
+		return fmt.Errorf("%q is not a variable name (letters, digits and _, not starting with a digit)", name)
+	case reservedEnvRe.MatchString(name):
+		return fmt.Errorf("%s is used by the sandbox or the agent runtime; choose another name", name)
+	}
+	return nil
+}
+
+// validateEnv checks the agent's variables: names as for secrets (not
+// the sandbox's or runtime's own), short single values, and none a
+// secret already sets.
+func validateEnv(env map[string]string, secrets []Secret, add addFunc) {
+	if len(env) > MaxEnv {
+		add("spec.env", "at most %d variables", MaxEnv)
+	}
+	for name, value := range env {
+		path := "spec.env." + name
+		switch {
+		case !envNameRe.MatchString(name):
+			add("spec.env", "%q is not a variable name", name)
+		case reservedEnvRe.MatchString(name):
+			add(path, "%s is used by the sandbox or the agent runtime; choose another name", name)
+		case slices.ContainsFunc(secrets, func(s Secret) bool { return strings.EqualFold(s.Env, name) }):
+			add(path, "a secret sets %s already", name)
+		}
+		if len(value) > MaxEnvValueBytes || strings.ContainsAny(value, "\x00") {
+			add(path, "must be text of at most %d bytes", MaxEnvValueBytes)
+		}
+	}
+}
 
 // validateSecrets checks the secrets handed to the agent: names of the
 // store, each given once, as a variable the runtime does not use, or as a

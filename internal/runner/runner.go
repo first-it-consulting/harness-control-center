@@ -1060,6 +1060,8 @@ type Task struct {
 	A2A []TaskA2A `json:"a2a,omitempty"`
 	// Secrets are handed to the agent (ADR-0020).
 	Secrets []TaskSecret `json:"secrets,omitempty"`
+	// Env are the agent's variables that are not secret (spec.env).
+	Env map[string]string `json:"env,omitempty"`
 	// Forward lets programs without proxy support reach the allowed hosts
 	// (ADR-0021): each host gets a loopback address in the guest, where
 	// hcc-guest tcp-forward tunnels its ports through the egress proxy.
@@ -1167,7 +1169,7 @@ func modelName(h *spec.Harness) string {
 }
 
 func taskFor(h *spec.Harness, loop *TaskLoop, tools *TaskTools, secrets []TaskSecret) ([]byte, error) {
-	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt, Loop: loop, Tools: tools, Secrets: secrets, Forward: forwardsFor(h)}
+	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt, Loop: loop, Tools: tools, Secrets: secrets, Forward: forwardsFor(h), Env: h.Spec.Env}
 	if n := h.Spec.Permissions.Subagents.Max; n > 0 {
 		t.Subagents = &TaskSubagents{Max: n}
 	}

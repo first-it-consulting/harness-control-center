@@ -73,6 +73,9 @@ var webFS embed.FS
 //	POST   /api/harness/decode                   a harness's YAML as the form's data
 //	POST   /api/harness/encode                   the form's data as YAML, checked
 //	GET    /api/harness/limits                   the bounds and defaults the form shows
+//	GET    /api/variables                        the variables (not secret) harnesses can be given
+//	PUT    /api/variables/{name}                 add or change one
+//	DELETE /api/variables/{name}
 //	GET    /api/policies                         the network policies and which harnesses have each
 //	PUT    /api/policies                         replace them (hosts checked like a harness's egress rules)
 //	GET    /api/providers                        the model providers and which harnesses use each
@@ -178,6 +181,9 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("POST /api/harness/decode", s.harnessDecode)
 	mux.HandleFunc("POST /api/harness/encode", s.harnessEncode)
 	mux.HandleFunc("GET /api/harness/limits", s.harnessLimits)
+	mux.HandleFunc("GET /api/variables", s.variablesGet)
+	mux.HandleFunc("PUT /api/variables/{name}", s.variablePut)
+	mux.HandleFunc("DELETE /api/variables/{name}", s.variableDelete)
 	mux.HandleFunc("GET /api/policies", s.policiesGet)
 	mux.HandleFunc("PUT /api/policies", s.policiesPut)
 	mux.HandleFunc("GET /api/providers", s.providersGet)
