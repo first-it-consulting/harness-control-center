@@ -203,7 +203,7 @@ function route() {
     new: () => harnessView(""),
     runners: () => runnersView(),
     runner: () => runnerView(parts[1]),
-    credentials: () => credentialsView({ h, api, set, show, fail, say, badge }),
+    credentials: () => credentialsView({ h, api, set, show, fail, say, badge }, parts[1]),
     models: () => modelsView({ h, api, set, show, fail, say, badge }),
     network: () => networkView({ h, api, set, show, fail, say, badge }),
     schedules: () => schedulesView(),

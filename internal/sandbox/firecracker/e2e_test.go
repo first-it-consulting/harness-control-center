@@ -497,6 +497,7 @@ func TestE2EForward(t *testing.T) {
 	task, err := json.Marshal(map[string]any{
 		"runtime": "claude-code", "prompt": "probe",
 		"forward": []map[string]any{{"host": "example.com", "addr": "127.77.0.1", "ports": []int{80}}},
+		"env":     map[string]string{"E2E_VAR": "hello $(touch /tmp/pwned) world"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -520,6 +521,7 @@ func TestE2EForward(t *testing.T) {
 		"HCC-FWD-ALLOWED":   "HTTP/1.",
 		"HCC-FWD-OTHERPORT": "blocked",
 		"HCC-FWD-DENIED":    "blocked",
+		"HCC-ENV":           "[hello $(touch /tmp/pwned) world] pwned=no",
 	} {
 		if line := consoleLine(out, marker); !strings.Contains(line, expect) {
 			t.Errorf("%s: got %q, want it to contain %q", marker, line, expect)

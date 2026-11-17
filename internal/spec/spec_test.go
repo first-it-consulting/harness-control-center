@@ -348,3 +348,24 @@ func TestSecrets(t *testing.T) {
 		t.Errorf("same variable twice: %v", err)
 	}
 }
+
+func TestEnv(t *testing.T) {
+	h, err := Parse([]byte(minimal + "  env: {REGION: eu-central, DB_HOST: db.lan}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Spec.Env["DB_HOST"] != "db.lan" || len(h.Spec.Env) != 2 {
+		t.Errorf("env = %v", h.Spec.Env)
+	}
+	for name, tt := range map[string]struct{ doc, want string }{
+		"bad name":       {"  env: {'1A': x}\n", "not a variable name"},
+		"reserved":       {"  env: {PATH: /tmp}\n", "used by the sandbox"},
+		"proxy":          {"  env: {https_proxy: x}\n", "used by the sandbox"},
+		"too long":       {"  env: {A: " + strings.Repeat("x", MaxEnvValueBytes+1) + "}\n", "at most"},
+		"secret clashes": {"  env: {PGPASSWORD: x}\n  permissions:\n    secrets: [{name: db, env: PGPASSWORD}]\n", "a secret sets"},
+	} {
+		if _, err := Parse([]byte(minimal + tt.doc)); err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: %v, want %q", name, err, tt.want)
+		}
+	}
+}

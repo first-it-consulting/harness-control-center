@@ -1138,6 +1138,17 @@ type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
 
+func TestTaskCarriesEnv(t *testing.T) {
+	task, err := taskFor(harness(t, "  env: {REGION: eu}\n"), nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Task
+	if err := json.Unmarshal(task, &got); err != nil || got.Env["REGION"] != "eu" {
+		t.Errorf("task = %s (%v)", task, err)
+	}
+}
+
 func TestForwardsForExactHosts(t *testing.T) {
 	h := harness(t, `  permissions:
     network:

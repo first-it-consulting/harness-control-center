@@ -41,6 +41,8 @@ const (
 	MaxThinkingTokens = 256 * 1024
 	MaxA2AAgents      = 16
 	MaxSecrets        = 32
+	MaxEnv            = 64
+	MaxEnvValueBytes  = 4096
 )
 
 // ApplyDefaults fills omitted fields in place. It never widens a

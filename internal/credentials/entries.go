@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -23,6 +25,8 @@ type Entry struct {
 	Port   int      `json:"port"`
 	Header string   `json:"header"`
 	Prefix string   `json:"prefix,omitempty"`
+	// Updated is when its secret was last set.
+	Updated time.Time `json:"updated,omitzero"`
 }
 
 // List returns the store's credentials without their secrets, sorted by
@@ -42,7 +46,11 @@ func List(path string) ([]Entry, error) {
 		if hosts == nil {
 			hosts = []string{}
 		}
-		out = append(out, Entry{Name: name, Kind: c.Kind, Hosts: hosts, Scheme: c.Scheme, Port: c.Port, Header: c.Header, Prefix: entries[name].Prefix})
+		e := Entry{Name: name, Kind: c.Kind, Hosts: hosts, Scheme: c.Scheme, Port: c.Port, Header: c.Header, Prefix: entries[name].Prefix}
+		if fi, err := os.Stat(entries[name].SecretFile); err == nil {
+			e.Updated = fi.ModTime().UTC()
+		}
+		out = append(out, e)
 	}
 	slices.SortFunc(out, func(a, b Entry) int { return strings.Compare(a.Name, b.Name) })
 	return out, nil

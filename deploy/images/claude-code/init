@@ -22,6 +22,15 @@ if ! hcc_forward "$TASK"; then
 	echo "HCC-RESULT-END exit=1"
 	hcc_shutdown
 fi
+# The harness's variables (spec.env): not secret, exported as given. The
+# runner checked the names; checked here again, values never evaluated.
+for sname in $(printf '%s' "$TASK" | jq -r '.env // {} | keys[]'); do
+	case "$sname" in
+	*[!A-Za-z0-9_]* | [0-9]*) echo "hcc: variable $sname: invalid name, skipped" ;;
+	*) export "$sname=$(printf '%s' "$TASK" | jq -r --arg n "$sname" '.env[$n]')" ;;
+	esac
+done
+
 # e2e only (ADR-0021; the runner never sets hcc.mode for jobs): plain
 # TCP, without the proxy variables, to an allowed host and port, the same
 # host on a port not allowed, and a host not allowed.
@@ -33,6 +42,8 @@ case " $(cat /proc/cmdline) " in
 	echo "HCC-FWD-ALLOWED $( (printf 'HEAD / HTTP/1.0\r\nHost: example.com\r\n\r\n'; sleep 3) | nc -w 5 example.com 80 2>&1 | head -n 1 | tr -d '\r')"
 	if nc -w 3 example.com 8080 </dev/null 2>/dev/null; then echo "HCC-FWD-OTHERPORT open"; else echo "HCC-FWD-OTHERPORT blocked"; fi
 	if nc -w 3 example.org 80 </dev/null 2>/dev/null; then echo "HCC-FWD-DENIED open"; else echo "HCC-FWD-DENIED blocked"; fi
+	if [ -e /tmp/pwned ]; then pwned=yes; else pwned=no; fi
+	echo "HCC-ENV [$E2E_VAR] pwned=$pwned"
 	hcc_shutdown
 	;;
 esac

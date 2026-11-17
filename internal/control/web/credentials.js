@@ -1,90 +1,217 @@
-// Credentials (ADR-0019): API keys and tokens kept here, in the Control
-// Center, and attached to harnesses. When a harness starts, the ones it
-// is granted are copied to its runner, whose broker adds them to the
-// agent's requests: the agent never sees them. A secret is write-only:
-// typed here once, never shown again.
+// Secrets and variables (ADR-0019, ADR-0020): reusable configuration kept
+// here and given to harnesses, laid out like GitHub's page of the same
+// name. Secrets are write-only and copied to a runner only when a harness
+// that uses them starts; the agent reads them, or (for API keys) never
+// sees them because the runner adds them to its requests. Variables are
+// not secret and shown as plain text.
 
-// Presets fill in what most people would have to look up.
-const KINDS = [
-  { id: "anthropic", label: "Anthropic API key", name: "anthropic", hosts: "api.anthropic.com", scheme: "https", port: 443, header: "x-api-key", prefix: "" },
-  { id: "github", label: "GitHub token (GitHub API)", name: "github", hosts: "api.github.com", scheme: "https", port: 443, header: "Authorization", prefix: "Bearer " },
-  { id: "gitlab", label: "GitLab token (GitLab API)", name: "gitlab", hosts: "gitlab.com", scheme: "https", port: 443, header: "PRIVATE-TOKEN", prefix: "" },
-  { id: "bearer", label: "API token sent as \"Authorization: Bearer …\" (OpenAI, OpenRouter, LiteLLM…)", name: "", hosts: "", scheme: "https", port: 443, header: "Authorization", prefix: "Bearer " },
-  { id: "local", label: "Model server on your network (oMLX, Ollama, LM Studio…)", name: "", hosts: "", scheme: "http", port: 4000, header: "Authorization", prefix: "Bearer " },
-  { id: "custom", label: "Something else (my own header)", name: "", hosts: "", scheme: "https", port: 443, header: "", prefix: "" },
+// Presets for secrets the runner adds to web requests.
+const PRESETS = [
+  { id: "anthropic", label: "Anthropic API key", hosts: "api.anthropic.com", scheme: "https", port: 443, header: "x-api-key", prefix: "" },
+  { id: "github", label: "GitHub token (GitHub API)", hosts: "api.github.com", scheme: "https", port: 443, header: "Authorization", prefix: "Bearer " },
+  { id: "gitlab", label: "GitLab token (GitLab API)", hosts: "gitlab.com", scheme: "https", port: 443, header: "PRIVATE-TOKEN", prefix: "" },
+  { id: "bearer", label: "API token sent as \"Authorization: Bearer …\" (OpenAI, OpenRouter, LiteLLM…)", hosts: "", scheme: "https", port: 443, header: "Authorization", prefix: "Bearer " },
+  { id: "local", label: "Model server in your network (oMLX, Ollama, LM Studio…)", hosts: "", scheme: "http", port: 4000, header: "x-api-key", prefix: "" },
+  { id: "custom", label: "Something else (my own header)", hosts: "", scheme: "https", port: 443, header: "", prefix: "" },
 ];
 
-export async function credentialsView(ui) {
+// ago says how long ago a time was, in words.
+function ago(t) {
+  if (!t) return "";
+  const s = Math.max(0, Math.round((Date.now() - new Date(t).getTime()) / 1000));
+  const units = [[31536000, "year"], [2592000, "month"], [86400, "day"], [3600, "hour"], [60, "minute"]];
+  for (const [n, name] of units) {
+    if (s >= n) {
+      const k = Math.floor(s / n);
+      return k + " " + name + (k > 1 ? "s" : "") + " ago";
+    }
+  }
+  return "just now";
+}
+
+export async function credentialsView(ui, tab) {
   const { h, set, show } = ui;
-  const body = h("div", { class: "stack" }, h("p", { class: "muted" }, "Loading…"));
+  const page = { ui, tab: tab === "variables" ? "variables" : "secrets", secrets: [], variables: [] };
+  const body = h("div", {}, h("p", { class: "muted" }, "Loading…"));
+  const tabs = h("div", { class: "tabs", role: "tablist" });
   show(
-    h("div", { class: "head" }, h("div", {}, h("h1", {}, "Credentials"),
-        h("p", { class: "muted" }, "API keys and tokens your agents may use. You keep them here and attach them to a harness; when it starts, they are copied to its runner, which adds them to the agent's requests to the hosts you name. The agent itself never sees them.")),
-      h("div", { class: "actions" }, h("button", { class: "primary", onclick: () => editCredential(ui, null, reload) }, "Add a credential"))),
-    body);
-  const reload = async () => {
-    let list;
+    h("div", { class: "head" }, h("div", {}, h("h1", {}, "Secrets and variables"),
+      h("p", { class: "muted" }, "Secrets and variables keep reusable configuration in one place for your harnesses. Secrets are for sensitive data: once saved they cannot be seen again here, they are kept readable only by you on this computer, and a runner gets one only when a harness that uses it starts there. Variables are shown as plain text and are for data that is not sensitive."))),
+    tabs, body);
+  page.render = () => {
+    set(tabs, ...["secrets", "variables"].map((t) => h("button", { type: "button", class: "tab" + (page.tab === t ? " active" : ""),
+      onclick: () => { page.tab = t; history.replaceState(null, "", "#/credentials/" + t); page.render(); } }, t === "secrets" ? "Secrets" : "Variables")));
+    set(body, page.tab === "secrets" ? secretsTab(page) : variablesTab(page));
+  };
+  page.reload = async () => {
     try {
-      list = (await ui.api("GET", "/api/credentials")).credentials;
+      const [c, v] = await Promise.all([ui.api("GET", "/api/credentials"), ui.api("GET", "/api/variables")]);
+      page.secrets = c.credentials;
+      page.variables = v.variables;
     } catch (err) {
       set(body, h("div", { class: "error-box" }, err.message));
       return;
     }
-    set(body, storeCard(ui, list, reload), await runnerOnlyCard(ui, list));
+    page.render();
   };
-  await reload();
+  await page.reload();
 }
 
-function storeCard(ui, list, reload) {
+// listBox is GitHub's box: a heading with its "New" button, rows, or an
+// empty state with the button.
+function listBox(ui, title, newLabel, onNew, rows, empty) {
   const { h } = ui;
-  const rows = list.map((c) => h("tr", {},
-    h("td", {}, h("strong", {}, c.name)),
-    c.kind === "secret"
-      ? h("td", { colspan: 2 }, ui.badge("for the agent", "queued"), " ", h("span", { class: "muted" }, "the agent can read it"))
-      : [h("td", {}, c.hosts.join(", "), c.scheme === "http" && h("span", { class: "badge failed" }, "unencrypted")),
-        h("td", {}, c.header + (c.prefix ? " (" + c.prefix.trim() + ")" : ""))],
-    h("td", {}, Object.keys(c.runners).length === 0 ? h("span", { class: "muted" }, "not yet")
-      : Object.entries(c.runners).sort().map(([r, state]) => h("div", {}, r + " ",
-        state === "current" ? ui.badge("current", "succeeded") : [ui.badge("older version", "queued"), " ",
-          h("button", { onclick: () => copyNow(ui, c, r, reload) }, "Copy now")]))),
-    h("td", { class: "actions" },
-      h("button", { onclick: () => editCredential(ui, c, reload) }, "Change"),
-      h("button", { onclick: () => removeCredential(ui, c, reload) }, "Remove"))));
-  return h("section", { class: "card" },
-    h("h2", {}, "Your credentials"),
+  return h("section", { class: "stack" },
+    h("div", { class: "card-head" }, h("h2", {}, title), rows.length > 0 && h("button", { class: "primary", onclick: onNew }, newLabel)),
     rows.length === 0
-      ? h("p", { class: "muted" }, "None yet. Add one, then attach it to a harness under Credentials.")
-      : h("div", { class: "table-wrap" }, h("table", {},
-        h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Sent only to"), h("th", {}, "Header"), h("th", {}, "On runners"), h("th", {}, ""))),
-        h("tbody", {}, rows))),
-    h("p", { class: "muted" }, "Two kinds: for a web service (APIs, model servers), the runner adds the key to the agent's requests and the agent never sees it. A secret for the agent (a database password, a kubeconfig) is handed to the agent itself when its harness starts, as a variable or a file; the agent can read it, so such a harness is rated high risk."));
+      ? h("div", { class: "card empty-box" }, h("p", { class: "muted" }, empty), h("button", { class: "primary", onclick: onNew }, newLabel))
+      : h("div", { class: "card list" }, rows));
 }
 
-// runnerOnlyCard lists credentials that a runner has but this Control
-// Center does not keep (added on the runner before).
-async function runnerOnlyCard(ui, list) {
-  const { h, api } = ui;
-  const kept = new Set(list.map((c) => c.name));
-  let runners = [];
-  try {
-    runners = await api("GET", "/api/runners?status=false");
-  } catch {
-    return null;
+function secretsTab(page) {
+  const { ui } = page;
+  const { h, badge } = ui;
+  const rows = page.secrets.map((c) => h("div", { class: "list-row" },
+    h("div", { class: "list-main" },
+      h("strong", {}, c.name),
+      h("div", { class: "muted small" }, c.kind === "secret"
+        ? "The agent reads it (as a variable or a file, chosen in the harness)"
+        : ["Added to requests to ", c.hosts.join(", "), " — the agent never sees it", c.scheme === "http" ? " (unencrypted)" : ""].join("")),
+      Object.keys(c.runners).length > 0 && h("div", { class: "muted small" }, "On runners: ", Object.entries(c.runners).sort().flatMap(([r, state], i) =>
+        [i > 0 ? ", " : null, r, " ", state === "current" ? badge("current", "succeeded") : [badge("older version", "queued"), " ",
+          h("button", { class: "link-button", onclick: () => copyNow(page, c, r) }, "copy now")]]))),
+    h("div", { class: "muted small" }, c.updated ? "Updated " + ago(c.updated) : ""),
+    h("div", { class: "actions" },
+      h("button", { title: "Change", onclick: () => editSecret(page, c) }, "Edit"),
+      h("button", { title: "Remove", onclick: () => removeSecret(page, c) }, "Remove"))));
+  const box = listBox(ui, "Secrets", "New secret", () => editSecret(page, null), rows, "There are no secrets yet.");
+  const others = h("div", {});
+  runnerOnly(page).then((card) => card && others.append(card));
+  return h("div", { class: "stack" }, box, others);
+}
+
+function variablesTab(page) {
+  const { ui } = page;
+  const { h } = ui;
+  const rows = page.variables.map((v) => h("div", { class: "list-row" },
+    h("div", { class: "list-main" }, h("strong", {}, v.name), h("div", { class: "muted small mono" }, v.value)),
+    h("div", { class: "muted small" }, "Updated " + ago(v.updated)),
+    h("div", { class: "actions" },
+      h("button", { onclick: () => editVariable(page, v) }, "Edit"),
+      h("button", { onclick: () => removeVariable(page, v) }, "Remove"))));
+  return listBox(ui, "Variables", "New variable", () => editVariable(page, null), rows, "There are no variables yet.");
+}
+
+function dialogForm(ui, title, fields, submit, submitLabel = "Save") {
+  const { h, set } = ui;
+  const dialog = document.getElementById("dialog");
+  const problem = h("div", {});
+  const form = h("form", { method: "dialog", onsubmit: async (ev) => {
+    ev.preventDefault();
+    set(problem);
+    try {
+      if (await submit(problem) !== false) dialog.close();
+    } catch (err) {
+      set(problem, h("div", { class: "error-box" }, err.message));
+    }
+  } },
+  h("h1", {}, title), h("div", { class: "form-stack" }, ...fields), problem,
+  h("div", { class: "actions" }, h("button", { class: "primary" }, submitLabel), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
+  set(dialog, form);
+  dialog.showModal();
+}
+
+const help = (h, t) => h("span", { class: "muted note" }, t);
+
+function editSecret(page, existing) {
+  const { ui } = page;
+  const { h, api, say } = ui;
+  const name = h("input", { required: true, pattern: "[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?", placeholder: "db-password", autocomplete: "off" });
+  const value = h("textarea", { rows: "5", spellcheck: "false", autocomplete: "off",
+    placeholder: existing ? "Leave empty to keep the current value" : "The secret: a password, a token, or a whole file (e.g. a kubeconfig)" });
+  const reads = h("input", { type: "radio", name: "use", value: "secret" });
+  const requests = h("input", { type: "radio", name: "use", value: "web" });
+  // How a web secret is added to requests.
+  const preset = h("select", {}, PRESETS.map((p) => h("option", { value: p.id }, p.label)));
+  const hosts = h("input", { placeholder: "api.anthropic.com", autocomplete: "off" });
+  const scheme = h("select", {}, h("option", { value: "https" }, "https (encrypted)"), h("option", { value: "http" }, "http (unencrypted)"));
+  const port = h("input", { type: "number", min: "1", max: "65535" });
+  const header = h("input", { placeholder: "x-api-key", autocomplete: "off" });
+  const prefix = h("input", { placeholder: "e.g. Bearer (with the space)", autocomplete: "off" });
+  const web = h("div", { class: "form-stack nested" },
+    h("label", {}, "Kind of key", preset),
+    h("label", {}, "Only to these hosts", hosts, help(h, "Exact host names, separated by commas. It is never sent anywhere else.")),
+    h("div", { class: "row" }, h("label", {}, "Connection", scheme), h("label", {}, "Port", port)),
+    h("div", { class: "row" }, h("label", {}, "Header", header), h("label", {}, "Before the value", prefix)));
+  const warn = h("div", { class: "warn-box" }, "The agent can read this secret, and a misled agent could send it to any host its harness may reach. Prefer a token that can do little.");
+  const fill = (p) => {
+    hosts.value = p.hosts;
+    scheme.value = p.scheme;
+    port.value = String(p.port);
+    header.value = p.header;
+    prefix.value = p.prefix;
+  };
+  preset.addEventListener("change", () => fill(PRESETS.find((p) => p.id === preset.value)));
+  const sync = () => {
+    web.hidden = !requests.checked;
+    warn.hidden = !reads.checked;
+    for (const el of [hosts, port, header]) el.required = requests.checked;
+  };
+  reads.addEventListener("change", sync);
+  requests.addEventListener("change", sync);
+  if (existing) {
+    name.value = existing.name;
+    name.disabled = true;
+    if (existing.kind === "secret") {
+      reads.checked = true;
+      fill(PRESETS[0]);
+    } else {
+      requests.checked = true;
+      preset.value = "custom";
+      fill({ hosts: existing.hosts.join(", "), scheme: existing.scheme, port: existing.port, header: existing.header, prefix: existing.prefix || "" });
+    }
+  } else {
+    value.required = true;
+    reads.checked = true;
+    fill(PRESETS[0]);
   }
-  const found = [];
-  await Promise.all(runners.map((r) => api("GET", "/api/runners/" + encodeURIComponent(r.name) + "/credentials")
-    .then((l) => l.credentials.filter((c) => !kept.has(c.name)).forEach((c) => found.push({ runner: r, c })))
-    .catch(() => {})));
-  if (found.length === 0) return null;
-  found.sort((a, b) => (a.runner.name + a.c.name).localeCompare(b.runner.name + b.c.name));
-  return h("section", { class: "card" },
-    h("h2", {}, "Only on a runner"),
-    h("p", { class: "muted" }, "Added on a runner before. Harnesses there can still use them. To keep one here instead, add it above with the same name and its key; it then replaces the runner's copy."),
-    h("div", { class: "table-wrap" }, h("table", {},
-      h("thead", {}, h("tr", {}, h("th", {}, "Runner"), h("th", {}, "Name"), h("th", {}, "Sent only to"), h("th", {}, ""))),
-      h("tbody", {}, found.map(({ runner, c }) => h("tr", {},
-        h("td", {}, runner.name), h("td", {}, h("strong", {}, c.name)), h("td", {}, c.hosts.join(", ")),
-        h("td", { class: "actions" }, h("button", { onclick: () => removeFromRunner(ui, runner, c) }, "Remove from " + runner.name))))))));
+  sync();
+  dialogForm(ui, existing ? "Update secret " + existing.name : "New secret", [
+    h("label", {}, "Name", name, help(h, "Lowercase letters, digits and '-'. Harnesses pick it by this name.")),
+    h("label", {}, "Secret", value),
+    h("fieldset", { class: "choice" }, h("legend", {}, "How harnesses use it"),
+      h("label", { class: "check" }, reads, "The agent reads it: as an environment variable or a file, chosen in each harness"),
+      h("label", { class: "check" }, requests, "Only add it to web requests to certain hosts: the agent never sees it (best for API keys)")),
+    web, warn,
+  ], async () => {
+    const kindChanged = existing && (existing.kind === "secret") !== reads.checked;
+    if (kindChanged && value.value === "") throw new Error("Changing how it is used needs the secret again: enter it above.");
+    const body = reads.checked
+      ? { kind: "secret", hosts: [], scheme: "", port: 0, header: "" }
+      : { hosts: hosts.value.split(/[\s,]+/).filter(Boolean), scheme: scheme.value, port: Number(port.value), header: header.value.trim(), prefix: prefix.value };
+    if (value.value !== "") body.secret = value.value;
+    try {
+      await api("PUT", "/api/credentials/" + encodeURIComponent(name.value), body);
+    } finally {
+      value.value = "";
+    }
+    say((existing ? "Updated " : "Added ") + name.value + ".");
+    page.reload();
+  }, existing ? "Update secret" : "Add secret");
+}
+
+function removeSecret(page, c) {
+  const { ui } = page;
+  const { h, api, say } = ui;
+  const runners = Object.keys(c.runners);
+  dialogForm(ui, "Remove secret " + c.name + "?", [
+    h("p", {}, "Harnesses that use " + c.name + " can no longer get it."),
+    runners.length > 0 && h("p", { class: "muted" }, "The copies on " + runners.join(", ") + " stay until you remove them there (listed under \"Only on a runner\")."),
+  ], async () => {
+    await api("DELETE", "/api/credentials/" + encodeURIComponent(c.name));
+    say("Removed " + c.name + ".");
+    page.reload();
+  }, "Remove");
 }
 
 function passwordBox(ui, host) {
@@ -106,151 +233,16 @@ function passwordBox(ui, host) {
   };
 }
 
-function editCredential(ui, existing, done) {
-  const { h, set, api, say } = ui;
-  const dialog = document.getElementById("dialog");
-  const purpose = h("select", {},
-    h("option", { value: "web" }, "For a web service: the runner adds it to requests, the agent never sees it"),
-    h("option", { value: "secret" }, "For the agent itself: handed to it as a variable or file (it can read it)"));
-  const value = h("textarea", { rows: "6", spellcheck: "false", autocomplete: "off",
-    placeholder: existing ? "leave empty to keep the current value" : "a password, a token, or a whole file (e.g. a kubeconfig)" });
-  const kind = h("select", {}, KINDS.map((k) => h("option", { value: k.id }, k.label)));
-  const name = h("input", { required: true, pattern: "[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?", placeholder: "anthropic", autocomplete: "off" });
-  const hosts = h("input", { required: true, placeholder: "api.anthropic.com", autocomplete: "off" });
-  const scheme = h("select", {}, h("option", { value: "https" }, "https (encrypted)"), h("option", { value: "http" }, "http (unencrypted)"));
-  const port = h("input", { type: "number", min: "1", max: "65535", required: true });
-  const header = h("input", { required: true, placeholder: "x-api-key", autocomplete: "off" });
-  const prefix = h("input", { placeholder: "e.g. Bearer (with the space)", autocomplete: "off" });
-  const secret = h("input", { type: "password", autocomplete: "new-password", required: !existing,
-    placeholder: existing ? "leave empty to keep the current key" : "paste the key" });
-  const warn = h("div", { class: "error-box", hidden: true }, "Unencrypted: the key crosses your network in clear text. Use this only for a server in your own network.");
-  const problem = h("div", {});
-  const webPart = h("div", { class: "form-stack" });
-  const secretPart = h("div", { class: "form-stack" },
-    h("label", {}, "Value", value, h("span", { class: "muted note" }, "Write-only: nobody can see it again here. Up to 64 KiB.")),
-    h("div", { class: "warn-box" }, "The agent can read this secret, and a misled agent could send it to any host its harness may reach. Give it only what it needs, and prefer a token that can do little."));
-  const syncPurpose = () => {
-    const s = purpose.value === "secret";
-    webPart.hidden = s;
-    secretPart.hidden = !s;
-    for (const el of [hosts, port, header]) el.required = !s;
-    secret.required = !s && !existing;
-    value.required = s && (!existing || existing.kind !== "secret");
-  };
-  purpose.addEventListener("change", syncPurpose);
-  const sync = () => { warn.hidden = scheme.value !== "http"; };
-  const fill = (k) => {
-    hosts.value = k.hosts;
-    scheme.value = k.scheme;
-    port.value = String(k.port);
-    header.value = k.header;
-    prefix.value = k.prefix;
-    if (!existing) name.value = k.name;
-    sync();
-  };
-  kind.addEventListener("change", () => fill(KINDS.find((k) => k.id === kind.value)));
-  scheme.addEventListener("change", () => {
-    if (scheme.value === "http" && port.value === "443") port.value = "80";
-    if (scheme.value === "https" && port.value === "80") port.value = "443";
-    sync();
-  });
-  if (existing) {
-    purpose.value = existing.kind === "secret" ? "secret" : "web";
-    name.value = existing.name;
-    name.disabled = true;
-    hosts.value = existing.hosts.join(", ");
-    scheme.value = existing.scheme;
-    port.value = String(existing.port);
-    header.value = existing.header;
-    prefix.value = existing.prefix || "";
-    kind.value = "custom";
-    sync();
-  } else {
-    fill(KINDS[0]);
-  }
-  const form = h("form", { method: "dialog", onsubmit: async (ev) => {
-    ev.preventDefault();
-    set(problem);
-    let body;
-    if (purpose.value === "secret") {
-      body = { kind: "secret", hosts: [], scheme: "", port: 0, header: "" };
-      if (value.value !== "") body.secret = value.value;
-    } else {
-      body = {
-        hosts: hosts.value.split(/[\s,]+/).filter(Boolean),
-        scheme: scheme.value,
-        port: Number(port.value),
-        header: header.value.trim(),
-        prefix: prefix.value,
-      };
-      if (secret.value !== "") body.secret = secret.value;
-    }
-    try {
-      await api("PUT", "/api/credentials/" + encodeURIComponent(name.value), body);
-    } catch (err) {
-      set(problem, h("div", { class: "error-box" }, err.message));
-      return;
-    } finally {
-      secret.value = "";
-      value.value = "";
-    }
-    dialog.close();
-    say("Saved " + name.value + ". Harnesses that use it get it on their runner when they start.");
-    done();
-  } },
-  h("h1", {}, existing ? "Change " + existing.name : "Add a credential"),
-  h("label", {}, "What is it for?", purpose),
-  h("label", {}, "Name", name, h("span", { class: "muted note" }, "You pick it from this name in a harness.")),
-  secretPart,
-  webPart,
-  problem,
-  h("div", { class: "actions" }, h("button", { class: "primary" }, "Save"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
-  webPart.append(...[
-    !existing && h("label", {}, "What is it?", kind),
-    h("label", {}, "Sent only to", hosts, h("span", { class: "muted note" }, "Exact host names, separated by commas. Never to any other host, even if the agent asks.")),
-    h("div", { class: "row" }, h("label", {}, "Connection", scheme), h("label", {}, "Port", port)),
-    warn,
-    h("div", { class: "row" }, h("label", {}, "Header", header), h("label", {}, "Before the key", prefix)),
-    h("label", {}, "Key", secret, h("span", { class: "muted note" }, "Write-only: nobody can see it again here, not even you."))].filter(Boolean));
-  syncPurpose();
-  set(dialog, form);
-  dialog.showModal();
-}
-
-function removeCredential(ui, c, done) {
-  const { h, set, api, say } = ui;
-  const dialog = document.getElementById("dialog");
-  const runners = Object.keys(c.runners);
-  const form = h("form", { method: "dialog", onsubmit: async (ev) => {
-    ev.preventDefault();
-    try {
-      await api("DELETE", "/api/credentials/" + encodeURIComponent(c.name));
-    } catch (err) {
-      ui.fail(err);
-      return;
-    }
-    dialog.close();
-    say("Removed " + c.name + ".");
-    done();
-  } },
-  h("h1", {}, "Remove " + c.name + "?"),
-  h("p", {}, "Harnesses that use " + c.name + " can no longer get it."),
-  runners.length > 0 && h("p", { class: "muted" }, "The copies on " + runners.join(", ") + " stay until you remove them there (they then show under \"Only on a runner\")."),
-  h("div", { class: "actions" }, h("button", { class: "danger" }, "Remove"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
-  set(dialog, form);
-  dialog.showModal();
-}
-
-// copyNow copies a changed credential to a runner, asking for sudo's
-// password if the runner's host wants it.
-function copyNow(ui, c, runner, done) {
-  const { h, set, api, say } = ui;
-  const dialog = document.getElementById("dialog");
+// copyNow copies a changed secret to a runner now (e.g. for its
+// schedules), asking for sudo's password if its host wants it.
+function copyNow(page, c, runner) {
+  const { ui } = page;
+  const { h, api, say } = ui;
   const pw = passwordBox(ui, runner);
-  const problem = h("div", {});
-  const form = h("form", { method: "dialog", onsubmit: async (ev) => {
-    ev.preventDefault();
-    set(problem);
+  dialogForm(ui, "Copy " + c.name + " to " + runner + "?", [
+    h("p", {}, runner + " has an older version. Harnesses copy it anyway when they start; this does it now, e.g. for its schedules."),
+    pw.box,
+  ], async () => {
     const body = { runner };
     const p = pw.take();
     if (p !== undefined) body.sudoPassword = p;
@@ -259,32 +251,49 @@ function copyNow(ui, c, runner, done) {
     } catch (err) {
       if (err.data && err.data.needPassword) {
         pw.ask(err.message);
-        return;
+        return false;
       }
-      set(problem, h("div", { class: "error-box" }, err.message));
-      return;
+      throw err;
     }
-    dialog.close();
     say("Copied " + c.name + " to " + runner + ".");
-    done();
-  } },
-  h("h1", {}, "Copy " + c.name + " to " + runner + "?"),
-  h("p", {}, runner + " has an older version. Harnesses copy it anyway when they start; this does it now, e.g. for its schedules."),
-  pw.box,
-  problem,
-  h("div", { class: "actions" }, h("button", { class: "primary" }, "Copy"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
-  set(dialog, form);
-  dialog.showModal();
+    page.reload();
+  }, "Copy");
 }
 
-function removeFromRunner(ui, runner, c) {
-  const { h, set, api, say } = ui;
-  const dialog = document.getElementById("dialog");
+// runnerOnly lists secrets a runner has but this Control Center does not
+// keep (added on the runner before).
+async function runnerOnly(page) {
+  const { ui } = page;
+  const { h, api } = ui;
+  const kept = new Set(page.secrets.map((c) => c.name));
+  let runners;
+  try {
+    runners = await api("GET", "/api/runners?status=false");
+  } catch {
+    return null;
+  }
+  const found = [];
+  await Promise.all(runners.map((r) => api("GET", "/api/runners/" + encodeURIComponent(r.name) + "/credentials")
+    .then((l) => l.credentials.filter((c) => !kept.has(c.name)).forEach((c) => found.push({ runner: r, c })))
+    .catch(() => {})));
+  if (found.length === 0) return null;
+  found.sort((a, b) => (a.runner.name + a.c.name).localeCompare(b.runner.name + b.c.name));
+  return h("section", { class: "stack" },
+    h("h2", {}, "Only on a runner"),
+    h("p", { class: "muted" }, "Added on a runner before. Harnesses there can still use them. To keep one here instead, add a secret with the same name and its value; it then replaces the runner's copy."),
+    h("div", { class: "card list" }, found.map(({ runner, c }) => h("div", { class: "list-row" },
+      h("div", { class: "list-main" }, h("strong", {}, c.name), h("div", { class: "muted small" }, "on " + runner.name + (c.hosts.length > 0 ? ", for " + c.hosts.join(", ") : ""))),
+      h("div", { class: "actions" }, h("button", { onclick: () => removeFromRunner(page, runner, c) }, "Remove from " + runner.name))))));
+}
+
+function removeFromRunner(page, runner, c) {
+  const { ui } = page;
+  const { h, api, say } = ui;
   const pw = passwordBox(ui, runner.ssh);
-  const problem = h("div", {});
-  const form = h("form", { method: "dialog", onsubmit: async (ev) => {
-    ev.preventDefault();
-    set(problem);
+  dialogForm(ui, "Remove " + c.name + " from " + runner.name + "?", [
+    h("p", {}, "Harnesses on " + runner.name + " that use it will be refused until it is there again."),
+    pw.box,
+  ], async () => {
     const body = {};
     const p = pw.take();
     if (p !== undefined) body.sudoPassword = p;
@@ -293,20 +302,43 @@ function removeFromRunner(ui, runner, c) {
     } catch (err) {
       if (err.data && err.data.needPassword) {
         pw.ask(err.message);
-        return;
+        return false;
       }
-      set(problem, h("div", { class: "error-box" }, err.message));
-      return;
+      throw err;
     }
-    dialog.close();
     say("Removed " + c.name + " from " + runner.name + ".");
-    location.reload();
-  } },
-  h("h1", {}, "Remove " + c.name + " from " + runner.name + "?"),
-  h("p", {}, "Harnesses on " + runner.name + " that use it will be refused until it is there again."),
-  pw.box,
-  problem,
-  h("div", { class: "actions" }, h("button", { class: "danger" }, "Remove"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
-  set(dialog, form);
-  dialog.showModal();
+    page.reload();
+  }, "Remove");
+}
+
+function editVariable(page, existing) {
+  const { ui } = page;
+  const { h, api, say } = ui;
+  const name = h("input", { required: true, pattern: "[A-Za-z_][A-Za-z0-9_]{0,63}", placeholder: "DB_HOST", autocomplete: "off" });
+  const value = h("textarea", { rows: "3", spellcheck: "false", placeholder: "db.lan" });
+  if (existing) {
+    name.value = existing.name;
+    name.disabled = true;
+    value.value = existing.value;
+  }
+  dialogForm(ui, existing ? "Update variable " + existing.name : "New variable", [
+    h("label", {}, "Name", name, help(h, "As the agent sees it: letters, digits and _, e.g. DB_HOST.")),
+    h("label", {}, "Value", value, help(h, "Not secret: shown here and in every harness that uses it. Use a secret for passwords and tokens.")),
+  ], async () => {
+    await api("PUT", "/api/variables/" + encodeURIComponent(name.value), { value: value.value });
+    say((existing ? "Updated " : "Added ") + name.value + ".");
+    page.reload();
+  }, existing ? "Update variable" : "Add variable");
+}
+
+function removeVariable(page, v) {
+  const { ui } = page;
+  const { h, api, say } = ui;
+  dialogForm(ui, "Remove variable " + v.name + "?", [
+    h("p", {}, "Harnesses that use it keep their copy until you change them."),
+  ], async () => {
+    await api("DELETE", "/api/variables/" + encodeURIComponent(v.name));
+    say("Removed " + v.name + ".");
+    page.reload();
+  }, "Remove");
 }

@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -163,6 +164,14 @@ func (e *Engine) Explain() []string {
 	} else {
 		lines = append(lines, fmt.Sprintf("Can act as you using: %s. The agent never sees these secrets.",
 			strings.Join(p.Credentials, ", ")))
+	}
+	if len(s.Env) > 0 {
+		names := make([]string, 0, len(s.Env))
+		for n := range s.Env {
+			names = append(names, n)
+		}
+		slices.Sort(names)
+		lines = append(lines, "Sets the environment variables "+strings.Join(names, ", ")+" for the agent (not secret: their values are part of this harness).")
 	}
 	for _, s := range p.Secrets {
 		where := "as the environment variable " + s.Env
