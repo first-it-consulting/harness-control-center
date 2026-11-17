@@ -237,6 +237,16 @@ var errNotFoundSentinel = errors.New("not found")
 // force is set, a credential the runner has in the same version is not
 // copied again. pw is the sudo password for a runner over ssh, if any.
 func (s *Server) copyCredentials(ctx context.Context, runner string, names []string, pw []byte, force bool) error {
+	// Names come from requests: only well-formed ones go further (into
+	// paths, commands and the log).
+	if !nameRe.MatchString(runner) {
+		return fmt.Errorf("%w: invalid runner name", errNotFoundSentinel)
+	}
+	for _, name := range names {
+		if !nameRe.MatchString(name) {
+			return fmt.Errorf("invalid credential name %q", name)
+		}
+	}
 	s.credMu.Lock()
 	defer s.credMu.Unlock()
 	ref, ok := s.config().Runner(runner)
@@ -285,7 +295,7 @@ func (s *Server) copyCredentials(ctx context.Context, runner string, names []str
 		if err := s.saveCopies(cp); err != nil {
 			return err
 		}
-		s.log.Info("credential copied to runner", "credential", name, "runner", runner)
+		s.log.Info("credential copied to runner", "credential", e.Name, "runner", ref.Name)
 	}
 	return nil
 }
