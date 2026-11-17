@@ -1,8 +1,10 @@
 // Package control is the Control Center: a local web UI and JSON API
-// that manages harnesses and drives runners (ADR-0007). It holds no
-// secrets and starts nothing by itself: every job is started by the user,
-// after seeing what the harness may do, and every runner enforces its own
-// limits whatever the Control Center asks.
+// that manages harnesses and drives runners (ADR-0007). It keeps the
+// person's credentials, owner-only, and copies to a runner only those a
+// harness it starts is granted (ADR-0019). It starts nothing by itself:
+// every job is started by the user, after seeing what the harness may
+// do, and every runner enforces its own limits whatever the Control
+// Center asks.
 package control
 
 import (

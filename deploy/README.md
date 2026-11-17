@@ -39,7 +39,7 @@ hcc run --ssh <host> my-harness.yaml
 Secrets live on the runner host and never enter a sandbox; the egress
 proxy adds them to requests for their hosts (ADR-0005).
 
-The Control Center's **Credentials** page does this for you (ADR-0017).
+The Control Center's **Credentials** page keeps your credentials and copies each one to a runner when a harness granted it starts there (ADR-0019), so you usually never do this by hand.
 On the runner host itself, `hcc credentials` does the same; the
 credential, secret included, is read as JSON on stdin:
 

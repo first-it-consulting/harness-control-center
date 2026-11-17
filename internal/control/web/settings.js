@@ -43,7 +43,7 @@ function settingsForm(ui, r, v, done) {
   const prices = h("tbody", {});
   const priceRow = (model, p) => {
     const row = h("tr", {},
-      h("td", {}, h("input", { class: "model", required: true, value: model, placeholder: "claude-opus-5-5", autocomplete: "off", pattern: "[A-Za-z0-9][A-Za-z0-9._:/@+\\-]{0,127}" })),
+      h("td", {}, h("input", { class: "model", required: true, value: model, placeholder: "claude-opus-5-5", autocomplete: "off", pattern: "[A-Za-z0-9][A-Za-z0-9._:\\/@+\\-]{0,127}" })),
       h("td", {}, h("input", { class: "in", type: "number", required: true, min: "0", max: "10000", step: "any", value: String(p.input) })),
       h("td", {}, h("input", { class: "out", type: "number", required: true, min: "0", max: "10000", step: "any", value: String(p.output) })),
       h("td", {}, h("button", { type: "button", onclick: () => row.remove() }, "Remove")));

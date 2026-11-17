@@ -202,7 +202,7 @@ function route() {
     new: () => harnessView(""),
     runners: () => runnersView(),
     runner: () => runnerView(parts[1]),
-    credentials: () => credentialsView({ h, api, set, show, fail, say }),
+    credentials: () => credentialsView({ h, api, set, show, fail, say, badge }),
     models: () => modelsView({ h, api, set, show, fail, say }),
     schedules: () => schedulesView(),
   };
@@ -432,6 +432,9 @@ async function runDialog(doc) {
   const ok = h("input", { type: "checkbox" });
   const start = h("button", { class: "primary", disabled: true }, c.trigger ? "Add schedule" : "Start");
   const mismatch = h("div");
+  // Copying the harness's credentials to a server may need sudo there.
+  const pw = h("input", { type: "password", autocomplete: "off" });
+  const pwBox = h("div", { class: "notice-box", hidden: true }, h("p", {}, ""), h("label", {}, "Your password on the runner's server", pw));
   const updateMismatch = () => {
     const r = usable.find((x) => x.name === select.value);
     set(mismatch, r && r.status.target !== c.target
@@ -443,7 +446,10 @@ async function runDialog(doc) {
   start.addEventListener("click", async () => {
     start.disabled = true;
     try {
-      const r = await api("POST", "/api/runs", { runner: select.value, yaml: doc, confirmed: true });
+      const body = { runner: select.value, yaml: doc, confirmed: true };
+      if (!pwBox.hidden && pw.value !== "") body.sudoPassword = pw.value;
+      pw.value = "";
+      const r = await api("POST", "/api/runs", body);
       dialog.close();
       if (r.schedule) {
         say("Added schedule " + r.schedule + " on " + r.runner + ".");
@@ -453,6 +459,12 @@ async function runDialog(doc) {
       }
     } catch (err) {
       start.disabled = false;
+      if (err.data && err.data.needPassword) {
+        pwBox.hidden = false;
+        pwBox.querySelector("p").textContent = "Its credentials are copied to the runner first: " + err.message + ". It is used for this copy only and is not stored.";
+        pw.focus();
+        return;
+      }
       set(mismatch, h("div", { class: "error-box" }, err.message));
     }
   });
@@ -466,6 +478,7 @@ async function runDialog(doc) {
       ? h("div", { class: "error-box" }, "No runner is reachable. ", h("a", { href: "#/runners", onclick: () => dialog.close() }, "Check your runners."))
       : h("label", {}, "Runner", select),
     mismatch,
+    pwBox,
     h("label", { class: "check" }, ok, c.trigger
       ? "I have read what this harness may do, and I want it to run unattended."
       : "I have read what this harness may do, and I want to start it."),
@@ -540,7 +553,7 @@ function scheduleRow(s) {
 // runnerFields returns the inputs for a runner entry, filled from ref, and
 // a function that reads them back.
 function runnerFields(ref) {
-  const name = h("input", { required: true, placeholder: "hcc-dev", pattern: "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?" });
+  const name = h("input", { required: true, placeholder: "hcc-dev", pattern: "[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?" });
   const kind = h("select", {}, h("option", { value: "ssh" }, "over ssh"), h("option", { value: "socket" }, "on this computer"));
   // Over ssh, a host from your ssh configuration, or any other you type.
   const other = ""; // no ssh alias is empty
@@ -886,7 +899,7 @@ async function updateLocal(r, after = runnersView) {
 // version, it updates the runner that answers there, keeping its target.
 function installRunner(r, version, after = runnersView) {
   const st = version ? r.status : null;
-  const target = h("input", { required: true, pattern: "server:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", value: st ? st.target : "server:" + r.name, autocomplete: "off", readonly: !!st });
+  const target = h("input", { required: true, pattern: "server:[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?", value: st ? st.target : "server:" + r.name, autocomplete: "off", readonly: !!st });
   const password = h("input", { type: "password", autocomplete: "off", placeholder: "only if sudo asks for one" });
   const confirmBox = h("input", { type: "checkbox" });
   const verb = st ? "Update" : "Install";

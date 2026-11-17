@@ -75,7 +75,8 @@ export async function harnessEditor(ui, name, template) {
       api("GET", "/api/harness/limits"),
       api("POST", "/api/harness/decode", { yaml: yamlText }),
     ]);
-    ctx = { runners, catalog, limits, credentials: new Map() };
+    const store = await api("GET", "/api/credentials").then((r) => r.credentials).catch(() => []);
+    ctx = { runners, catalog, limits, store, credentials: new Map() };
     doc = decoded.doc;
   } catch (err) {
     fail(err);
@@ -290,7 +291,7 @@ function basics(ed) {
   if (images.length === 0) images.push("base", "claude-code");
   if (!get(ed.doc, "spec.runtime")) put(ed.doc, "spec.runtime", "claude-code");
   return [
-    h("label", {}, "Name", text(ed, "metadata.name", { required: true, pattern: "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", placeholder: "my-harness" }),
+    h("label", {}, "Name", text(ed, "metadata.name", { required: true, pattern: "[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?", placeholder: "my-harness" }),
       help(h, "Lowercase letters, digits and '-'. Saving under a new name makes a copy.")),
     h("label", {}, "Description", text(ed, "metadata.description", { placeholder: "What this agent is for (optional)" })),
     h("div", { class: "row" },
@@ -520,20 +521,41 @@ function network(ed) {
 function credentials(ed) {
   const { h } = ed.ui;
   const granted = get(ed.doc, "spec.permissions.credentials") || [];
-  const known = ed.ctx.credentials.get(targetOf(ed.doc)) || [];
-  const all = [...new Set([...known, ...granted])].sort();
+  const stored = new Map(ed.ctx.store.map((c) => [c.name, c]));
+  const onRunners = ed.ctx.credentials.get(targetOf(ed.doc)) || [];
+  const all = [...new Set([...stored.keys(), ...onRunners, ...granted])].sort();
   if (all.length === 0) {
-    return [h("p", { class: "muted" }, "No API keys on the runners for " + targetOf(ed.doc) + ". Add them on the Credentials page.")];
+    return [h("p", { class: "muted" }, "No credentials yet. Add API keys and tokens on the Credentials page, then attach them here.")];
   }
   const modelCred = get(ed.doc, "spec.model.credential");
+  const where = (n) => {
+    const c = stored.get(n);
+    if (c) return " — sent to " + c.hosts.join(", ");
+    if (onRunners.includes(n)) return " — only on the runner";
+    return " — not found: add it on the Credentials page";
+  };
   return [
-    help(h, "The runner adds the key to the agent's requests to that key's hosts; the agent never sees it."),
-    ...all.map((n) => checkbox(ed, [n, !known.includes(n) && " (not on the runners for " + targetOf(ed.doc) + ")", n === modelCred && " — for the model"].filter(Boolean).join(""),
-      granted.includes(n), (on) => {
-        const next = on ? [...granted, n] : granted.filter((x) => x !== n);
-        put(ed.doc, "spec.permissions.credentials", next);
-        changed(ed, true);
-      })),
+    help(h, "Attached credentials are copied to the runner when the harness starts. The runner adds each one only to requests to its hosts; the agent never sees them. Their hosts must also be allowed under Internet and network."),
+    ...all.map((n) => checkbox(ed, n + (n === modelCred ? " (for the model)" : "") + where(n), granted.includes(n), (on) => {
+      const next = on ? [...granted, n] : granted.filter((x) => x !== n);
+      put(ed.doc, "spec.permissions.credentials", next);
+      // Its hosts must be reachable for it to be any use: allowed with
+      // it, and taken back with it (unless something else needs them).
+      const c = stored.get(n);
+      if (c) {
+        const rules = get(ed.doc, "spec.permissions.network.egress") || [];
+        if (on) {
+          const add = c.hosts.filter((host) => !rules.some((r) => r.host === host && samePorts(r.ports, c.port)))
+            .map((host) => (c.port === 443 ? { host } : { host, ports: [c.port] }));
+          put(ed.doc, "spec.permissions.network.egress", [...rules, ...add]);
+        } else {
+          const model = endpointOf(get(ed.doc, "spec.model.endpoint") || "");
+          put(ed.doc, "spec.permissions.network.egress", rules.filter((r) => !(c.hosts.includes(r.host) && samePorts(r.ports, c.port) &&
+            !(model && model.host === r.host && model.port === c.port))));
+        }
+      }
+      changed(ed, true);
+    })),
   ];
 }
 

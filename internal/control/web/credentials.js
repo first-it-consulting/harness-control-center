@@ -1,114 +1,114 @@
-// Credentials (ADR-0017): API keys the runners' credential brokers add
-// to the agents' requests. The agents never see them. A secret is
-// write-only: typed here once, never shown again, by this page or the
-// runner. Changes are made on the runner, as the owner of its store; on
-// a server that is sudo over ssh, which may ask for the password.
+// Credentials (ADR-0019): API keys and tokens kept here, in the Control
+// Center, and attached to harnesses. When a harness starts, the ones it
+// is granted are copied to its runner, whose broker adds them to the
+// agent's requests: the agent never sees them. A secret is write-only:
+// typed here once, never shown again.
 
 // Presets fill in what most people would have to look up.
 const KINDS = [
-  { id: "anthropic", label: "Anthropic API key", hosts: "api.anthropic.com", scheme: "https", port: 443, header: "x-api-key", prefix: "" },
-  { id: "bearer", label: "OpenAI-compatible API key (Bearer token)", hosts: "api.openai.com", scheme: "https", port: 443, header: "Authorization", prefix: "Bearer " },
-  { id: "local", label: "Model server on your network (oMLX, Ollama, LM Studio…)", hosts: "", scheme: "http", port: 4000, header: "Authorization", prefix: "Bearer " },
-  { id: "custom", label: "Something else (my own header)", hosts: "", scheme: "https", port: 443, header: "", prefix: "" },
+  { id: "anthropic", label: "Anthropic API key", name: "anthropic", hosts: "api.anthropic.com", scheme: "https", port: 443, header: "x-api-key", prefix: "" },
+  { id: "github", label: "GitHub token (GitHub API)", name: "github", hosts: "api.github.com", scheme: "https", port: 443, header: "Authorization", prefix: "Bearer " },
+  { id: "gitlab", label: "GitLab token (GitLab API)", name: "gitlab", hosts: "gitlab.com", scheme: "https", port: 443, header: "PRIVATE-TOKEN", prefix: "" },
+  { id: "bearer", label: "API token sent as \"Authorization: Bearer …\" (OpenAI, OpenRouter, LiteLLM…)", name: "", hosts: "", scheme: "https", port: 443, header: "Authorization", prefix: "Bearer " },
+  { id: "local", label: "Model server on your network (oMLX, Ollama, LM Studio…)", name: "", hosts: "", scheme: "http", port: 4000, header: "Authorization", prefix: "Bearer " },
+  { id: "custom", label: "Something else (my own header)", name: "", hosts: "", scheme: "https", port: 443, header: "", prefix: "" },
 ];
 
 export async function credentialsView(ui) {
-  const { h, api, set, show, fail } = ui;
-  const list = h("div", { class: "stack" });
+  const { h, set, show } = ui;
+  const body = h("div", { class: "stack" }, h("p", { class: "muted" }, "Loading…"));
   show(
     h("div", { class: "head" }, h("div", {}, h("h1", {}, "Credentials"),
-      h("p", { class: "muted" }, "API keys your agents may use, kept on each runner. Agents never see them: the runner adds a key to an agent's requests, and only to the hosts you name here, and only for harnesses that are granted it."))),
-    list);
-  let runners;
-  try {
-    runners = await api("GET", "/api/runners?status=false");
-  } catch (err) {
-    fail(err);
-    return;
-  }
-  if (runners.length === 0) {
-    set(list, h("div", { class: "empty" }, "No runners yet. Add one on the Runners page first."));
-    return;
-  }
-  set(list, ...runners.map((r) => runnerSection(ui, r)));
-}
-
-function runnerSection(ui, r) {
-  const { h, api, set } = ui;
-  const body = h("div", {}, h("p", { class: "muted" }, "Asking the runner…"));
-  const section = h("section", { class: "card" },
-    h("div", { class: "card-head" }, h("h2", {}, r.name),
-      h("button", { class: "primary", onclick: () => editCredential(ui, r, null, reload) }, "Add a credential")),
+        h("p", { class: "muted" }, "API keys and tokens your agents may use. You keep them here and attach them to a harness; when it starts, they are copied to its runner, which adds them to the agent's requests to the hosts you name. The agent itself never sees them.")),
+      h("div", { class: "actions" }, h("button", { class: "primary", onclick: () => editCredential(ui, null, reload) }, "Add a credential"))),
     body);
   const reload = async () => {
-    let l;
+    let list;
     try {
-      l = await api("GET", "/api/runners/" + encodeURIComponent(r.name) + "/credentials");
+      list = (await ui.api("GET", "/api/credentials")).credentials;
     } catch (err) {
-      set(body, h("div", { class: "error-box" }, "Could not ask " + r.name + ": " + err.message));
+      set(body, h("div", { class: "error-box" }, err.message));
       return;
     }
-    const rows = l.credentials.map((c) => h("tr", {},
-      h("td", {}, h("strong", {}, c.name)),
-      h("td", {}, c.hosts.join(", "), c.scheme === "http" && h("span", { class: "badge failed" }, "unencrypted")),
-      h("td", {}, c.header + (c.prefix ? " (" + c.prefix.trim() + ")" : "")),
-      h("td", { class: "actions" },
-        h("button", { onclick: () => editCredential(ui, r, c, reload) }, "Change"),
-        h("button", { onclick: () => removeCredential(ui, r, c, reload) }, "Remove"))));
-    set(body,
-      l.error && h("div", { class: "error-box" }, "The runner cannot use its store: " + l.error),
-      rows.length === 0
-        ? h("p", { class: "muted" }, "No credentials on " + r.name + " yet.")
-        : h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Sent to"), h("th", {}, "Header"), h("th", {}, ""))), h("tbody", {}, rows))));
+    set(body, storeCard(ui, list, reload), await runnerOnlyCard(ui, list));
   };
-  reload();
-  return section;
+  await reload();
 }
 
-// send makes a change; if the runner's host wants the sudo password, it
-// asks for it (in the form) and tries again.
-async function send(ui, r, method, name, body, problem, ask) {
-  const { api } = ui;
+function storeCard(ui, list, reload) {
+  const { h } = ui;
+  const rows = list.map((c) => h("tr", {},
+    h("td", {}, h("strong", {}, c.name)),
+    h("td", {}, c.hosts.join(", "), c.scheme === "http" && h("span", { class: "badge failed" }, "unencrypted")),
+    h("td", {}, c.header + (c.prefix ? " (" + c.prefix.trim() + ")" : "")),
+    h("td", {}, Object.keys(c.runners).length === 0 ? h("span", { class: "muted" }, "not yet")
+      : Object.entries(c.runners).sort().map(([r, state]) => h("div", {}, r + " ",
+        state === "current" ? ui.badge("current", "succeeded") : [ui.badge("older version", "queued"), " ",
+          h("button", { onclick: () => copyNow(ui, c, r, reload) }, "Copy now")]))),
+    h("td", { class: "actions" },
+      h("button", { onclick: () => editCredential(ui, c, reload) }, "Change"),
+      h("button", { onclick: () => removeCredential(ui, c, reload) }, "Remove"))));
+  return h("section", { class: "card" },
+    h("h2", {}, "Your credentials"),
+    rows.length === 0
+      ? h("p", { class: "muted" }, "None yet. Add one, then attach it to a harness under Credentials.")
+      : h("div", { class: "table-wrap" }, h("table", {},
+        h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Sent only to"), h("th", {}, "Header"), h("th", {}, "On runners"), h("th", {}, ""))),
+        h("tbody", {}, rows))),
+    h("p", { class: "muted" }, "For web services (APIs, model servers): the key travels in a request header. Passwords or files the agent itself would have to read (a database password, a kubeconfig) are not supported, because the agent would then see them."));
+}
+
+// runnerOnlyCard lists credentials that a runner has but this Control
+// Center does not keep (added on the runner before).
+async function runnerOnlyCard(ui, list) {
+  const { h, api } = ui;
+  const kept = new Set(list.map((c) => c.name));
+  let runners = [];
   try {
-    await api(method, "/api/runners/" + encodeURIComponent(r.name) + "/credentials/" + encodeURIComponent(name), body);
-    return true;
-  } catch (err) {
-    if (err.data && err.data.needPassword) {
-      ask(err.message);
-      return false;
-    }
-    problem(err.message);
-    return false;
+    runners = await api("GET", "/api/runners?status=false");
+  } catch {
+    return null;
   }
+  const found = [];
+  await Promise.all(runners.map((r) => api("GET", "/api/runners/" + encodeURIComponent(r.name) + "/credentials")
+    .then((l) => l.credentials.filter((c) => !kept.has(c.name)).forEach((c) => found.push({ runner: r, c })))
+    .catch(() => {})));
+  if (found.length === 0) return null;
+  found.sort((a, b) => (a.runner.name + a.c.name).localeCompare(b.runner.name + b.c.name));
+  return h("section", { class: "card" },
+    h("h2", {}, "Only on a runner"),
+    h("p", { class: "muted" }, "Added on a runner before. Harnesses there can still use them. To keep one here instead, add it above with the same name and its key; it then replaces the runner's copy."),
+    h("div", { class: "table-wrap" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "Runner"), h("th", {}, "Name"), h("th", {}, "Sent only to"), h("th", {}, ""))),
+      h("tbody", {}, found.map(({ runner, c }) => h("tr", {},
+        h("td", {}, runner.name), h("td", {}, h("strong", {}, c.name)), h("td", {}, c.hosts.join(", ")),
+        h("td", { class: "actions" }, h("button", { onclick: () => removeFromRunner(ui, runner, c) }, "Remove from " + runner.name))))))));
 }
 
-function passwordField(ui, r) {
+function passwordBox(ui, host) {
   const { h } = ui;
   const input = h("input", { type: "password", autocomplete: "off" });
-  const box = h("div", { class: "notice-box", hidden: true },
-    h("p", {}, "To change credentials on " + r.name + ", the server needs your password (sudo on " + r.ssh + "). It is used for this change only and is not stored."),
-    h("label", {}, "Your password on " + r.ssh, input));
+  const box = h("div", { class: "notice-box", hidden: true }, h("p", {}, ""), h("label", {}, "Your password on " + (host || "the runner"), input));
   return {
     box,
-    show(msg) {
+    ask(msg) {
       box.hidden = false;
       box.querySelector("p").textContent = msg + ". It is used for this change only and is not stored.";
       input.focus();
     },
-    value() {
-      return box.hidden || input.value === "" ? undefined : input.value;
-    },
-    clear() {
+    take() {
+      const v = box.hidden || input.value === "" ? undefined : input.value;
       input.value = "";
+      return v;
     },
   };
 }
 
-function editCredential(ui, r, existing, done) {
-  const { h, set, say } = ui;
+function editCredential(ui, existing, done) {
+  const { h, set, api, say } = ui;
   const dialog = document.getElementById("dialog");
   const kind = h("select", {}, KINDS.map((k) => h("option", { value: k.id }, k.label)));
-  const name = h("input", { required: true, pattern: "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", placeholder: "anthropic", autocomplete: "off" });
+  const name = h("input", { required: true, pattern: "[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?", placeholder: "anthropic", autocomplete: "off" });
   const hosts = h("input", { required: true, placeholder: "api.anthropic.com", autocomplete: "off" });
   const scheme = h("select", {}, h("option", { value: "https" }, "https (encrypted)"), h("option", { value: "http" }, "http (unencrypted)"));
   const port = h("input", { type: "number", min: "1", max: "65535", required: true });
@@ -116,20 +116,17 @@ function editCredential(ui, r, existing, done) {
   const prefix = h("input", { placeholder: "e.g. Bearer (with the space)", autocomplete: "off" });
   const secret = h("input", { type: "password", autocomplete: "new-password", required: !existing,
     placeholder: existing ? "leave empty to keep the current key" : "paste the key" });
-  const warn = h("div", { class: "error-box", hidden: true }, "Unencrypted: the key crosses your network in clear text. Use this only for a model server in your own network.");
+  const warn = h("div", { class: "error-box", hidden: true }, "Unencrypted: the key crosses your network in clear text. Use this only for a server in your own network.");
   const problem = h("div", {});
-  const pw = passwordField(ui, r);
+  const sync = () => { warn.hidden = scheme.value !== "http"; };
   const fill = (k) => {
     hosts.value = k.hosts;
     scheme.value = k.scheme;
     port.value = String(k.port);
     header.value = k.header;
     prefix.value = k.prefix;
-    if (!existing && !name.value) name.value = k.id === "custom" || k.id === "local" ? "" : k.id === "bearer" ? "openai" : k.id;
+    if (!existing) name.value = k.name;
     sync();
-  };
-  const sync = () => {
-    warn.hidden = scheme.value !== "http";
   };
   kind.addEventListener("change", () => fill(KINDS.find((k) => k.id === kind.value)));
   scheme.addEventListener("change", () => {
@@ -161,52 +158,120 @@ function editCredential(ui, r, existing, done) {
       prefix: prefix.value,
     };
     if (secret.value !== "") body.secret = secret.value;
-    const p = pw.value();
-    if (p !== undefined) body.sudoPassword = p;
-    const ok = await send(ui, r, "PUT", name.value, body, (msg) => set(problem, h("div", { class: "error-box" }, msg)), (msg) => pw.show(msg));
-    pw.clear();
-    if (!ok) return;
-    secret.value = "";
+    try {
+      await api("PUT", "/api/credentials/" + encodeURIComponent(name.value), body);
+    } catch (err) {
+      set(problem, h("div", { class: "error-box" }, err.message));
+      return;
+    } finally {
+      secret.value = "";
+    }
     dialog.close();
-    say("Saved " + name.value + " on " + r.name + ". Jobs that start from now on can use it.");
+    say("Saved " + name.value + ". Harnesses that use it get it on their runner when they start.");
     done();
   } },
-  h("h1", {}, existing ? "Change " + existing.name : "Add a credential to " + r.name),
+  h("h1", {}, existing ? "Change " + existing.name : "Add a credential"),
   h("div", { class: "form-stack" },
     !existing && h("label", {}, "What is it?", kind),
-    h("label", {}, "Name", name, h("span", { class: "muted note" }, "Harnesses ask for it by this name, in permissions.credentials.")),
-    h("label", {}, "Sent only to", hosts, h("span", { class: "muted note" }, "Exact host names, separated by commas. Never to any other host.")),
+    h("label", {}, "Name", name, h("span", { class: "muted note" }, "You pick it from this name in a harness.")),
+    h("label", {}, "Sent only to", hosts, h("span", { class: "muted note" }, "Exact host names, separated by commas. Never to any other host, even if the agent asks.")),
     h("div", { class: "row" }, h("label", {}, "Connection", scheme), h("label", {}, "Port", port)),
     warn,
     h("div", { class: "row" }, h("label", {}, "Header", header), h("label", {}, "Before the key", prefix)),
     h("label", {}, "Key", secret, h("span", { class: "muted note" }, "Write-only: nobody can see it again here, not even you."))),
-  pw.box,
   problem,
   h("div", { class: "actions" }, h("button", { class: "primary" }, "Save"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
   set(dialog, form);
   dialog.showModal();
 }
 
-function removeCredential(ui, r, c, done) {
-  const { h, set, say } = ui;
+function removeCredential(ui, c, done) {
+  const { h, set, api, say } = ui;
   const dialog = document.getElementById("dialog");
+  const runners = Object.keys(c.runners);
+  const form = h("form", { method: "dialog", onsubmit: async (ev) => {
+    ev.preventDefault();
+    try {
+      await api("DELETE", "/api/credentials/" + encodeURIComponent(c.name));
+    } catch (err) {
+      ui.fail(err);
+      return;
+    }
+    dialog.close();
+    say("Removed " + c.name + ".");
+    done();
+  } },
+  h("h1", {}, "Remove " + c.name + "?"),
+  h("p", {}, "Harnesses that use " + c.name + " can no longer get it."),
+  runners.length > 0 && h("p", { class: "muted" }, "The copies on " + runners.join(", ") + " stay until you remove them there (they then show under \"Only on a runner\")."),
+  h("div", { class: "actions" }, h("button", { class: "danger" }, "Remove"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
+  set(dialog, form);
+  dialog.showModal();
+}
+
+// copyNow copies a changed credential to a runner, asking for sudo's
+// password if the runner's host wants it.
+function copyNow(ui, c, runner, done) {
+  const { h, set, api, say } = ui;
+  const dialog = document.getElementById("dialog");
+  const pw = passwordBox(ui, runner);
   const problem = h("div", {});
-  const pw = passwordField(ui, r);
+  const form = h("form", { method: "dialog", onsubmit: async (ev) => {
+    ev.preventDefault();
+    set(problem);
+    const body = { runner };
+    const p = pw.take();
+    if (p !== undefined) body.sudoPassword = p;
+    try {
+      await api("POST", "/api/credentials/" + encodeURIComponent(c.name) + "/copy", body);
+    } catch (err) {
+      if (err.data && err.data.needPassword) {
+        pw.ask(err.message);
+        return;
+      }
+      set(problem, h("div", { class: "error-box" }, err.message));
+      return;
+    }
+    dialog.close();
+    say("Copied " + c.name + " to " + runner + ".");
+    done();
+  } },
+  h("h1", {}, "Copy " + c.name + " to " + runner + "?"),
+  h("p", {}, runner + " has an older version. Harnesses copy it anyway when they start; this does it now, e.g. for its schedules."),
+  pw.box,
+  problem,
+  h("div", { class: "actions" }, h("button", { class: "primary" }, "Copy"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
+  set(dialog, form);
+  dialog.showModal();
+}
+
+function removeFromRunner(ui, runner, c) {
+  const { h, set, api, say } = ui;
+  const dialog = document.getElementById("dialog");
+  const pw = passwordBox(ui, runner.ssh);
+  const problem = h("div", {});
   const form = h("form", { method: "dialog", onsubmit: async (ev) => {
     ev.preventDefault();
     set(problem);
     const body = {};
-    const p = pw.value();
+    const p = pw.take();
     if (p !== undefined) body.sudoPassword = p;
-    const ok = await send(ui, r, "DELETE", c.name, body, (msg) => set(problem, h("div", { class: "error-box" }, msg)), (msg) => pw.show(msg));
-    pw.clear();
-    if (!ok) return;
+    try {
+      await api("DELETE", "/api/runners/" + encodeURIComponent(runner.name) + "/credentials/" + encodeURIComponent(c.name), body);
+    } catch (err) {
+      if (err.data && err.data.needPassword) {
+        pw.ask(err.message);
+        return;
+      }
+      set(problem, h("div", { class: "error-box" }, err.message));
+      return;
+    }
     dialog.close();
-    say("Removed " + c.name + " from " + r.name + ".");
-    done();
+    say("Removed " + c.name + " from " + runner.name + ".");
+    location.reload();
   } },
-  h("h1", {}, "Remove " + c.name + "?"),
-  h("p", {}, "Harnesses that use " + c.name + " on " + r.name + " will be refused until you add it again."),
+  h("h1", {}, "Remove " + c.name + " from " + runner.name + "?"),
+  h("p", {}, "Harnesses on " + runner.name + " that use it will be refused until it is there again."),
   pw.box,
   problem,
   h("div", { class: "actions" }, h("button", { class: "danger" }, "Remove"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));

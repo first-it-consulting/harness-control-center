@@ -143,10 +143,10 @@ function editEndpoint(page, index) {
   const existing = index >= 0 ? page.view.endpoints[index] : null;
   const help = (t) => h("span", { class: "muted note" }, t);
   const kind = h("select", {}, KINDS.map((k) => h("option", { value: k.id }, k.label)));
-  const name = h("input", { required: true, pattern: "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", placeholder: "anthropic", autocomplete: "off" });
+  const name = h("input", { required: true, pattern: "[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?", placeholder: "anthropic", autocomplete: "off" });
   const url = h("input", { required: true, type: "url", autocomplete: "off" });
   const listID = "credential-names";
-  const credential = h("input", { list: listID, pattern: "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", autocomplete: "off", placeholder: "none" });
+  const credential = h("input", { list: listID, pattern: "[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?", autocomplete: "off", placeholder: "none" });
   const names = h("datalist", { id: listID }, page.credentialNames.map((n) => h("option", { value: n })));
   const warn = h("div", { class: "error-box", hidden: true }, "Unencrypted: prompts, code and the credential cross your network in clear text. Use http:// only for a model server in your own network.");
   const sync = () => { warn.hidden = !url.value.startsWith("http://"); };
@@ -215,11 +215,11 @@ function editModel(page, index) {
   const help = (t) => h("span", { class: "muted note" }, t);
   const endpoint = h("select", { required: true }, page.view.endpoints.map((e) => h("option", { value: e.name }, e.name + " (" + e.url + ")")));
   const idList = h("datalist", { id: "model-ids" });
-  const id = h("input", { required: true, list: "model-ids", autocomplete: "off", pattern: "[A-Za-z0-9][A-Za-z0-9._:/\\-]{0,127}", placeholder: "claude-sonnet-5-5" });
+  const id = h("input", { required: true, list: "model-ids", autocomplete: "off", pattern: "[A-Za-z0-9][A-Za-z0-9._:\\/\\-]{0,127}", placeholder: "claude-sonnet-5-5" });
   const label = h("input", { autocomplete: "off", maxlength: "80", placeholder: "e.g. Claude Sonnet (optional)" });
   const num = (min, max, placeholder) => h("input", { type: "number", min: String(min), max: String(max), step: "1", placeholder });
   const window_ = num(8192, 1000000, "runtime default");
-  const small = h("input", { list: "model-ids", autocomplete: "off", pattern: "[A-Za-z0-9][A-Za-z0-9._:/\\-]{0,127}", placeholder: "the same model" });
+  const small = h("input", { list: "model-ids", autocomplete: "off", pattern: "[A-Za-z0-9][A-Za-z0-9._:\\/\\-]{0,127}", placeholder: "the same model" });
   const maxOut = num(1024, 262144, "runtime default");
   const think = num(1024, 262144, "no extended thinking");
   const suggest = () => {

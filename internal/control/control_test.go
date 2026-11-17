@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -680,4 +681,78 @@ func TestApprovalsThroughTheUI(t *testing.T) {
 	if code := ts.do(http.MethodPost, "/api/runners/local/approvals/apr-1", map[string]any{"approve": true}, &out); code != http.StatusNotFound {
 		t.Errorf("unknown approval: %d %v", code, out)
 	}
+}
+
+// Browsers compile a pattern attribute with the "v" flag, where a literal
+// "-" or "/" (and ( ) [ ] { } |) in a character class must be escaped;
+// an invalid pattern is ignored, so the field is not checked at all.
+func TestWebPatternsAreValidForBrowsers(t *testing.T) {
+	attr := regexp.MustCompile(`pattern: "((?:[^"\\]|\\.)*)"`)
+	entries, err := webFS.ReadDir("web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".js") {
+			continue
+		}
+		data, _ := webFS.ReadFile("web/" + e.Name())
+		for _, m := range attr.FindAllSubmatch(data, -1) {
+			var pat string
+			if err := json.Unmarshal([]byte(`"`+string(m[1])+`"`), &pat); err != nil {
+				t.Fatalf("%s: %s: %v", e.Name(), m[1], err)
+			}
+			n++
+			if msg := vFlagClassProblem(pat); msg != "" {
+				t.Errorf("%s: pattern %q: %s", e.Name(), pat, msg)
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("no patterns found")
+	}
+	for pat, ok := range map[string]bool{`[a-z0-9-]`: false, `[a-z0-9\-]`: true, `[a/b]`: false, `[a\/b]`: true, `a-b`: true} {
+		if got := vFlagClassProblem(pat) == ""; got != ok {
+			t.Errorf("vFlagClassProblem(%q) ok = %v, want %v", pat, got, ok)
+		}
+	}
+}
+
+// vFlagClassProblem says why a character class in pat is invalid with
+// the v flag ("" if none): an unescaped literal hyphen, or a reserved
+// character. Ranges (a-z) are fine.
+func vFlagClassProblem(pat string) string {
+	in := false
+	var prev rune // the class's previous atom, 0 at its start
+	rs := []rune(pat)
+	for i := 0; i < len(rs); i++ {
+		c := rs[i]
+		if c == '\\' {
+			i++
+			prev = 'x'
+			continue
+		}
+		if !in {
+			if c == '[' {
+				in, prev = true, 0
+			}
+			continue
+		}
+		switch {
+		case c == ']':
+			in = false
+		case c == '-':
+			if prev == 0 || i+1 >= len(rs) || rs[i+1] == ']' {
+				return "unescaped literal '-' in a character class"
+			}
+			i++ // the range's end
+			prev = 'x'
+		case strings.ContainsRune("()[{}/|", c):
+			return "unescaped " + strconv.QuoteRune(c) + " in a character class"
+		default:
+			prev = c
+		}
+	}
+	return ""
 }
