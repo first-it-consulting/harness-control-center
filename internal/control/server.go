@@ -73,6 +73,8 @@ var webFS embed.FS
 //	POST   /api/harness/decode                   a harness's YAML as the form's data
 //	POST   /api/harness/encode                   the form's data as YAML, checked
 //	GET    /api/harness/limits                   the bounds and defaults the form shows
+//	GET    /api/policies                         the network policies and which harnesses have each
+//	PUT    /api/policies                         replace them (hosts checked like a harness's egress rules)
 //	GET    /api/providers                        the model providers and which harnesses use each
 //	PUT    /api/providers                        replace them (validated like a harness's spec.model)
 //	POST   /api/providers/{name}/models          ask a provider for its models
@@ -176,6 +178,8 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("POST /api/harness/decode", s.harnessDecode)
 	mux.HandleFunc("POST /api/harness/encode", s.harnessEncode)
 	mux.HandleFunc("GET /api/harness/limits", s.harnessLimits)
+	mux.HandleFunc("GET /api/policies", s.policiesGet)
+	mux.HandleFunc("PUT /api/policies", s.policiesPut)
 	mux.HandleFunc("GET /api/providers", s.providersGet)
 	mux.HandleFunc("PUT /api/providers", s.providersPut)
 	mux.HandleFunc("POST /api/providers/{name}/models", s.providerModels)

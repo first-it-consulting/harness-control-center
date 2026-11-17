@@ -69,14 +69,15 @@ export async function harnessEditor(ui, name, template) {
   let ctx;
   let doc;
   try {
-    const [runners, providers, limits, decoded] = await Promise.all([
+    const [runners, providers, policies, limits, decoded] = await Promise.all([
       api("GET", "/api/runners"),
       api("GET", "/api/providers").then((r) => r.providers).catch(() => []),
+      api("GET", "/api/policies").then((r) => r.policies).catch(() => []),
       api("GET", "/api/harness/limits"),
       api("POST", "/api/harness/decode", { yaml: yamlText }),
     ]);
     const store = await api("GET", "/api/credentials").then((r) => r.credentials).catch(() => []);
-    ctx = { runners, providers, limits, store, credentials: new Map(), models: new Map() };
+    ctx = { runners, providers, policies, limits, store, credentials: new Map(), models: new Map() };
     doc = decoded.doc;
   } catch (err) {
     fail(err);
@@ -501,6 +502,51 @@ const short = (d) => d.replace(/(\D)0s$/, "$1").replace(/(h)0m$/, "$1");
 
 // --- network ---
 
+// covers: egress allows all of a policy's hosts (on their ports).
+const covers = (rules, p) => p.hosts.every((x) => rules.some((r) => r.host === x.host && sameList(r.ports, x.ports)));
+const sameList = (a, b) => {
+  const n = (p) => [...new Set(p && p.length > 0 ? p.map(Number) : [443])].sort((x, y) => x - y).join(",");
+  return n(a) === n(b);
+};
+
+// neededElsewhere: a rule something else in the harness still needs
+// (its model, a credential, another attached policy).
+function neededElsewhere(ed, r, except) {
+  const doc = ed.doc;
+  const m = endpointOf(get(doc, "spec.model.endpoint") || "");
+  if (m && m.host === r.host && sameList(r.ports, [m.port])) return true;
+  const granted = get(doc, "spec.permissions.credentials") || [];
+  for (const c of ed.ctx.store) {
+    if (granted.includes(c.name) && c.hosts.includes(r.host) && sameList(r.ports, [c.port])) return true;
+  }
+  const rules = get(doc, "spec.permissions.network.egress") || [];
+  return ed.ctx.policies.some((p) => p.name !== except.name && covers(rules, p) && p.hosts.some((x) => x.host === r.host && sameList(r.ports, x.ports)));
+}
+
+function policies(ed) {
+  const { h } = ed.ui;
+  const rules = get(ed.doc, "spec.permissions.network.egress") || [];
+  if (ed.ctx.policies.length === 0) {
+    return [help(h, "Network policies (named sets of hosts such as GitHub or Python packages) can be defined on the Network page and attached here.")];
+  }
+  return [
+    h("p", {}, "Network policies"),
+    h("div", { class: "checks" }, ed.ctx.policies.map((p) => checkbox(ed, p.name + (p.description ? " — " + p.description : ""), covers(rules, p), (on) => {
+      let next = (get(ed.doc, "spec.permissions.network.egress") || []).slice();
+      if (on) {
+        for (const x of p.hosts) {
+          if (!next.some((r) => r.host === x.host && sameList(r.ports, x.ports))) next.push(x.ports && x.ports.length > 0 ? { host: x.host, ports: x.ports } : { host: x.host });
+        }
+        if (p.private) put(ed.doc, "spec.permissions.network.allowPrivateNetworks", true);
+      } else {
+        next = next.filter((r) => !(p.hosts.some((x) => x.host === r.host && sameList(r.ports, x.ports)) && !neededElsewhere(ed, r, p)));
+      }
+      put(ed.doc, "spec.permissions.network.egress", next);
+      changed(ed, true);
+    }))),
+  ];
+}
+
 function network(ed) {
   const { h } = ed.ui;
   const rules = get(ed.doc, "spec.permissions.network.egress") || [];
@@ -526,7 +572,9 @@ function network(ed) {
   });
   const private_ = get(ed.doc, "spec.permissions.network.allowPrivateNetworks") === true;
   return [
-    rules.length === 0 ? h("p", { class: "muted" }, "No internet: the agent cannot reach anything.") : help(h, "The agent can reach only these hosts, on these ports (443, the usual one for https, if none). *.example.com means all of example.com's subdomains."),
+    ...policies(ed),
+    h("p", {}, "All hosts it may reach"),
+    rules.length === 0 ? h("p", { class: "muted" }, "None: the agent cannot reach anything.") : help(h, "From the policies, the model, the credentials, and any you add. Only these hosts, on these ports (443, the usual one for https, if none). *.example.com means all of example.com's subdomains."),
     list,
     h("div", { class: "actions" }, h("button", { type: "button", onclick: () => {
       put(ed.doc, "spec.permissions.network.egress", [...rules, { host: "" }]);

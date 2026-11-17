@@ -5,6 +5,7 @@ import { localPanel } from "./local.js";
 import { credentialsView } from "./credentials.js";
 import { settingsPanel } from "./settings.js";
 import { modelsView } from "./models.js";
+import { networkView } from "./network.js";
 import { harnessEditor } from "./harness-form.js";
 //
 // Everything shown here may come from an agent (job errors, console
@@ -204,6 +205,7 @@ function route() {
     runner: () => runnerView(parts[1]),
     credentials: () => credentialsView({ h, api, set, show, fail, say, badge }),
     models: () => modelsView({ h, api, set, show, fail, say, badge }),
+    network: () => networkView({ h, api, set, show, fail, say, badge }),
     schedules: () => schedulesView(),
   };
   (routes[parts[0]] || routes.dashboard)();
