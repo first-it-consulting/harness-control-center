@@ -7,13 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -298,7 +301,7 @@ func (s *Server) fetchModelsWith(ctx context.Context, p Provider, header, value 
 		resp, err = get("/api/tags")
 	}
 	if err != nil {
-		return nil, errors.New("the provider does not answer")
+		return nil, whyUnreachable(p.URL, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxModelsBody+1))
@@ -351,6 +354,27 @@ func (s *Server) fetchModelsWith(ctx context.Context, p Provider, header, value 
 		out = []ProviderModel{}
 	}
 	return out, nil
+}
+
+// whyUnreachable says why a provider could not be reached, in words that
+// point at the fix.
+func whyUnreachable(rawURL string, err error) error {
+	where := rawURL
+	if _, host, port := (&spec.Model{Endpoint: rawURL}).EndpointHostPort(); host != "" {
+		where = host + ":" + strconv.Itoa(port)
+	}
+	var dns *net.DNSError
+	var ne net.Error
+	switch {
+	case errors.As(err, &dns):
+		return fmt.Errorf("the name %s is not known: check the address", dns.Name)
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return fmt.Errorf("nothing is listening at %s: is the server running, and on this port?", where)
+	case errors.As(err, &ne) && ne.Timeout():
+		return fmt.Errorf("no answer from %s in time: is the address right, or is a firewall in the way?", where)
+	default:
+		return fmt.Errorf("cannot reach %s", where)
+	}
 }
 
 // providerAuth is the header a provider's models are asked with: its
