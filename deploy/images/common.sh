@@ -83,8 +83,12 @@ hcc_forward() {
 	fi
 	first=$(jq -r '.routes[0].listen // empty' /tmp/hcc-forward.json)
 	[ -n "$first" ] || return 0
+	# Listening yet? Read from /proc: a test connection would already
+	# open a tunnel to the real host.
+	addr=${first%:*}
+	want=$(printf '%02X%02X%02X%02X:%04X' $(echo "$addr" | awk -F. '{print $4, $3, $2, $1}') "${first##*:}")
 	i=0
-	until nc -z "${first%:*}" "${first##*:}" 2>/dev/null; do
+	until awk -v w="$want" '$2 == w && $4 == "0A" { found = 1 } END { exit !found }' /proc/net/tcp; do
 		i=$((i + 1))
 		[ "$i" -lt 50 ] || { echo "HCC-NET-ERROR the forwarder did not start"; return 1; }
 		sleep 0.1

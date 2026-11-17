@@ -526,8 +526,8 @@ func TestE2EForward(t *testing.T) {
 		}
 	}
 	if !strings.Contains(proxyLog.String(), "host=example.com port=80") {
-		t.Errorf("the tunnel did not go through the proxy:\n%s", proxyLog.String())
+		t.Errorf("the tunnel did not go through the proxy")
 	}
 	e.assertNoTrace(t, id)
-	t.Logf("console:\n%s", out)
+	t.Logf("console:\n%s\nproxy:\n%s", out, proxyLog.String())
 }
