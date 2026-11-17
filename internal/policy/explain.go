@@ -35,6 +35,7 @@ func (r Risk) String() string {
 //	+1 any credential         +1 network AND credentials (exfiltration path)
 //	+1 any subagents          +2 private networks
 //	+1 http model endpoint    +1 runs unattended (schedule or loop)
+//	+3 secrets handed to the agent (always high: it can read and send them)
 //
 // 0 is low, 1-2 medium, 3+ high.
 func (e *Engine) Risk() (Risk, []string) {
@@ -59,6 +60,9 @@ func (e *Engine) Risk() (Risk, []string) {
 		if len(p.Network.Egress) > 0 {
 			bump(1, "combines network access with credentials")
 		}
+	}
+	if len(p.Secrets) > 0 {
+		bump(3, "can read secrets itself (and could send them where it may connect)")
 	}
 	if p.Subagents.Max > 0 {
 		bump(1, "can start subagents")
@@ -159,6 +163,17 @@ func (e *Engine) Explain() []string {
 	} else {
 		lines = append(lines, fmt.Sprintf("Can act as you using: %s. The agent never sees these secrets.",
 			strings.Join(p.Credentials, ", ")))
+	}
+	for _, s := range p.Secrets {
+		where := "as the environment variable " + s.Env
+		if s.File != "" {
+			where = "in the file ~/" + s.File
+		}
+		reach := "It has no network, so it cannot send it anywhere."
+		if len(p.Network.Egress) > 0 {
+			reach = "It could send it to any host it may reach."
+		}
+		lines = append(lines, fmt.Sprintf("The agent can READ the secret %s (%s). %s", s.Name, where, reach))
 	}
 
 	if len(p.Tools.Install) > 0 {

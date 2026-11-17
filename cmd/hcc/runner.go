@@ -124,6 +124,18 @@ func serve(configPath string, log *slog.Logger) error {
 		}
 		rcfg.Egress = egressFactory(blocked, cfg.Credentials, log)
 	}
+	// Secrets for the agent (ADR-0020) come from the same store, read
+	// for every job; only those of kind "secret" are ever handed out.
+	if cfg.Credentials != "" {
+		store := cfg.Credentials
+		rcfg.Secrets = func(h *spec.Harness) (map[string]string, error) {
+			creds, err := credentials.Load(store)
+			if err != nil {
+				return nil, err
+			}
+			return credentials.ForAgent(creds, h)
+		}
+	}
 	// Plugins (ADR-0013): each run in a sandbox of its own, with its own
 	// share of the VM identities. MCP server plugins run for jobs
 	// (ADR-0014).

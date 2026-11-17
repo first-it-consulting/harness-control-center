@@ -13,7 +13,10 @@ the bar for safety is high. These rules keep it that way.
 3. **One enforcement point.** Permission decisions live in
    `internal/policy`. Other components ask the engine; they never
    re-interpret the spec themselves.
-4. **No secrets in sandboxes, logs or errors.** Ever.
+4. **No secrets in logs or errors, ever; in a sandbox only when a harness
+   hands one to its agent explicitly** (ADR-0020: `permissions.secrets`,
+   rated high risk, explained, masked in the console). Credentials for web
+   requests never enter a sandbox: the broker adds them.
 5. **Big decisions get an ADR** in `docs/adr/`. If a change alters the
    threat model, update `docs/threat-model.md` in the same PR.
 

@@ -31,9 +31,21 @@ type Credential struct {
 	Port   int
 	// Header carries the secret, e.g. "x-api-key" or "Authorization".
 	Header string
-	// Value is the full header value, e.g. "Bearer <secret>".
+	// Value is the full header value, e.g. "Bearer <secret>"; for a
+	// secret for the agent, the secret itself.
 	Value string
+	// Kind is "" for a credential the broker adds to requests, KindSecret
+	// for one handed to the agent (ADR-0020).
+	Kind string
 }
+
+// KindSecret marks a secret handed to the agent itself (spec.permissions
+// .secrets): any value, one line or a file such as a kubeconfig. It has
+// no hosts; the broker never sends it.
+const KindSecret = "secret"
+
+// MaxAgentSecretBytes bounds a secret for the agent (a kubeconfig fits).
+const MaxAgentSecretBytes = 64 << 10
 
 // String never shows the secret.
 func (c Credential) String() string {
@@ -44,11 +56,12 @@ func (c Credential) String() string {
 func (c Credential) GoString() string { return c.String() }
 
 type fileEntry struct {
-	Hosts      []string `yaml:"hosts"`
-	Scheme     string   `yaml:"scheme"`
-	Port       int      `yaml:"port"`
-	Header     string   `yaml:"header"`
-	Prefix     string   `yaml:"prefix"`
+	Kind       string   `yaml:"kind,omitempty"`
+	Hosts      []string `yaml:"hosts,omitempty"`
+	Scheme     string   `yaml:"scheme,omitempty"`
+	Port       int      `yaml:"port,omitempty"`
+	Header     string   `yaml:"header,omitempty"`
+	Prefix     string   `yaml:"prefix,omitempty"`
 	SecretFile string   `yaml:"secretFile"`
 }
 
@@ -101,6 +114,13 @@ func build(name string, e fileEntry) (Credential, error) {
 	}
 	if !nameRe.MatchString(name) {
 		return fail("invalid name")
+	}
+	switch e.Kind {
+	case "":
+	case KindSecret:
+		return buildSecret(name, e, fail)
+	default:
+		return fail("unknown kind %q", e.Kind)
 	}
 	if len(e.Hosts) == 0 {
 		return fail("at least one host is required")
@@ -174,6 +194,51 @@ func readLimited(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+// buildSecret reads a secret for the agent: no hosts or header (the
+// broker never sends it), any text up to MaxAgentSecretBytes.
+func buildSecret(name string, e fileEntry, fail func(string, ...any) (Credential, error)) (Credential, error) {
+	if len(e.Hosts) > 0 || e.Scheme != "" || e.Port != 0 || e.Header != "" || e.Prefix != "" {
+		return fail("a secret for the agent has no hosts, scheme, port, header or prefix")
+	}
+	if !filepath.IsAbs(e.SecretFile) || filepath.Clean(e.SecretFile) != e.SecretFile {
+		return fail("secretFile must be a clean absolute path")
+	}
+	if err := checkPrivate(e.SecretFile); err != nil {
+		return fail("%v", err)
+	}
+	raw, err := readLimited(e.SecretFile, MaxAgentSecretBytes)
+	if err != nil {
+		return fail("%v", err)
+	}
+	if strings.TrimSpace(string(raw)) == "" || strings.ContainsRune(string(raw), 0) {
+		return fail("secret is empty or not text")
+	}
+	return Credential{Name: name, Kind: KindSecret, Value: string(raw)}, nil
+}
+
+// ForAgent returns the secrets h hands to its agent, by name. Only
+// secrets of KindSecret qualify: a credential the broker adds to requests
+// is never handed to an agent, whatever a harness asks.
+func ForAgent(store map[string]Credential, h *spec.Harness) (map[string]string, error) {
+	out := map[string]string{}
+	var errs []error
+	for _, s := range h.Spec.Permissions.Secrets {
+		c, ok := store[s.Name]
+		switch {
+		case !ok:
+			errs = append(errs, fmt.Errorf("secret %q does not exist on this runner", s.Name))
+		case c.Kind != KindSecret:
+			errs = append(errs, fmt.Errorf("%q is a credential for web requests, not a secret for the agent: it is never handed to an agent", s.Name))
+		default:
+			out[s.Name] = c.Value
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return nil, fmt.Errorf("credentials: %w", err)
+	}
+	return out, nil
+}
+
 // ForHarness returns the credentials h is granted, checking that each
 // exists and that every host (and port) it would be sent to is in h's
 // egress allowlist (otherwise the grant is meaningless or wider than
@@ -185,6 +250,10 @@ func ForHarness(store map[string]Credential, h *spec.Harness, allowed func(host 
 		c, ok := store[name]
 		if !ok {
 			errs = append(errs, fmt.Errorf("credential %q does not exist on this runner", name))
+			continue
+		}
+		if c.Kind == KindSecret {
+			errs = append(errs, fmt.Errorf("%q is a secret for the agent: grant it under permissions.secrets", name))
 			continue
 		}
 		for _, host := range c.Hosts {

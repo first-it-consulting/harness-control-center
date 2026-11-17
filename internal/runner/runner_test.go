@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1071,3 +1072,67 @@ func TestKillAllCallsOnKill(t *testing.T) {
 		t.Errorf("OnKill called %d times, want 2", called)
 	}
 }
+
+// Secrets go into the job's task only; its console and record never show
+// them, and a runner without secrets refuses the harness.
+func TestSecretsReachOnlyTheTask(t *testing.T) {
+	const value = "pg-secret-0123456789"
+	p := newFakeProvider()
+	p.console = "connecting with " + value + "\nHCC-RESULT-BEGIN\ndone\nHCC-RESULT-END exit=0\n"
+	var console bytes.Buffer
+	var mu sync.Mutex
+	asked := 0
+	r, err := New(Config{
+		Provider: p,
+		Images:   []string{"base"},
+		Console: func(string) io.Writer {
+			return writerFunc(func(b []byte) (int, error) { mu.Lock(); defer mu.Unlock(); return console.Write(b) })
+		},
+		Secrets: func(*spec.Harness) (map[string]string, error) {
+			asked++
+			return map[string]string{"db-password": value}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Shutdown(context.Background()) }()
+	id, err := r.Submit(harness(t, "  permissions:\n    secrets: [{name: db-password, env: PGPASSWORD}]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := waitState(t, r, id, StateSucceeded)
+	var task Task
+	if err := json.Unmarshal(p.startedSpecs()[0].Task, &task); err != nil {
+		t.Fatal(err)
+	}
+	if asked != 1 || len(task.Secrets) != 1 || task.Secrets[0].Env != "PGPASSWORD" || task.Secrets[0].Value != value {
+		t.Errorf("task secrets = %+v (asked %d)", task.Secrets, asked)
+	}
+	mu.Lock()
+	shown := console.String()
+	mu.Unlock()
+	if strings.Contains(shown, value) || !strings.Contains(shown, "connecting with ***") {
+		t.Errorf("console:\n%s", shown)
+	}
+	record, _ := json.Marshal(j)
+	if strings.Contains(string(record), value) {
+		t.Errorf("the job record has the secret: %s", record)
+	}
+	r.mu.Lock()
+	left := r.jobs[id].spec.Task
+	r.mu.Unlock()
+	if left != nil {
+		t.Error("the finished job still holds its task")
+	}
+
+	// A runner that keeps no secrets refuses such a harness.
+	plain := newRunner(t, newFakeProvider(), 1)
+	if _, err := plain.Submit(harness(t, "  permissions:\n    secrets: [{name: db-password, env: PGPASSWORD}]\n")); err == nil || !strings.Contains(err.Error(), "keeps no secrets") {
+		t.Errorf("without a store: %v", err)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(b []byte) (int, error) { return f(b) }

@@ -40,6 +40,7 @@ const (
 	MinThinkingTokens = 1024
 	MaxThinkingTokens = 256 * 1024
 	MaxA2AAgents      = 16
+	MaxSecrets        = 32
 )
 
 // ApplyDefaults fills omitted fields in place. It never widens a

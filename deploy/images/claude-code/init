@@ -2,8 +2,8 @@
 # Init of the "claude-code" image: runs Claude Code on the task's prompt
 # as the unprivileged user "agent", then shuts down. The VM is the
 # permission boundary, so Claude Code's own prompts are skipped; it holds
-# no credentials (the egress proxy adds them) and reaches only what the
-# harness allows.
+# no credentials (the egress proxy adds them), only the secrets a harness
+# hands it explicitly (ADR-0020), and reaches only what the harness allows.
 . /usr/lib/hcc/common.sh
 hcc_mounts
 echo "HCC-GUEST-UP kernel=$(uname -r) runtime=claude-code"
@@ -103,6 +103,42 @@ mount -t tmpfs -o size=512m,uid=1000,gid=1000,mode=0700 tmpfs /home/agent
 mkdir -p /tmp/workspace
 mount -t tmpfs -o size=50%,uid=1000,gid=1000,mode=0755 tmpfs /tmp/workspace
 chown agent:agent /tmp/prompt.txt
+
+# Secrets handed to the agent (ADR-0020): variables it inherits, or files
+# in its home (0600). The runner checked the names; they are checked here
+# again, and no value is ever evaluated by the shell. The agent is told
+# where they are, never what they are.
+NSECRETS=$(printf '%s' "$TASK" | jq '.secrets // [] | length')
+i=0
+while [ "$i" -lt "$NSECRETS" ]; do
+	sname=$(printf '%s' "$TASK" | jq -r ".secrets[$i].name")
+	senv=$(printf '%s' "$TASK" | jq -r ".secrets[$i].env // empty")
+	sfile=$(printf '%s' "$TASK" | jq -r ".secrets[$i].file // empty")
+	if [ -n "$senv" ]; then
+		case "$senv" in
+		*[!A-Za-z0-9_]* | [0-9]*) echo "hcc: secret $sname: invalid variable name, skipped" ;;
+		*)
+			svalue=$(printf '%s' "$TASK" | jq -r ".secrets[$i].value")
+			export "$senv=$svalue"
+			svalue=
+			printf '\n(The secret "%s" is in the environment variable %s.)\n' "$sname" "$senv" >>/tmp/prompt.txt
+			;;
+		esac
+	elif [ -n "$sfile" ]; then
+		case "$sfile" in
+		/* | *..* | *[!A-Za-z0-9._/-]*) echo "hcc: secret $sname: invalid file name, skipped" ;;
+		*)
+			mkdir -p "/home/agent/$(dirname "$sfile")"
+			(umask 077 && printf '%s' "$TASK" | jq -j ".secrets[$i].value" >"/home/agent/$sfile")
+			printf '\n(The secret "%s" is in the file ~/%s.)\n' "$sname" "$sfile" >>/tmp/prompt.txt
+			;;
+		esac
+	fi
+	i=$((i + 1))
+done
+if [ "$NSECRETS" -gt 0 ]; then
+	chown -R agent:agent /home/agent
+fi
 
 # The agent needs no user namespaces; without them, less of the guest
 # kernel is within its reach.

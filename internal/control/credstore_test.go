@@ -167,3 +167,28 @@ exit 2
 		t.Error("the secret is on the command line")
 	}
 }
+
+// A secret for the agent is stored like any credential, never shown, and
+// copied to the runner when a harness hands it to its agent.
+func TestSecretForTheAgentIsCopied(t *testing.T) {
+	ts := newTestServer(t)
+	sock := startRunner(t)
+	ts.do(http.MethodPost, "/api/runners", RunnerRef{Name: "mac", Socket: sock}, nil)
+	const kube = "apiVersion: v1\nkind: Config\nusers:\n- user: {token: kube-token-0123456789}\n"
+	if rec := ts.rawJSON(http.MethodPut, "/api/credentials/kubeconfig", map[string]any{"kind": "secret", "secret": kube}); rec.Code != http.StatusOK {
+		t.Fatalf("PUT: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := ts.rawJSON(http.MethodGet, "/api/credentials", nil)
+	if strings.Contains(rec.Body.String(), "kube-token") || !strings.Contains(rec.Body.String(), `"kind":"secret"`) {
+		t.Fatalf("list: %s", rec.Body.String())
+	}
+	with := strings.Replace(okHarness, "  prompt: hi\n", "  prompt: hi\n  permissions:\n    secrets: [{name: kubeconfig, file: .kube/config}]\n", 1)
+	ts.do(http.MethodPost, "/api/runs", runRequest{Runner: "mac", YAML: with, Confirmed: true}, nil)
+	runnerStore, err := os.ReadFile(filepath.Join(filepath.Dir(sock), "credentials.yaml"))
+	if err != nil || !strings.Contains(string(runnerStore), "kind: secret") {
+		t.Fatalf("not copied to the runner: %v\n%s", err, runnerStore)
+	}
+	if strings.Contains(string(runnerStore), "kube-token") {
+		t.Error("the secret is in the store file itself (it belongs in its own file)")
+	}
+}

@@ -67,6 +67,10 @@ type Config struct {
 	// network access (or subagents, whose API the proxy serves). Without
 	// it, such harnesses are rejected.
 	Egress func(EgressJob) (sandbox.Proxy, error)
+	// Secrets returns the values of the secrets a harness hands to its
+	// agent (spec.permissions.secrets, ADR-0020), by name. Without it,
+	// such harnesses are rejected.
+	Secrets func(*spec.Harness) (map[string]string, error)
 	// MCP runs the mcp-server plugins that harnesses name in spec.mcp.
 	// Without it, such harnesses are rejected.
 	MCP MCPPlugins
@@ -141,6 +145,8 @@ type job struct {
 	overBudget string
 	// watch reads the guest console (exit status, loop marker, output).
 	watch *resultWatcher
+	// masked are the secret values its console never shows.
+	masked []string
 	// parent started this job (subagents); children are the jobs it
 	// started, and spawned counts every subagent started in its subtree.
 	parent   *job
@@ -312,6 +318,9 @@ func (r *Runner) check(h *spec.Harness) error {
 	}
 	// Credentials only ever travel through the egress proxy, so they need
 	// it too (and the factory checks their hosts against the allowlist).
+	if len(h.Spec.Permissions.Secrets) > 0 && r.cfg.Secrets == nil {
+		return errors.New("runner: this runner keeps no secrets (credentials: in its runner.yaml)")
+	}
 	if needsNetwork(h) && r.cfg.Egress == nil {
 		return errors.New("runner: network access is not configured on this runner")
 	}
@@ -382,7 +391,24 @@ func (r *Runner) enqueue(h *spec.Harness, o enqueueOpts) (string, error) {
 	if len(files) > 0 {
 		taskTools = &TaskTools{Packages: pkgs, Files: files}
 	}
-	task, err := taskFor(h, o.loop, taskTools)
+	// The secrets go into this job's task, and nowhere else: not into the
+	// job's record, and its console shows them masked.
+	var secrets []TaskSecret
+	var masked []string
+	if len(h.Spec.Permissions.Secrets) > 0 {
+		if r.cfg.Secrets == nil { // check does this too
+			return "", errors.New("runner: this runner keeps no secrets")
+		}
+		values, err := r.cfg.Secrets(h)
+		if err != nil {
+			return "", err
+		}
+		for _, s := range h.Spec.Permissions.Secrets {
+			secrets = append(secrets, TaskSecret{Name: s.Name, Env: s.Env, File: s.File, Value: values[s.Name]})
+			masked = append(masked, values[s.Name])
+		}
+	}
+	task, err := taskFor(h, o.loop, taskTools, secrets)
 	if err != nil {
 		return "", err
 	}
@@ -466,7 +492,8 @@ func (r *Runner) enqueue(h *spec.Harness, o enqueueOpts) (string, error) {
 			DiskMiB:   diskMiB,
 			Tools:     taskTools != nil,
 		},
-		meter: meter,
+		meter:  meter,
+		masked: masked,
 	}
 	if diskMiB > 0 {
 		j.spec.Collect = func(disk io.Reader) error { return r.collect(j, disk) }
@@ -542,7 +569,15 @@ func (r *Runner) execute(j *job) {
 	j.watch = result
 	r.mu.Unlock()
 	console := r.cfg.Console(j.ID)
-	res, err := r.cfg.Provider.Run(j.ctx, j.spec, io.MultiWriter(console, result))
+	out := newMaskWriter(io.MultiWriter(console, result), j.masked)
+	res, err := r.cfg.Provider.Run(j.ctx, j.spec, out)
+	if cerr := out.Close(); cerr != nil && err == nil {
+		err = fmt.Errorf("console: %w", cerr)
+	}
+	// The task held the secrets; the job no longer needs them.
+	r.mu.Lock()
+	j.spec.Task, j.masked = nil, nil
+	r.mu.Unlock()
 	if c, ok := console.(io.Closer); ok {
 		if cerr := c.Close(); cerr != nil && err == nil {
 			err = fmt.Errorf("console: %w", cerr)
@@ -1023,6 +1058,17 @@ type Task struct {
 	MCP []TaskMCP `json:"mcp,omitempty"`
 	// A2A are the A2A agents the runtime may talk to (ADR-0015).
 	A2A []TaskA2A `json:"a2a,omitempty"`
+	// Secrets are handed to the agent (ADR-0020).
+	Secrets []TaskSecret `json:"secrets,omitempty"`
+}
+
+// TaskSecret is a secret for the agent: as the environment variable Env
+// or the file File below its home.
+type TaskSecret struct {
+	Name  string `json:"name"`
+	Env   string `json:"env,omitempty"`
+	File  string `json:"file,omitempty"`
+	Value string `json:"value"`
 }
 
 // TaskA2A is one A2A agent.
@@ -1079,8 +1125,8 @@ func modelName(h *spec.Harness) string {
 	return h.Spec.Model.Name
 }
 
-func taskFor(h *spec.Harness, loop *TaskLoop, tools *TaskTools) ([]byte, error) {
-	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt, Loop: loop, Tools: tools}
+func taskFor(h *spec.Harness, loop *TaskLoop, tools *TaskTools, secrets []TaskSecret) ([]byte, error) {
+	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt, Loop: loop, Tools: tools, Secrets: secrets}
 	if n := h.Spec.Permissions.Subagents.Max; n > 0 {
 		t.Subagents = &TaskSubagents{Max: n}
 	}

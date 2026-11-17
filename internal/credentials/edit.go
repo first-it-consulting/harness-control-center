@@ -3,6 +3,7 @@
 package credentials
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -41,8 +42,29 @@ func Set(path, secretsDir string, e Entry, secret []byte) error {
 		return err
 	}
 	old, existed := entries[e.Name]
-	fe := fileEntry{Hosts: e.Hosts, Scheme: e.Scheme, Port: e.Port, Header: e.Header, Prefix: e.Prefix}
+	// A changed kind needs a new secret: a key for web requests must never
+	// become something the agent reads (nor the other way round).
+	if existed && old.Kind != e.Kind && secret == nil {
+		return fmt.Errorf("credentials: %s: changing its kind needs a new secret", e.Name)
+	}
+	fe := fileEntry{Kind: e.Kind, Hosts: e.Hosts, Scheme: e.Scheme, Port: e.Port, Header: e.Header, Prefix: e.Prefix}
 	switch {
+	case secret != nil && e.Kind == KindSecret:
+		// Any text, kept as given (a file such as a kubeconfig).
+		if strings.TrimSpace(string(secret)) == "" || len(secret) > MaxAgentSecretBytes || bytes.ContainsRune(secret, 0) {
+			return fmt.Errorf("credentials: %s: the secret must be text of at most %d bytes", e.Name, MaxAgentSecretBytes)
+		}
+		if err := secretsDirFor(secretsDir, mode, gid); err != nil {
+			return err
+		}
+		var suffix [6]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return err
+		}
+		fe.SecretFile = filepath.Join(filepath.Clean(secretsDir), e.Name+"."+hex.EncodeToString(suffix[:]))
+		if err := writeOwned(fe.SecretFile, secret, mode, gid); err != nil {
+			return err
+		}
 	case secret != nil:
 		s := strings.TrimSpace(string(secret))
 		if s == "" || len(secret) > MaxSecretBytes || strings.ContainsAny(s, "\r\n\x00") {

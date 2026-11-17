@@ -135,7 +135,57 @@ func validatePermissions(p *Permissions, add addFunc) {
 	}
 	checkUnique(add, "spec.permissions.credentials", p.Credentials, nameRe, "a credential name")
 	checkUnique(add, "spec.permissions.tools.install", p.Tools.Install, packageRe, "a package name, optionally with @version")
+	validateSecrets(p.Secrets, add)
 	checkRange(add, "spec.permissions.subagents.max", p.Subagents.Max, 0, MaxSubagents)
+}
+
+var (
+	envNameRe     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+	secretPathRe  = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+){0,7}$`)
+	reservedEnvRe = regexp.MustCompile(`(?i)^(PATH|HOME|USER|LOGNAME|SHELL|TERM|PWD|IFS|ENV|BASH_ENV|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|NO_PROXY|[A-Z]*_PROXY|LD_.*|DYLD_.*|ANTHROPIC_.*|CLAUDE_.*|HCC_.*|MAX_THINKING_TOKENS|DISABLE_.*)$`)
+	// Files the shell or the agent runtime read as instructions.
+	reservedFileRe = regexp.MustCompile(`^(\.claude(/.*)?|\.claude\.json|\.(bash|zsh)rc|\.profile|\.bash_(profile|login|logout)|\.ssh/(rc|environment|authorized_keys))$`)
+)
+
+// validateSecrets checks the secrets handed to the agent: names of the
+// store, each given once, as a variable the runtime does not use, or as a
+// plain file below the agent's home.
+func validateSecrets(secrets []Secret, add addFunc) {
+	if len(secrets) > MaxSecrets {
+		add("spec.permissions.secrets", "at most %d secrets", MaxSecrets)
+	}
+	targets := map[string]bool{}
+	for i, s := range secrets {
+		path := fmt.Sprintf("spec.permissions.secrets[%d]", i)
+		if !nameRe.MatchString(s.Name) {
+			add(path+".name", "must name a secret (lowercase letters, digits or '-')")
+		}
+		switch {
+		case (s.Env == "") == (s.File == ""):
+			add(path, "give it as exactly one of env (a variable) or file")
+		case s.Env != "":
+			if !envNameRe.MatchString(s.Env) {
+				add(path+".env", "%q is not a variable name", s.Env)
+			} else if reservedEnvRe.MatchString(s.Env) {
+				add(path+".env", "%s is used by the sandbox or the agent runtime; choose another name", s.Env)
+			}
+		default:
+			parts := strings.Split(s.File, "/")
+			if !secretPathRe.MatchString(s.File) || slices.Contains(parts, "..") || slices.Contains(parts, ".") {
+				add(path+".file", "%q must be a plain path below the agent's home, e.g. .kube/config", s.File)
+			} else if reservedFileRe.MatchString(s.File) {
+				add(path+".file", "%s is read by the shell or the agent runtime as instructions; choose another file", s.File)
+			}
+		}
+		target := "env:" + strings.ToUpper(s.Env)
+		if s.File != "" {
+			target = "file:" + s.File
+		}
+		if targets[target] {
+			add(path, "another secret is given there already")
+		}
+		targets[target] = true
+	}
 }
 
 var (

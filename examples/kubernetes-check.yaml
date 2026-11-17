@@ -1,0 +1,31 @@
+# Hands the agent a kubeconfig (a secret of kind "secret" in the
+# Credentials page, ADR-0020): it can read it, so this harness is rated
+# high risk. It may reach only the cluster's API server.
+apiVersion: hcc/v1alpha1
+kind: Harness
+metadata:
+  name: kubernetes-check
+  description: Look at a cluster and report pods that are not running.
+spec:
+  runtime: claude-code
+  prompt: |
+    ~/.kube/config is a kubeconfig. Using curl with its server address,
+    certificate and token, list the pods in all namespaces that are not
+    Running or Succeeded, and write a short report to report.md with what
+    you found and what you would check next.
+  target: server:my-runner
+  sandbox:
+    image: claude-code
+    timeout: 15m
+  permissions:
+    # kubectl works too, if the runner's tools include it (runner page,
+    # "Change the tools").
+    tools:
+      install: [curl]
+    secrets:
+      - name: kubeconfig
+        file: .kube/config
+    network:
+      egress:
+        - host: k8s-api.example.com
+          ports: [6443]
