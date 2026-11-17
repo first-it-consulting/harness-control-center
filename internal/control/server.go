@@ -81,6 +81,7 @@ var webFS embed.FS
 //	GET    /api/providers                        the model providers and which harnesses use each
 //	PUT    /api/providers                        replace them (validated like a harness's spec.model)
 //	POST   /api/providers/{name}/models          ask a provider for its models
+//	POST   /api/providers/test                   check a connection being edited (its key goes only to its URL)
 //	GET    /api/runners/{runner}/settings        its settings and the bounds the UI may set them within
 //	PUT    /api/runners/{runner}/settings        change them (written as the file's owner) and restart it
 //	GET    /api/local                            the runner on this Mac: what is set up, and the setup's progress
@@ -189,6 +190,7 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("GET /api/providers", s.providersGet)
 	mux.HandleFunc("PUT /api/providers", s.providersPut)
 	mux.HandleFunc("POST /api/providers/{name}/models", s.providerModels)
+	mux.HandleFunc("POST /api/providers/test", s.providerTest)
 	mux.HandleFunc("GET /api/runners/{runner}/settings", s.settingsGet)
 	mux.HandleFunc("PUT /api/runners/{runner}/settings", s.settingsSet)
 	mux.HandleFunc("GET /api/local", s.localState)
