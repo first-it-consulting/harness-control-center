@@ -575,7 +575,7 @@ function network(ed) {
   return [
     ...policies(ed),
     h("p", {}, "All hosts it may reach"),
-    rules.length === 0 ? h("p", { class: "muted" }, "None: the agent cannot reach anything.") : help(h, "From the policies, the model, the credentials, and any you add. Only these hosts, on these ports (443, the usual one for https, if none). *.example.com means all of example.com's subdomains."),
+    rules.length === 0 ? h("p", { class: "muted" }, "None: the agent cannot reach anything.") : help(h, "From the policies, the model, the credentials, and any you add. Only these hosts, on these ports (443, the usual one for https, if none). *.example.com means all of example.com's subdomains (for web tools only). Database clients and ssh reach the exact hosts listed, on their ports."),
     list,
     h("div", { class: "actions" }, h("button", { type: "button", onclick: () => {
       put(ed.doc, "spec.permissions.network.egress", [...rules, { host: "" }]);

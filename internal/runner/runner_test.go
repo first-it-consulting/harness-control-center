@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1136,3 +1137,28 @@ func TestSecretsReachOnlyTheTask(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
+
+func TestForwardsForExactHosts(t *testing.T) {
+	h := harness(t, `  permissions:
+    network:
+      allowPrivateNetworks: true
+      egress:
+        - {host: db.lan, ports: [5432]}
+        - {host: git.lan, ports: [22, 443]}
+        - {host: db.lan, ports: [5433, 5432]}
+        - {host: "*.example.com"}
+        - {host: api.example.org}
+`)
+	got := forwardsFor(h)
+	want := []TaskForward{
+		{Host: "db.lan", Addr: "127.77.0.1", Ports: []int{5432, 5433}},
+		{Host: "git.lan", Addr: "127.77.0.2", Ports: []int{22, 443}},
+		{Host: "api.example.org", Addr: "127.77.0.3", Ports: []int{443}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("forwards = %+v", got)
+	}
+	if f := forwardsFor(harness(t, "")); f != nil {
+		t.Errorf("no network, forwards %+v", f)
+	}
+}

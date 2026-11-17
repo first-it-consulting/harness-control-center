@@ -54,6 +54,43 @@ hcc_network() {
 	export HTTPS_PROXY="http://$HCC_PROXY" https_proxy="http://$HCC_PROXY" HTTP_PROXY="http://$HCC_PROXY" http_proxy="http://$HCC_PROXY"
 }
 
+# Programs without proxy support (psql, ssh, database drivers; ADR-0021):
+# each allowed host gets a loopback address of its own in /etc/hosts, and
+# hcc-guest tcp-forward (as nobody) carries its allowed ports through the
+# egress proxy, which decides as for every connection. Names and
+# addresses from the task are checked again here.
+hcc_forward() {
+	[ -n "$HCC_PROXY" ] || return 0
+	n=$(printf '%s' "$1" | jq '.forward // [] | length')
+	[ "$n" -gt 0 ] || return 0
+	cp /etc/hosts /tmp/hcc-hosts 2>/dev/null || : >/tmp/hcc-hosts
+	printf '%s' "$1" | jq -r '.forward[]
+		| select((.host | test("^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$")) and (.addr | test("^127\\.77\\.[0-9]{1,3}\\.[0-9]{1,3}$")))
+		| "\(.addr) \(.host)"' >>/tmp/hcc-hosts
+	mount --bind /tmp/hcc-hosts /etc/hosts || { echo "HCC-NET-ERROR cannot map the allowed hosts"; return 1; }
+	printf '%s' "$1" | jq --arg proxy "$HCC_PROXY" '{proxy: $proxy, routes: [.forward[]
+		| select((.host | test("^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$")) and (.addr | test("^127\\.77\\.[0-9]{1,3}\\.[0-9]{1,3}$")))
+		| . as $f | .ports[]
+		| select(type == "number" and . >= 1 and . <= 65535)
+		| {listen: ($f.addr + ":" + tostring), target: ($f.host + ":" + tostring)}]}' >/tmp/hcc-forward.json
+	chmod 0644 /tmp/hcc-forward.json
+	# Ports such as 22 are below 1024: let nobody listen there (inside this
+	# VM only), else the forwarder runs as root.
+	if echo 0 >/proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null; then
+		su -s /bin/sh nobody -c 'exec /usr/local/bin/hcc-guest tcp-forward /tmp/hcc-forward.json </dev/null >/dev/null 2>&1' &
+	else
+		/usr/local/bin/hcc-guest tcp-forward /tmp/hcc-forward.json </dev/null >/dev/null 2>&1 &
+	fi
+	first=$(jq -r '.routes[0].listen // empty' /tmp/hcc-forward.json)
+	[ -n "$first" ] || return 0
+	i=0
+	until nc -z "${first%:*}" "${first##*:}" 2>/dev/null; do
+		i=$((i + 1))
+		[ "$i" -lt 50 ] || { echo "HCC-NET-ERROR the forwarder did not start"; return 1; }
+		sleep 0.1
+	done
+}
+
 # Installs the task's tools (ADR-0010) before the agent starts, as root,
 # from the read-only tool catalog drive (hcc.tools) onto memory overlays
 # over the read-only system directories (nosuid: no package can hand the

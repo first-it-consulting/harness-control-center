@@ -18,6 +18,10 @@ if ! hcc_tools "$TASK"; then
 	echo "HCC-RESULT-END exit=1"
 	hcc_shutdown
 fi
+if ! hcc_forward "$TASK"; then
+	echo "HCC-RESULT-END exit=1"
+	hcc_shutdown
+fi
 
 # A plugin (ADR-0013): its files from the bundle drive, its command run in
 # its directory as the unprivileged user "agent". A notifier gets its
