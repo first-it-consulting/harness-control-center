@@ -10,23 +10,21 @@ function short(d) {
   return d === "off" ? d : d.replace(/(\D)0s$/, "$1").replace(/(h)0m$/, "$1");
 }
 
-export function runnerSettings(ui, r, done) {
+// settingsPanel shows a runner's settings as a form in the page (the
+// runner's detail page); done is called after a save.
+export function settingsPanel(ui, r, done) {
   const { h, api, set } = ui;
-  const dialog = document.getElementById("dialog");
-  const body = h("div", {}, h("p", { class: "muted" }, "Asking " + r.name + "…"));
-  set(dialog, h("form", { method: "dialog" }, h("h1", {}, "Settings of " + r.name), body,
-    h("div", { class: "actions" }, h("button", { type: "button", onclick: () => dialog.close() }, "Close"))));
-  dialog.showModal();
+  const box = h("div", {}, h("p", { class: "muted" }, "Asking " + r.name + "…"));
   api("GET", "/api/runners/" + encodeURIComponent(r.name) + "/settings").then(
-    (v) => set(dialog, settingsForm(ui, r, v, done)),
-    (err) => set(body, err.data && err.data.needUpdate
-      ? h("div", { class: "notice-box" }, r.name + " runs an older version that cannot change its settings from here yet. Update it first: close this window and press “Update runner” on its card.")
+    (v) => set(box, settingsForm(ui, r, v, done)),
+    (err) => set(box, err.data && err.data.needUpdate
+      ? h("div", { class: "notice-box" }, r.name + " runs an older version that cannot change its settings from here yet. Update it first (“Update runner” above).")
       : h("div", { class: "error-box" }, "Could not ask " + r.name + ": " + err.message)));
+  return box;
 }
 
 function settingsForm(ui, r, v, done) {
   const { h, api, set, say } = ui;
-  const dialog = document.getElementById("dialog");
   const s = v.settings;
   const b = v.bounds;
   // A value above its bound may stay as it is, but not grow.
@@ -72,7 +70,7 @@ function settingsForm(ui, r, v, done) {
     return out;
   };
 
-  return h("form", { method: "dialog", onsubmit: async (ev) => {
+  return h("form", { onsubmit: async (ev) => {
     ev.preventDefault();
     set(problem);
     const req = { settings: read() };
@@ -90,11 +88,9 @@ function settingsForm(ui, r, v, done) {
       set(problem, h("div", { class: "error-box" }, err.message));
       return;
     }
-    dialog.close();
     say("Saved the settings of " + r.name + "; it restarted with them.");
     done();
   } },
-  h("h1", {}, "Settings of " + r.name),
   h("p", { class: "muted" }, "Saving restarts the runner, so it is only possible while no job runs or waits there. Its schedules, credentials and finished jobs stay."),
   h("div", { class: "form-stack" },
     h("h2", {}, "Capacity"),
@@ -121,5 +117,5 @@ function settingsForm(ui, r, v, done) {
     h("div", { class: "actions" }, h("button", { type: "button", onclick: () => priceRow("", { input: 0, output: 0 }) }, "Add a price"))),
   pwBox,
   problem,
-  h("div", { class: "actions" }, h("button", { class: "primary" }, "Save and restart"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
+  h("div", { class: "actions" }, h("button", { class: "primary" }, "Save and restart")));
 }
