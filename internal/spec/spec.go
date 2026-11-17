@@ -189,9 +189,22 @@ type Permissions struct {
 	Network Network `yaml:"network,omitempty"`
 	// Credentials are names of secrets stored in the Control Center. They
 	// are injected by the egress proxy and never enter the sandbox.
-	Credentials []string  `yaml:"credentials,omitempty"`
-	Tools       Tools     `yaml:"tools,omitempty"`
-	Subagents   Subagents `yaml:"subagents,omitempty"`
+	Credentials []string `yaml:"credentials,omitempty"`
+	// Secrets are handed to the agent itself (ADR-0020): unlike
+	// credentials, it can read them, so it could also send them to any
+	// host it may reach. Each is a secret of the runner's store, given as
+	// an environment variable or a file in the agent's home.
+	Secrets   []Secret  `yaml:"secrets,omitempty"`
+	Tools     Tools     `yaml:"tools,omitempty"`
+	Subagents Subagents `yaml:"subagents,omitempty"`
+}
+
+// Secret hands one secret to the agent: as the environment variable Env,
+// or as the file File (relative to the agent's home). Exactly one is set.
+type Secret struct {
+	Name string `yaml:"name"`
+	Env  string `yaml:"env,omitempty"`
+	File string `yaml:"file,omitempty"`
 }
 
 // Network controls egress. Ingress is never allowed.

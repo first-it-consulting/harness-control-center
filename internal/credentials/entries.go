@@ -15,7 +15,9 @@ import (
 // secret, which is write-only (ADR-0017). It is what the Control Center
 // shows and edits.
 type Entry struct {
-	Name   string   `json:"name"`
+	Name string `json:"name"`
+	// Kind is "" (added to web requests) or KindSecret (for the agent).
+	Kind   string   `json:"kind,omitempty"`
 	Hosts  []string `json:"hosts"`
 	Scheme string   `json:"scheme"`
 	Port   int      `json:"port"`
@@ -36,7 +38,11 @@ func List(path string) ([]Entry, error) {
 	}
 	out := make([]Entry, 0, len(creds))
 	for name, c := range creds {
-		out = append(out, Entry{Name: name, Hosts: c.Hosts, Scheme: c.Scheme, Port: c.Port, Header: c.Header, Prefix: entries[name].Prefix})
+		hosts := c.Hosts
+		if hosts == nil {
+			hosts = []string{}
+		}
+		out = append(out, Entry{Name: name, Kind: c.Kind, Hosts: hosts, Scheme: c.Scheme, Port: c.Port, Header: c.Header, Prefix: entries[name].Prefix})
 	}
 	slices.SortFunc(out, func(a, b Entry) int { return strings.Compare(a.Name, b.Name) })
 	return out, nil

@@ -107,6 +107,7 @@ func TestChildRejects(t *testing.T) {
 		"no prompt":    {Subagent{Prompt: "  "}, time.Hour, "spec.prompt"},
 		"bad name":     {Subagent{Name: "Bad", Prompt: "x"}, time.Hour, "metadata.name"},
 		"bad tool":     {Subagent{Prompt: "x", Permissions: Permissions{Tools: Tools{Install: []string{"a;b"}}}}, time.Hour, "tools.install"},
+		"secrets":      {Subagent{Prompt: "x", Permissions: Permissions{Secrets: []Secret{{Name: "db", Env: "PGPASSWORD"}}}}, time.Hour, "cannot be given secrets"},
 	} {
 		if _, err := Child(parent, &tt.req, tt.left); err == nil || !strings.Contains(err.Error(), tt.want) {
 			t.Errorf("%s: %v, want %q", name, err, tt.want)

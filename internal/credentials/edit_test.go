@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
 
 func emptyStore(t *testing.T, mode os.FileMode) (path, secrets string) {
@@ -201,5 +203,69 @@ func TestEditRefusesAPublicStore(t *testing.T) {
 	path, secrets := emptyStore(t, 0o644)
 	if err := Set(path, secrets, omlx, []byte(testSecret)); err == nil {
 		t.Error("wrote secrets next to a world-readable store")
+	}
+}
+
+const kubeconfig = "apiVersion: v1\nkind: Config\nusers:\n- name: me\n  user: {token: abc123}\n"
+
+func TestSecretsForTheAgent(t *testing.T) {
+	path, secrets := emptyStore(t, 0o640)
+	kube := Entry{Name: "kubeconfig", Kind: KindSecret}
+	if err := Set(path, secrets, kube, []byte(kubeconfig)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Set(path, secrets, omlx, []byte(testSecret)); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := store["kubeconfig"]; c.Kind != KindSecret || c.Value != kubeconfig || len(c.Hosts) != 0 {
+		t.Errorf("loaded %+v", c)
+	}
+	list, _ := List(path)
+	if len(list) != 2 || list[0].Kind != KindSecret || list[0].Hosts == nil {
+		t.Errorf("list = %+v", list)
+	}
+
+	// Handed only as a secret, never a web credential (and the other way
+	// round).
+	h := &spec.Harness{Spec: spec.Spec{Permissions: spec.Permissions{Secrets: []spec.Secret{{Name: "kubeconfig", File: ".kube/config"}}}}}
+	got, err := ForAgent(store, h)
+	if err != nil || got["kubeconfig"] != kubeconfig {
+		t.Errorf("ForAgent = %v, %v", got, err)
+	}
+	h.Spec.Permissions.Secrets = []spec.Secret{{Name: "omlx", Env: "TOKEN"}}
+	if _, err := ForAgent(store, h); err == nil || !strings.Contains(err.Error(), "never handed to an agent") {
+		t.Errorf("a web credential was handed out: %v", err)
+	}
+	h.Spec.Permissions.Secrets = []spec.Secret{{Name: "nope", Env: "TOKEN"}}
+	if _, err := ForAgent(store, h); err == nil {
+		t.Error("a missing secret")
+	}
+	h.Spec.Permissions.Secrets = nil
+	h.Spec.Permissions.Credentials = []string{"kubeconfig"}
+	if _, err := ForHarness(store, h, func(string, int) bool { return true }); err == nil || !strings.Contains(err.Error(), "permissions.secrets") {
+		t.Errorf("a secret used as a web credential: %v", err)
+	}
+
+	// Changing the kind needs a new secret.
+	asSecret := omlx
+	asSecret.Kind, asSecret.Hosts, asSecret.Scheme, asSecret.Port, asSecret.Header, asSecret.Prefix = KindSecret, nil, "", 0, "", ""
+	if err := Set(path, secrets, asSecret, nil); err == nil || !strings.Contains(err.Error(), "needs a new secret") {
+		t.Errorf("kind changed without a new secret: %v", err)
+	}
+	// A secret has no hosts; too large or not text is refused.
+	withHosts := kube
+	withHosts.Hosts = []string{"a.example"}
+	if err := Set(path, secrets, withHosts, []byte("x")); err == nil {
+		t.Error("a secret with hosts")
+	}
+	if err := Set(path, secrets, kube, make([]byte, MaxAgentSecretBytes+1)); err == nil {
+		t.Error("too large")
+	}
+	if err := Set(path, secrets, kube, []byte("a\x00b")); err == nil {
+		t.Error("not text")
 	}
 }

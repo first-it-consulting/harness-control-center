@@ -19,6 +19,8 @@ import (
 
 // credentialChange is a PUT or DELETE body.
 type credentialChange struct {
+	// Kind is "" (added to web requests) or "secret" (for the agent).
+	Kind   string   `json:"kind,omitempty"`
 	Hosts  []string `json:"hosts"`
 	Scheme string   `json:"scheme"`
 	Port   int      `json:"port"`

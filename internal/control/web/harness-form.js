@@ -233,6 +233,7 @@ function render(ed) {
     section(ed, "Safety limits", limits(ed)),
     section(ed, "Internet and network", network(ed)),
     section(ed, "Credentials", credentials(ed)),
+    section(ed, "Secrets for the agent", secrets(ed)),
     section(ed, "Tools", tools(ed)),
     section(ed, "Ask me first", approvals(ed)),
     h("details", { class: "form-section card" }, h("summary", {}, "Advanced: helper agents, MCP servers, other agents"), ...advanced(ed)));
@@ -594,8 +595,9 @@ function network(ed) {
 function credentials(ed) {
   const { h } = ed.ui;
   const granted = get(ed.doc, "spec.permissions.credentials") || [];
-  const stored = new Map(ed.ctx.store.map((c) => [c.name, c]));
-  const onRunners = ed.ctx.credentials.get(targetOf(ed.doc)) || [];
+  const stored = new Map(ed.ctx.store.filter((c) => c.kind !== "secret").map((c) => [c.name, c]));
+  const secretNames = new Set(ed.ctx.store.filter((c) => c.kind === "secret").map((c) => c.name));
+  const onRunners = (ed.ctx.credentials.get(targetOf(ed.doc)) || []).filter((n) => !secretNames.has(n));
   const all = [...new Set([...stored.keys(), ...onRunners, ...granted])].sort();
   if (all.length === 0) {
     return [h("p", { class: "muted" }, "No credentials yet. Add API keys and tokens on the Credentials page, then attach them here.")];
@@ -629,6 +631,55 @@ function credentials(ed) {
       }
       changed(ed, true);
     })),
+  ];
+}
+
+// --- secrets for the agent (ADR-0020) ---
+
+// defaultEnv suggests a variable name for a secret: DB_PASSWORD for
+// db-password.
+const defaultEnv = (name) => name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^([0-9])/, "_$1");
+
+function secrets(ed) {
+  const { h } = ed.ui;
+  const granted = get(ed.doc, "spec.permissions.secrets") || [];
+  const available = ed.ctx.store.filter((c) => c.kind === "secret").map((c) => c.name);
+  const all = [...new Set([...available, ...granted.map((s) => s.name)])].sort();
+  if (all.length === 0) {
+    return [help(h, "Passwords, tokens or files the agent itself needs (a database password, a kubeconfig). Add them on the Credentials page as \"for the agent itself\", then choose them here.")];
+  }
+  const set_ = (next) => {
+    put(ed.doc, "spec.permissions.secrets", next);
+    changed(ed, true);
+  };
+  const rows = all.map((name) => {
+    const g = granted.find((s) => s.name === name);
+    const box = h("input", { type: "checkbox", checked: !!g });
+    box.addEventListener("change", () => set_(box.checked
+      ? [...granted, { name, env: defaultEnv(name) }]
+      : granted.filter((s) => s.name !== name)));
+    const out = [h("label", { class: "check" }, box, name, !available.includes(name) && " (not on the Credentials page)")];
+    if (g) {
+      const as = h("select", {}, h("option", { value: "env", selected: !g.file }, "as the environment variable"), h("option", { value: "file", selected: !!g.file }, "as the file ~/"));
+      const where = h("input", { autocomplete: "off", value: g.file || g.env || "", placeholder: g.file ? ".kube/config" : defaultEnv(name) });
+      const update = () => {
+        const v = where.value.trim();
+        set_(granted.map((s) => (s.name === name ? (as.value === "file" ? { name, file: v } : { name, env: v }) : s)));
+      };
+      as.addEventListener("change", () => {
+        where.value = as.value === "file" ? (name.includes("kube") ? ".kube/config" : name) : defaultEnv(name);
+        update();
+      });
+      where.addEventListener("change", update);
+      out.push(h("div", { class: "row rule" }, h("label", {}, "Given", as), h("label", {}, as.value === "file" ? "File" : "Variable", where)));
+    }
+    return h("div", { class: "form-stack" }, ...out);
+  });
+  return [
+    help(h, "Handed to the agent when it starts. The agent can read them, unlike credentials; the console shows them as ***."),
+    ...rows,
+    granted.length > 0 && h("div", { class: "error-box" }, "The agent can read " + (granted.length === 1 ? "this secret" : "these secrets") +
+      ". A misled agent could send " + (granted.length === 1 ? "it" : "them") + " to any host it may reach, so allow only the hosts it needs."),
   ];
 }
 

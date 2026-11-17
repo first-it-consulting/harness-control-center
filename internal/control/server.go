@@ -893,7 +893,11 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The credentials it is granted go to the runner first (ADR-0019).
-	if names := h.Spec.Permissions.Credentials; len(names) > 0 {
+	names := slices.Clone(h.Spec.Permissions.Credentials)
+	for _, s := range h.Spec.Permissions.Secrets {
+		names = append(names, s.Name)
+	}
+	if len(names) > 0 {
 		cctx, ccancel := context.WithTimeout(r.Context(), adminTimeout)
 		err := s.copyCredentials(cctx, req.Runner, names, pw, false)
 		ccancel()

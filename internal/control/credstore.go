@@ -105,6 +105,9 @@ func (s *Server) storedCredential(name string) (credentials.Entry, string, bool,
 		return credentials.Entry{}, "", false, err
 	}
 	e := entries[i]
+	if e.Kind == credentials.KindSecret {
+		return e, all[name].Value, true, nil
+	}
 	return e, strings.TrimPrefix(all[name].Value, e.Prefix), true, nil
 }
 
@@ -162,7 +165,7 @@ func (s *Server) credentialStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	store, secrets, _ := s.storePaths()
-	e := credentials.Entry{Name: name, Hosts: req.Hosts, Scheme: req.Scheme, Port: req.Port, Header: req.Header, Prefix: req.Prefix}
+	e := credentials.Entry{Name: name, Kind: req.Kind, Hosts: req.Hosts, Scheme: req.Scheme, Port: req.Port, Header: req.Header, Prefix: req.Prefix}
 	var secret []byte
 	if req.Secret != nil {
 		secret = []byte(*req.Secret)
@@ -275,7 +278,7 @@ func (s *Server) copyCredentials(ctx context.Context, runner string, names []str
 				continue
 			}
 		}
-		req := credentialChange{Hosts: e.Hosts, Scheme: e.Scheme, Port: e.Port, Header: e.Header, Prefix: e.Prefix, Secret: &secret}
+		req := credentialChange{Kind: e.Kind, Hosts: e.Hosts, Scheme: e.Scheme, Port: e.Port, Header: e.Header, Prefix: e.Prefix, Secret: &secret}
 		if pw != nil {
 			p := string(pw)
 			req.SudoPassword = &p

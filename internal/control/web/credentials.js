@@ -39,8 +39,10 @@ function storeCard(ui, list, reload) {
   const { h } = ui;
   const rows = list.map((c) => h("tr", {},
     h("td", {}, h("strong", {}, c.name)),
-    h("td", {}, c.hosts.join(", "), c.scheme === "http" && h("span", { class: "badge failed" }, "unencrypted")),
-    h("td", {}, c.header + (c.prefix ? " (" + c.prefix.trim() + ")" : "")),
+    c.kind === "secret"
+      ? h("td", { colspan: 2 }, ui.badge("for the agent", "queued"), " ", h("span", { class: "muted" }, "the agent can read it"))
+      : [h("td", {}, c.hosts.join(", "), c.scheme === "http" && h("span", { class: "badge failed" }, "unencrypted")),
+        h("td", {}, c.header + (c.prefix ? " (" + c.prefix.trim() + ")" : ""))],
     h("td", {}, Object.keys(c.runners).length === 0 ? h("span", { class: "muted" }, "not yet")
       : Object.entries(c.runners).sort().map(([r, state]) => h("div", {}, r + " ",
         state === "current" ? ui.badge("current", "succeeded") : [ui.badge("older version", "queued"), " ",
@@ -55,7 +57,7 @@ function storeCard(ui, list, reload) {
       : h("div", { class: "table-wrap" }, h("table", {},
         h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Sent only to"), h("th", {}, "Header"), h("th", {}, "On runners"), h("th", {}, ""))),
         h("tbody", {}, rows))),
-    h("p", { class: "muted" }, "For web services (APIs, model servers): the key travels in a request header. Passwords or files the agent itself would have to read (a database password, a kubeconfig) are not supported, because the agent would then see them."));
+    h("p", { class: "muted" }, "Two kinds: for a web service (APIs, model servers), the runner adds the key to the agent's requests and the agent never sees it. A secret for the agent (a database password, a kubeconfig) is handed to the agent itself when its harness starts, as a variable or a file; the agent can read it, so such a harness is rated high risk."));
 }
 
 // runnerOnlyCard lists credentials that a runner has but this Control
@@ -107,6 +109,11 @@ function passwordBox(ui, host) {
 function editCredential(ui, existing, done) {
   const { h, set, api, say } = ui;
   const dialog = document.getElementById("dialog");
+  const purpose = h("select", {},
+    h("option", { value: "web" }, "For a web service: the runner adds it to requests, the agent never sees it"),
+    h("option", { value: "secret" }, "For the agent itself: handed to it as a variable or file (it can read it)"));
+  const value = h("textarea", { rows: "6", spellcheck: "false", autocomplete: "off",
+    placeholder: existing ? "leave empty to keep the current value" : "a password, a token, or a whole file (e.g. a kubeconfig)" });
   const kind = h("select", {}, KINDS.map((k) => h("option", { value: k.id }, k.label)));
   const name = h("input", { required: true, pattern: "[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?", placeholder: "anthropic", autocomplete: "off" });
   const hosts = h("input", { required: true, placeholder: "api.anthropic.com", autocomplete: "off" });
@@ -118,6 +125,19 @@ function editCredential(ui, existing, done) {
     placeholder: existing ? "leave empty to keep the current key" : "paste the key" });
   const warn = h("div", { class: "error-box", hidden: true }, "Unencrypted: the key crosses your network in clear text. Use this only for a server in your own network.");
   const problem = h("div", {});
+  const webPart = h("div", { class: "form-stack" });
+  const secretPart = h("div", { class: "form-stack" },
+    h("label", {}, "Value", value, h("span", { class: "muted note" }, "Write-only: nobody can see it again here. Up to 64 KiB.")),
+    h("div", { class: "warn-box" }, "The agent can read this secret, and a misled agent could send it to any host its harness may reach. Give it only what it needs, and prefer a token that can do little."));
+  const syncPurpose = () => {
+    const s = purpose.value === "secret";
+    webPart.hidden = s;
+    secretPart.hidden = !s;
+    for (const el of [hosts, port, header]) el.required = !s;
+    secret.required = !s && !existing;
+    value.required = s && (!existing || existing.kind !== "secret");
+  };
+  purpose.addEventListener("change", syncPurpose);
   const sync = () => { warn.hidden = scheme.value !== "http"; };
   const fill = (k) => {
     hosts.value = k.hosts;
@@ -135,6 +155,7 @@ function editCredential(ui, existing, done) {
     sync();
   });
   if (existing) {
+    purpose.value = existing.kind === "secret" ? "secret" : "web";
     name.value = existing.name;
     name.disabled = true;
     hosts.value = existing.hosts.join(", ");
@@ -150,14 +171,20 @@ function editCredential(ui, existing, done) {
   const form = h("form", { method: "dialog", onsubmit: async (ev) => {
     ev.preventDefault();
     set(problem);
-    const body = {
-      hosts: hosts.value.split(/[\s,]+/).filter(Boolean),
-      scheme: scheme.value,
-      port: Number(port.value),
-      header: header.value.trim(),
-      prefix: prefix.value,
-    };
-    if (secret.value !== "") body.secret = secret.value;
+    let body;
+    if (purpose.value === "secret") {
+      body = { kind: "secret", hosts: [], scheme: "", port: 0, header: "" };
+      if (value.value !== "") body.secret = value.value;
+    } else {
+      body = {
+        hosts: hosts.value.split(/[\s,]+/).filter(Boolean),
+        scheme: scheme.value,
+        port: Number(port.value),
+        header: header.value.trim(),
+        prefix: prefix.value,
+      };
+      if (secret.value !== "") body.secret = secret.value;
+    }
     try {
       await api("PUT", "/api/credentials/" + encodeURIComponent(name.value), body);
     } catch (err) {
@@ -165,22 +192,27 @@ function editCredential(ui, existing, done) {
       return;
     } finally {
       secret.value = "";
+      value.value = "";
     }
     dialog.close();
     say("Saved " + name.value + ". Harnesses that use it get it on their runner when they start.");
     done();
   } },
   h("h1", {}, existing ? "Change " + existing.name : "Add a credential"),
-  h("div", { class: "form-stack" },
+  h("label", {}, "What is it for?", purpose),
+  h("label", {}, "Name", name, h("span", { class: "muted note" }, "You pick it from this name in a harness.")),
+  secretPart,
+  webPart,
+  problem,
+  h("div", { class: "actions" }, h("button", { class: "primary" }, "Save"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
+  webPart.append(...[
     !existing && h("label", {}, "What is it?", kind),
-    h("label", {}, "Name", name, h("span", { class: "muted note" }, "You pick it from this name in a harness.")),
     h("label", {}, "Sent only to", hosts, h("span", { class: "muted note" }, "Exact host names, separated by commas. Never to any other host, even if the agent asks.")),
     h("div", { class: "row" }, h("label", {}, "Connection", scheme), h("label", {}, "Port", port)),
     warn,
     h("div", { class: "row" }, h("label", {}, "Header", header), h("label", {}, "Before the key", prefix)),
-    h("label", {}, "Key", secret, h("span", { class: "muted note" }, "Write-only: nobody can see it again here, not even you."))),
-  problem,
-  h("div", { class: "actions" }, h("button", { class: "primary" }, "Save"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
+    h("label", {}, "Key", secret, h("span", { class: "muted note" }, "Write-only: nobody can see it again here, not even you."))].filter(Boolean));
+  syncPurpose();
   set(dialog, form);
   dialog.showModal();
 }

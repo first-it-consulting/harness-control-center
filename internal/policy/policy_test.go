@@ -437,3 +437,20 @@ func TestApprovalVocabulary(t *testing.T) {
 		t.Error("git.* gate misclassified")
 	}
 }
+
+func TestSecretsAreHighRiskAndExplained(t *testing.T) {
+	e := mustEngine(t, base+`  permissions:
+    secrets: [{name: db-password, env: PGPASSWORD}, {name: kubeconfig, file: .kube/config}]
+`)
+	risk, why := e.Risk()
+	if risk != RiskHigh || !slices.Contains(why, "can read secrets itself (and could send them where it may connect)") {
+		t.Errorf("risk %v %v", risk, why)
+	}
+	explained := strings.Join(e.Explain(), "\n")
+	for _, want := range []string{"can READ the secret db-password (as the environment variable PGPASSWORD). It has no network",
+		"the secret kubeconfig (in the file ~/.kube/config)"} {
+		if !strings.Contains(explained, want) {
+			t.Errorf("explanation missing %q:\n%s", want, explained)
+		}
+	}
+}

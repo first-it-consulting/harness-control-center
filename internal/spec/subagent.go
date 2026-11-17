@@ -103,6 +103,11 @@ func Child(parent *Harness, req *Subagent, maxTimeout time.Duration) (*Harness, 
 		return nil, fmt.Errorf("spec: %w", err)
 	}
 
+	// A helper never gets secrets: the agent that has them must not be
+	// able to pass them on to a sandbox of its choosing.
+	if len(req.Permissions.Secrets) > 0 {
+		return nil, errors.New("spec: helper agents cannot be given secrets")
+	}
 	perms := req.Permissions
 	perms.Network.Egress = slices.Clone(perms.Network.Egress)
 	perms.Credentials = slices.Clone(perms.Credentials)

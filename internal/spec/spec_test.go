@@ -309,3 +309,42 @@ func TestModel(t *testing.T) {
 		})
 	}
 }
+
+func TestSecrets(t *testing.T) {
+	ok := minimal + `  permissions:
+    secrets:
+      - {name: db-password, env: PGPASSWORD}
+      - {name: kubeconfig, file: .kube/config}
+`
+	h, err := Parse([]byte(ok))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := h.Spec.Permissions.Secrets; len(s) != 2 || s[0].Env != "PGPASSWORD" || s[1].File != ".kube/config" {
+		t.Errorf("secrets = %+v", s)
+	}
+	for name, tt := range map[string]struct{ secret, want string }{
+		"both":            {"{name: a, env: A, file: a}", "exactly one"},
+		"neither":         {"{name: a}", "exactly one"},
+		"bad name":        {"{name: 'A B', env: A}", "must name a secret"},
+		"bad variable":    {"{name: a, env: '1A'}", "not a variable name"},
+		"PATH":            {"{name: a, env: PATH}", "used by the sandbox"},
+		"proxy":           {"{name: a, env: https_proxy}", "used by the sandbox"},
+		"LD_PRELOAD":      {"{name: a, env: LD_PRELOAD}", "used by the sandbox"},
+		"runtime key":     {"{name: a, env: ANTHROPIC_API_KEY}", "used by the sandbox"},
+		"absolute file":   {"{name: a, file: /etc/passwd}", "plain path"},
+		"dotdot":          {"{name: a, file: ../x}", "plain path"},
+		"dot":             {"{name: a, file: a/./b}", "plain path"},
+		"bashrc":          {"{name: a, file: .bashrc}", "as instructions"},
+		"claude settings": {"{name: a, file: .claude/settings.json}", "as instructions"},
+	} {
+		_, err := Parse([]byte(minimal + "  permissions:\n    secrets: [" + tt.secret + "]\n"))
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: %v, want %q", name, err, tt.want)
+		}
+	}
+	twice := minimal + "  permissions:\n    secrets: [{name: a, env: TOKEN}, {name: b, env: token}]\n"
+	if _, err := Parse([]byte(twice)); err == nil || !strings.Contains(err.Error(), "already") {
+		t.Errorf("same variable twice: %v", err)
+	}
+}
