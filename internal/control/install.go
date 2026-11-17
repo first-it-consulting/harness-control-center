@@ -39,6 +39,9 @@ type runnerInstallState struct {
 	Finished bool      `json:"finished"`
 	Log      []string  `json:"log,omitempty"`
 	Error    string    `json:"error,omitempty"`
+
+	// tools, if set, replaces the runner's tool list (HCC_TOOLS).
+	tools *[]string
 }
 
 type runnerInstaller struct {
@@ -67,9 +70,35 @@ func newRunnerInstaller() *runnerInstaller {
 	return &runnerInstaller{states: map[string]*runnerInstallState{}, findSource: findRunnerSource, runCommand: runInstallCommand}
 }
 
+// MaxTools bounds a runner's tool list.
+const MaxTools = 64
+
+// toolRe is an Alpine package name as install-runner.sh accepts it; it
+// also keeps the list shell-inert (it goes into the remote command).
+var toolRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._+-]{0,127}$`)
+
+// checkTools validates a tool list.
+func checkTools(tools []string) error {
+	if len(tools) > MaxTools {
+		return fmt.Errorf("at most %d tools", MaxTools)
+	}
+	seen := map[string]bool{}
+	for _, t := range tools {
+		if !toolRe.MatchString(t) {
+			return fmt.Errorf("%q is not an Alpine package name (lowercase letters, digits, '.', '_', '+', '-')", t)
+		}
+		if seen[t] {
+			return fmt.Errorf("%s is listed twice", t)
+		}
+		seen[t] = true
+	}
+	return nil
+}
+
 // start begins installing ref's runner in the background. password, if not
 // nil, becomes the installer's copy and is cleared when the install ends.
-func (m *runnerInstaller) start(ref RunnerRef, target string, password []byte) error {
+// tools, if not nil, replaces the runner's tool list.
+func (m *runnerInstaller) start(ref RunnerRef, target string, password []byte, tools *[]string) error {
 	if ref.SSH == "" {
 		return errors.New("only a runner reached over ssh can be installed here")
 	}
@@ -82,6 +111,11 @@ func (m *runnerInstaller) start(ref RunnerRef, target string, password []byte) e
 	if !runnerTargetRe.MatchString(target) {
 		return fmt.Errorf("target must be server:<name>, got %q", target)
 	}
+	if tools != nil {
+		if err := checkTools(*tools); err != nil {
+			return err
+		}
+	}
 	if password != nil && (len(password) == 0 || len(password) > 1024 || bytes.ContainsAny(password, "\r\n\x00")) {
 		return errors.New("the sudo password must be one line of at most 1024 bytes")
 	}
@@ -90,7 +124,7 @@ func (m *runnerInstaller) start(ref RunnerRef, target string, password []byte) e
 	if st := m.states[ref.Name]; st != nil && st.Running {
 		return errors.New("the runner installation is running already")
 	}
-	st := &runnerInstallState{Target: target, Started: time.Now(), Running: true}
+	st := &runnerInstallState{Target: target, Started: time.Now(), Running: true, tools: tools}
 	m.states[ref.Name] = st
 	go m.run(ref, st, password)
 	return nil
@@ -226,6 +260,16 @@ SUDO_ASKPASS=` + dir + `/sudo-askpass; export SUDO_ASKPASS
 chmod 0700 "$SUDO_ASKPASS"
 `
 	}
+	if st.tools != nil {
+		// Checked by checkTools: package names only, shell-inert.
+		script += `HCC_TOOLS="` + strings.Join(*st.tools, " ") + `"; export HCC_TOOLS
+`
+		list := "none"
+		if len(*st.tools) > 0 {
+			list = strings.Join(*st.tools, ", ")
+		}
+		m.logf(st, "Tools for the claude-code image: %s", list)
+	}
 	script += `./install-runner.sh ./hcc-linux-amd64 ./hcc-helper-linux-amd64 ./hcc-guest-linux-amd64 "$HOME/.cache/hcc-poc" ` + st.Target + `
 `
 	var stdin []byte
@@ -282,6 +326,9 @@ type runnerInstallRequest struct {
 	// SudoPassword is used once on the runner host and is never stored,
 	// logged or returned.
 	SudoPassword *string `json:"sudoPassword,omitempty"`
+	// Tools, if set, replaces the tool list of the runner's claude-code
+	// image (Alpine package names; empty: none).
+	Tools *[]string `json:"tools,omitempty"`
 }
 
 func (s *Server) startRunnerInstall(w http.ResponseWriter, r *http.Request) {
@@ -315,7 +362,7 @@ func (s *Server) startRunnerInstall(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, fmt.Errorf("%s has %d jobs running or queued: updating restarts it and would end them. Wait until they finish, or stop them first", name, n))
 		return
 	}
-	if err := s.installs.start(ref, req.Target, password); err != nil {
+	if err := s.installs.start(ref, req.Target, password, req.Tools); err != nil {
 		clear(password)
 		writeError(w, http.StatusBadRequest, err)
 		return

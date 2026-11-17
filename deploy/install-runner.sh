@@ -12,7 +12,8 @@
 # server:hcc-dev.
 #
 # HCC_TOOLS lists the Alpine packages the claude-code image offers as
-# tools (ADR-0010); set it to "" for none.
+# tools (ADR-0010); set it to "" for none. Without it, a runner keeps the
+# list it was installed with (/etc/hcc/tools), else gets the default.
 set -euo pipefail
 
 HCC_BIN=$1
@@ -21,6 +22,9 @@ GUEST_BIN=$3
 ASSETS=$4
 TARGET=$5
 ADMIN_USER=$(id -un)
+if [[ -z ${HCC_TOOLS+set} ]] && [[ -f /etc/hcc/tools ]]; then
+	HCC_TOOLS=$(cat /etc/hcc/tools)
+fi
 TOOLS=${HCC_TOOLS-python3 py3-pip nodejs npm make gcc musl-dev curl go}
 RUN_USER=hcc-runner
 GROUP=hcc
@@ -315,6 +319,9 @@ network:
   proxyPort: 3128
 CONF
 sudo chmod 0644 /etc/hcc/runner.yaml
+# The tool list, so that an update keeps it.
+printf '%s\n' "$TOOLS" | sudo tee /etc/hcc/tools >/dev/null
+sudo chmod 0644 /etc/hcc/tools
 if [[ -n $settings ]]; then
 	printf '%s\n' "$settings" | sudo /usr/local/bin/hcc runner settings set --restore --config /etc/hcc/runner.yaml >/dev/null ||
 		echo "note: the previous runner settings did not fit the new configuration; using the defaults"

@@ -643,7 +643,8 @@ function tools(ed) {
   }
   const chosen = get(ed.doc, "spec.permissions.tools.install") || [];
   const names = [...new Set([...offered.keys(), ...chosen.map((t) => t.split("@")[0])])].sort();
-  if (names.length === 0) return [h("p", { class: "muted" }, "The image " + image + " offers no tools to install here.")];
+  const more = help(h, "Need another tool? Add it on the runner's page (Runners → the runner → Tools).");
+  if (names.length === 0) return [h("p", { class: "muted" }, "The image " + image + " offers no tools to install here."), more];
   return [
     help(h, "Installed into the sandbox before the agent starts, from the runner's checked package list. The agent cannot install anything else."),
     h("div", { class: "checks" }, names.map((n) => checkbox(ed, toolLabel(offered.get(n) || n), chosen.some((t) => t.split("@")[0] === n), (on) => {
@@ -651,6 +652,7 @@ function tools(ed) {
       put(ed.doc, "spec.permissions.tools.install", next);
       changed(ed);
     }))),
+    more,
   ];
 }
 
