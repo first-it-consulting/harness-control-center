@@ -839,6 +839,8 @@ async function runnerView(name) {
         : h("p", { class: "muted" }, "The runner does not answer."));
     set(tools, h("h2", {}, "Tools"),
       h("p", { class: "muted" }, "Packages a harness may install into its sandbox, per image. They come from the runner's checked package list."),
+      r.ssh && st && !r.installing && h("div", { class: "actions" }, h("button", { onclick: () => changeTools(r, reload) }, "Change the tools")),
+      !r.ssh && h("p", { class: "muted" }, "On this Mac the tools come with the downloaded images; choosing others is not possible here yet."),
       !st || Object.keys(st.tools || {}).length === 0 ? h("p", { class: "muted" }, "none") : Object.entries(st.tools).map(([img, list]) =>
         h("div", {}, h("h3", {}, img), h("ul", { class: "chips" }, list.map((t) => h("li", {}, t))))));
     set(plugins, h("h2", {}, "Plugins"),
@@ -899,7 +901,7 @@ async function updateLocal(r, after = runnersView) {
 // installRunner asks before making system changes on an ssh host, then
 // follows the installer's progress without blocking the page. With
 // version, it updates the runner that answers there, keeping its target.
-function installRunner(r, version, after = runnersView) {
+function installRunner(r, version, after = runnersView, tools) {
   const st = version ? r.status : null;
   const target = h("input", { required: true, pattern: "server:[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?", value: st ? st.target : "server:" + r.name, autocomplete: "off", readonly: !!st });
   const password = h("input", { type: "password", autocomplete: "off", placeholder: "only if sudo asks for one" });
@@ -954,6 +956,7 @@ function installRunner(r, version, after = runnersView) {
     start.disabled = true;
     set(problem);
     const body = { target: target.value.trim(), confirmed: true };
+    if (tools) body.tools = tools;
     if (password.value !== "") body.sudoPassword = password.value;
     password.value = "";
     try {
@@ -967,7 +970,12 @@ function installRunner(r, version, after = runnersView) {
     }
   } },
   h("h1", {}, verb + " runner on " + r.name),
-  st
+  tools && h("div", { class: "notice-box" }, h("p", {}, "Tools for the claude-code image: " + (tools.length > 0 ? tools.join(", ") : "none") +
+    ". The runner downloads them with their signatures, checks that each installs without network, and builds a new image (a few minutes).")),
+  st && tools
+    ? h("p", {}, "This rebuilds the runner on ", h("code", {}, r.ssh), " with these tools, using this Control Center's runner (" +
+      ((installable && installable.version) || "its version") + "), and restarts its service. Its credentials and settings stay.")
+    : st
     ? h("p", {}, "This updates the runner on ", h("code", {}, r.ssh), " from " + (st.version || "an unknown version") + " to " + version +
       ": it replaces its programs, rebuilds the VM images if they changed, and restarts its service. Its credentials and settings stay.")
     : h("p", {}, "This installs the Linux x86_64 runner on ", h("code", {}, r.ssh), ": it creates the unprivileged hcc-runner user, grants it one sudo rule for hcc-helper, builds the VM images, and starts its systemd service."),
@@ -991,6 +999,35 @@ function installRunner(r, version, after = runnersView) {
     log.textContent = "Following the " + verb.toLowerCase() + " in progress…";
     poll();
   }
+}
+
+// changeTools edits the tool list of a server's claude-code image, then
+// rebuilds it with the runner's update (installRunner).
+function changeTools(r, after) {
+  const st = r.status;
+  const current = ((st.tools || {})["claude-code"] || []).map((t) => t.split("@")[0]);
+  const list = h("textarea", { rows: "8", spellcheck: "false" });
+  list.value = current.join("\n");
+  const problem = h("div", {});
+  const form = h("form", { method: "dialog", onsubmit: (ev) => {
+    ev.preventDefault();
+    const tools = [...new Set(list.value.split(/[\s,]+/).map((t) => t.trim().toLowerCase()).filter(Boolean))];
+    const bad = tools.filter((t) => !/^[a-z0-9][a-z0-9._+-]{0,127}$/.test(t));
+    if (bad.length > 0) {
+      set(problem, h("div", { class: "error-box" }, "Not a package name: " + bad.join(", ")));
+      return;
+    }
+    dialog.close();
+    installRunner(r, st.version || "its version", after, tools);
+  } },
+  h("h1", {}, "Tools on " + r.name),
+  h("p", {}, "Alpine Linux packages a harness may install into its sandbox, one per line (e.g. git, jq, postgresql-client, openssh-client). Find names at pkgs.alpinelinux.org."),
+  h("p", { class: "muted" }, "Saving updates the runner: it builds a new claude-code image with them and restarts, so it waits until no job runs there. A harness still installs only the tools it lists."),
+  h("label", {}, "Packages", list),
+  problem,
+  h("div", { class: "actions" }, h("button", { class: "primary" }, "Next"), h("button", { type: "button", onclick: () => dialog.close() }, "Cancel")));
+  set(dialog, form);
+  dialog.showModal();
 }
 
 function pathForInstall(r) {

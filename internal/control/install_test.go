@@ -199,10 +199,10 @@ func TestRunnerInstallValidationAndFailure(t *testing.T) {
 
 func TestRunnerInstallOnlyOverSSH(t *testing.T) {
 	inst := newRunnerInstaller()
-	if err := inst.start(RunnerRef{Name: "mac", Socket: "/tmp/hcc.sock"}, "", nil); err == nil || !strings.Contains(err.Error(), "over ssh") {
+	if err := inst.start(RunnerRef{Name: "mac", Socket: "/tmp/hcc.sock"}, "", nil, nil); err == nil || !strings.Contains(err.Error(), "over ssh") {
 		t.Fatalf("socket runner: %v", err)
 	}
-	if err := inst.start(RunnerRef{Name: "bad", SSH: "-oProxyCommand=x"}, "", nil); err == nil {
+	if err := inst.start(RunnerRef{Name: "bad", SSH: "-oProxyCommand=x"}, "", nil, nil); err == nil {
 		t.Fatal("an invalid ssh host was accepted")
 	}
 }
@@ -220,7 +220,7 @@ func TestRunnerInstallPasswordIsCleared(t *testing.T) {
 		return nil
 	}
 	password := []byte("secret")
-	if err := inst.start(RunnerRef{Name: "agent", SSH: "host"}, "", password); err != nil {
+	if err := inst.start(RunnerRef{Name: "agent", SSH: "host"}, "", password, nil); err != nil {
 		t.Fatal(err)
 	}
 	close(release)
@@ -409,5 +409,54 @@ func TestRunnerShowsItIsInstalling(t *testing.T) {
 	v = RunnerView{}
 	if ts.do(http.MethodGet, "/api/runners/agent", nil, &v); v.Installing != nil {
 		t.Error("still installing after it finished")
+	}
+}
+
+// A new tool list goes to install-runner.sh as HCC_TOOLS; without one the
+// runner keeps its list; names are checked (they enter a shell command).
+func TestRunnerInstallTools(t *testing.T) {
+	ts := newTestServer(t)
+	fake := &fakeInstallCommands{}
+	ts.s.installs.findSource = func() (string, error) { return "/src/hcc", nil }
+	ts.s.installs.runCommand = fake.run
+	ts.s.installs.activeJobs = func(context.Context, string) (int, error) { return 0, nil }
+	ts.do(http.MethodPost, "/api/runners", RunnerRef{Name: "agent", SSH: "host"}, nil)
+	installScript := func() string {
+		for _, c := range fake.all() {
+			if a := strings.Join(c.args, " "); c.name == "ssh" && strings.Contains(a, "install-runner.sh") {
+				return a
+			}
+		}
+		return ""
+	}
+	start := func(body map[string]any) int {
+		var out map[string]any
+		code := ts.do(http.MethodPost, "/api/runners/agent/install", body, &out)
+		if code == http.StatusAccepted {
+			waitRunnerInstall(t, ts, "agent")
+		}
+		return code
+	}
+	base := map[string]any{"target": "server:agent", "confirmed": true}
+	if code := start(base); code != http.StatusAccepted || strings.Contains(installScript(), "HCC_TOOLS") {
+		t.Fatalf("without tools: %d %s", code, installScript())
+	}
+	fake.mu.Lock()
+	fake.commands = nil
+	fake.mu.Unlock()
+	withTools := map[string]any{"target": "server:agent", "confirmed": true, "tools": []string{"git", "jq", "py3-requests", "g++"}}
+	if code := start(withTools); code != http.StatusAccepted || !strings.Contains(installScript(), `HCC_TOOLS="git jq py3-requests g++"; export HCC_TOOLS`) {
+		t.Fatalf("with tools: %d %s", code, installScript())
+	}
+	fake.mu.Lock()
+	fake.commands = nil
+	fake.mu.Unlock()
+	if code := start(map[string]any{"target": "server:agent", "confirmed": true, "tools": []string{}}); code != http.StatusAccepted || !strings.Contains(installScript(), `HCC_TOOLS=""`) {
+		t.Errorf("no tools at all: %d %s", code, installScript())
+	}
+	for _, bad := range [][]string{{"git; rm -rf /"}, {"$(id)"}, {"Git"}, {"git", "git"}, {"a b"}, {`x"`}} {
+		if code := start(map[string]any{"target": "server:agent", "confirmed": true, "tools": bad}); code != http.StatusBadRequest {
+			t.Errorf("tools %q: %d", bad, code)
+		}
 	}
 }

@@ -162,7 +162,10 @@ HCC_TOOLS="python3 py3-pip nodejs npm make gcc musl-dev curl go" ./install-runne
 The runner rejects harnesses asking for anything else. Packages and their
 dependencies are fetched once, as signed Alpine packages, test-installed
 offline, and installed into each VM before its agent starts. The Control
-Center's Runners page lists what each image offers. See ADR-0010.
+Center's runner page lists what each image offers, and **Change the tools**
+there rebuilds the image with another list (an update with `HCC_TOOLS`).
+The list is kept in `/etc/hcc/tools`, so later updates keep it. See
+ADR-0010.
 
 ## Subagents
 
