@@ -18,6 +18,24 @@ if ! hcc_tools "$TASK"; then
 	echo "HCC-RESULT-END exit=1"
 	hcc_shutdown
 fi
+if ! hcc_forward "$TASK"; then
+	echo "HCC-RESULT-END exit=1"
+	hcc_shutdown
+fi
+# e2e only (ADR-0021; the runner never sets hcc.mode for jobs): plain
+# TCP, without the proxy variables, to an allowed host and port, the same
+# host on a port not allowed, and a host not allowed.
+case " $(cat /proc/cmdline) " in
+*" hcc.mode=fwdtest "*)
+	unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+	echo "HCC-FWD-HOSTS $(grep -c ' example.com$' /etc/hosts)"
+	# Kept open while the answer comes, as a real client would.
+	echo "HCC-FWD-ALLOWED $( (printf 'HEAD / HTTP/1.0\r\nHost: example.com\r\n\r\n'; sleep 3) | nc -w 5 example.com 80 2>&1 | head -n 1 | tr -d '\r')"
+	if nc -w 3 example.com 8080 </dev/null 2>/dev/null; then echo "HCC-FWD-OTHERPORT open"; else echo "HCC-FWD-OTHERPORT blocked"; fi
+	if nc -w 3 example.org 80 </dev/null 2>/dev/null; then echo "HCC-FWD-DENIED open"; else echo "HCC-FWD-DENIED blocked"; fi
+	hcc_shutdown
+	;;
+esac
 
 # A plugin (ADR-0013): its files from the bundle drive, its command run in
 # its directory as the unprivileged user "agent". A notifier gets its

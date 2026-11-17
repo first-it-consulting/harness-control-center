@@ -70,8 +70,6 @@ Option 3.
 - The secret is on the runner's disk while the job's task drive exists (in
   the runner's own staging directory, removed with the job), and in the
   runner store, as other credentials are.
-- The sandbox still reaches the network only through the egress proxy
-  (HTTP CONNECT). Programs that use a proxy work with a handed-over secret
-  (kubectl, curl, git over HTTPS, most API clients). Programs that do not
-  (psql against a database, ssh) cannot connect yet, whatever secret they
-  hold; supporting them is a separate change to the network path.
+- The sandbox still reaches the network only through the egress proxy.
+  Programs without proxy support (psql, ssh) reach the allowed hosts
+  through the guest's forwarder (ADR-0021).

@@ -1060,6 +1060,47 @@ type Task struct {
 	A2A []TaskA2A `json:"a2a,omitempty"`
 	// Secrets are handed to the agent (ADR-0020).
 	Secrets []TaskSecret `json:"secrets,omitempty"`
+	// Forward lets programs without proxy support reach the allowed hosts
+	// (ADR-0021): each host gets a loopback address in the guest, where
+	// hcc-guest tcp-forward tunnels its ports through the egress proxy.
+	Forward []TaskForward `json:"forward,omitempty"`
+}
+
+// TaskForward is one allowed host, its guest address and its ports.
+type TaskForward struct {
+	Host  string `json:"host"`
+	Addr  string `json:"addr"`
+	Ports []int  `json:"ports"`
+}
+
+// forwardsFor lists the exact hosts of h's egress allowlist with their
+// ports (wildcards cannot be listed; proxy-aware programs reach those),
+// each with its own address in 127.77.0.0/16.
+func forwardsFor(h *spec.Harness) []TaskForward {
+	var out []TaskForward
+	index := map[string]int{}
+	for _, r := range h.Spec.Permissions.Network.Egress {
+		if strings.HasPrefix(r.Host, "*.") {
+			continue
+		}
+		ports := r.Ports
+		if len(ports) == 0 {
+			ports = []int{spec.DefaultEgressPort}
+		}
+		i, ok := index[r.Host]
+		if !ok {
+			n := len(out)
+			i = n
+			index[r.Host] = n
+			out = append(out, TaskForward{Host: r.Host, Addr: fmt.Sprintf("127.77.%d.%d", n/254, n%254+1)})
+		}
+		for _, p := range ports {
+			if !slices.Contains(out[i].Ports, p) {
+				out[i].Ports = append(out[i].Ports, p)
+			}
+		}
+	}
+	return out
 }
 
 // TaskSecret is a secret for the agent: as the environment variable Env
@@ -1126,7 +1167,7 @@ func modelName(h *spec.Harness) string {
 }
 
 func taskFor(h *spec.Harness, loop *TaskLoop, tools *TaskTools, secrets []TaskSecret) ([]byte, error) {
-	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt, Loop: loop, Tools: tools, Secrets: secrets}
+	t := Task{Runtime: h.Spec.Runtime, Prompt: h.Spec.Prompt, Loop: loop, Tools: tools, Secrets: secrets, Forward: forwardsFor(h)}
 	if n := h.Spec.Permissions.Subagents.Max; n > 0 {
 		t.Subagents = &TaskSubagents{Max: n}
 	}
