@@ -69,14 +69,14 @@ export async function harnessEditor(ui, name, template) {
   let ctx;
   let doc;
   try {
-    const [runners, catalog, limits, decoded] = await Promise.all([
+    const [runners, providers, limits, decoded] = await Promise.all([
       api("GET", "/api/runners"),
-      api("GET", "/api/models").catch(() => ({ endpoints: [], models: [] })),
+      api("GET", "/api/providers").then((r) => r.providers).catch(() => []),
       api("GET", "/api/harness/limits"),
       api("POST", "/api/harness/decode", { yaml: yamlText }),
     ]);
     const store = await api("GET", "/api/credentials").then((r) => r.credentials).catch(() => []);
-    ctx = { runners, catalog, limits, store, credentials: new Map() };
+    ctx = { runners, providers, limits, store, credentials: new Map(), models: new Map() };
     doc = decoded.doc;
   } catch (err) {
     fail(err);
@@ -319,90 +319,115 @@ function task(ed) {
 
 // --- model ---
 
-function catalogKey(m) {
-  return m.endpoint + "\u0000" + m.id;
-}
+const sameURL = (a, b) => (a || "").replace(/\/+$/, "") === (b || "").replace(/\/+$/, "");
 
-// currentCatalogModel is the catalog model the harness's model copies.
-function currentCatalogModel(ed) {
+// providerOf is the provider the harness's model is at.
+const providerOf = (ed) => {
   const m = get(ed.doc, "spec.model");
-  if (!m) return null;
-  const c = ed.ctx.catalog;
-  return c.models.find((cm) => {
-    const e = c.endpoints.find((x) => x.name === cm.endpoint);
-    return e && cm.id === m.name && e.url === m.endpoint;
-  }) || null;
+  return m ? ed.ctx.providers.find((p) => sameURL(p.url, m.endpoint)) || null : null;
+};
+
+// loadModels asks a provider for its models, once per page.
+function loadModels(ed, p) {
+  if (!ed.ctx.models.has(p.name)) {
+    ed.ctx.models.set(p.name, ed.ui.api("POST", "/api/providers/" + encodeURIComponent(p.name) + "/models")
+      .then((r) => ({ models: r.models }), (err) => ({ error: err.message })));
+  }
+  return ed.ctx.models.get(p.name);
 }
 
 function model(ed) {
   const { h } = ed.ui;
-  const c = ed.ctx.catalog;
+  const providers = ed.ctx.providers;
   const m = get(ed.doc, "spec.model");
-  const current = currentCatalogModel(ed);
-  const opts = [["", "The runtime's default"]];
-  c.models.forEach((cm) => opts.push([catalogKey(cm), (cm.label || cm.id) + " · " + cm.endpoint]));
-  let value = current ? catalogKey(current) : "";
+  const current = providerOf(ed);
+  const opts = [["", "The runtime's default"], ...providers.map((p) => [p.name, p.name + " (" + p.url + ")"])];
+  let value = current ? current.name : "";
   if (m && !current) {
-    opts.push(["custom", m.name + " at " + m.endpoint + " (not on the Models page)"]);
+    opts.push(["custom", m.endpoint + " (not a provider on the Models page)"]);
     value = "custom";
   }
-  const sel = h("select", {}, opts.map(([v, l]) => h("option", { value: v, selected: v === value }, l)));
-  sel.addEventListener("change", () => {
-    if (sel.value === "custom") return;
-    const next = c.models.find((cm) => catalogKey(cm) === sel.value) || null;
-    applyModel(ed, next);
+  const providerSel = h("select", {}, opts.map(([v, l]) => h("option", { value: v, selected: v === value }, l)));
+  providerSel.addEventListener("change", () => {
+    if (providerSel.value === "custom") return;
+    applyProvider(ed, providers.find((p) => p.name === providerSel.value) || null);
     changed(ed, true);
   });
-  const out = [h("label", {}, "Which model?", sel,
-    c.models.length === 0 ? help(h, "Add models on the Models page to choose them here.") : help(h, "Its settings are copied into this harness."))];
-  if (m) {
-    const e = endpointOf(m.endpoint);
-    const granted = [e && "network access to " + e.host + ":" + e.port, m.credential && "the API key " + m.credential,
-      get(ed.doc, "spec.permissions.network.allowPrivateNetworks") && "your own network"].filter(Boolean);
-    out.push(h("div", { class: "notice-box" }, h("p", {}, "To reach it, this harness may use " + granted.join(", ") + ".")));
-    if (m.endpoint.startsWith("http://")) {
-      out.push(h("div", { class: "error-box" }, "Unencrypted: prompts, code and the API key cross your network in clear text."));
-    }
+  const out = [h("label", {}, "Provider", providerSel,
+    providers.length === 0 ? help(h, "Add your model providers on the Models page to choose them here.") : help(h, "Where the model runs."))];
+  if (!m) return out;
+
+  // The model: from the provider's list, or typed.
+  const listID = "provider-models";
+  const list = h("datalist", { id: listID });
+  const name = text(ed, "spec.model.name", { required: true, list: listID, placeholder: "Pick or type the model's name" });
+  const status = help(h, "");
+  if (current) {
+    status.textContent = "Asking " + current.name + " for its models…";
+    loadModels(ed, current).then((r) => {
+      if (r.error) {
+        status.textContent = "Could not list its models (" + r.error + "). Type the model's name.";
+        return;
+      }
+      list.replaceChildren(...r.models.map((x) => h("option", { value: x.id }, x.label || x.id)));
+      status.textContent = r.models.length + " models offered; click the field to choose.";
+    });
   }
+  out.push(h("label", {}, "Model", name, list, status));
+
+  const e = endpointOf(m.endpoint);
+  const granted = [e && "network access to " + e.host + ":" + e.port, m.credential && "the credential " + m.credential,
+    get(ed.doc, "spec.permissions.network.allowPrivateNetworks") && "your own network"].filter(Boolean);
+  out.push(h("div", { class: "notice-box" }, h("p", {}, "To reach it, this harness may use " + granted.join(", ") + ".")));
+  if (m.endpoint.startsWith("http://")) {
+    out.push(h("div", { class: "error-box" }, "Unencrypted: prompts and code" + (m.credential ? ", and the credential," : "") + " cross the network in clear text."));
+  }
+  out.push(h("details", {}, h("summary", {}, "More model settings (optional)"),
+    h("div", { class: "form-stack" },
+      h("label", {}, "Context window (tokens)", number(ed, "spec.model.contextWindow", { min: "8192", max: "1000000", step: "1", placeholder: "the runtime's guess" }),
+        help(h, "Only for a model Claude Code does not know; it then assumes 200,000.")),
+      h("label", {}, "Model for quick side tasks", text(ed, "spec.model.smallModel", { list: listID, placeholder: "the same model" }),
+        help(h, "A faster model at the same provider for summaries and titles.")),
+      h("div", { class: "row" },
+        h("label", {}, "Longest answer (tokens)", number(ed, "spec.model.maxOutputTokens", { min: "1024", max: "262144", step: "1", placeholder: "runtime default" })),
+        h("label", {}, "Thinking per answer (tokens)", number(ed, "spec.model.thinkingTokens", { min: "1024", max: "262144", step: "1", placeholder: "no extended thinking" }))))));
   return out;
 }
 
-// applyModel copies a catalog model in (null: the runtime's default),
-// taking back what the previous model was granted.
-function applyModel(ed, cm) {
+// applyProvider points the model at a provider (null: the runtime's
+// default), taking back what the previous one was granted and granting
+// what this one needs.
+function applyProvider(ed, p) {
   const doc = ed.doc;
   const prev = get(doc, "spec.model");
   if (prev) {
     const e = endpointOf(prev.endpoint);
     if (e) {
-      const rules = (get(doc, "spec.permissions.network.egress") || []).filter((r) => !(r.host === e.host && samePorts(r.ports, e.port)));
-      put(doc, "spec.permissions.network.egress", rules);
+      put(doc, "spec.permissions.network.egress", (get(doc, "spec.permissions.network.egress") || []).filter((r) => !(r.host === e.host && samePorts(r.ports, e.port))));
     }
     if (prev.credential) {
       put(doc, "spec.permissions.credentials", (get(doc, "spec.permissions.credentials") || []).filter((n) => n !== prev.credential));
     }
-    const prevCat = ed.ctx.catalog.endpoints.find((x) => x.url === prev.endpoint);
-    if (prevCat && prevCat.kind === "network") put(doc, "spec.permissions.network.allowPrivateNetworks", undefined);
+    const was = ed.ctx.providers.find((x) => sameURL(x.url, prev.endpoint));
+    if (was && was.private) put(doc, "spec.permissions.network.allowPrivateNetworks", undefined);
   }
-  if (!cm) {
+  if (!p) {
     put(doc, "spec.model", undefined);
     return;
   }
-  const ep = ed.ctx.catalog.endpoints.find((x) => x.name === cm.endpoint);
-  const m = { name: cm.id, endpoint: ep.url };
-  for (const k of ["contextWindow", "smallModel", "maxOutputTokens", "thinkingTokens"]) if (cm[k]) m[k] = cm[k];
-  if (ep.credential) {
-    m.credential = ep.credential;
+  const m = { name: (prev && prev.name) || "", endpoint: p.url };
+  if (p.credential) {
+    m.credential = p.credential;
     const creds = get(doc, "spec.permissions.credentials") || [];
-    if (!creds.includes(ep.credential)) put(doc, "spec.permissions.credentials", [...creds, ep.credential]);
+    if (!creds.includes(p.credential)) put(doc, "spec.permissions.credentials", [...creds, p.credential]);
   }
   put(doc, "spec.model", m);
-  const e = endpointOf(ep.url);
+  const e = endpointOf(p.url);
   const rules = get(doc, "spec.permissions.network.egress") || [];
   if (e && !rules.some((r) => r.host === e.host && samePorts(r.ports, e.port))) {
     put(doc, "spec.permissions.network.egress", [...rules, e.port === 443 ? { host: e.host } : { host: e.host, ports: [e.port] }]);
   }
-  if (ep.kind === "network") put(doc, "spec.permissions.network.allowPrivateNetworks", true);
+  if (p.private) put(doc, "spec.permissions.network.allowPrivateNetworks", true);
 }
 
 // samePorts: a rule's ports are just port (no ports means 443).

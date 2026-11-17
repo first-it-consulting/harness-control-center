@@ -73,8 +73,9 @@ var webFS embed.FS
 //	POST   /api/harness/decode                   a harness's YAML as the form's data
 //	POST   /api/harness/encode                   the form's data as YAML, checked
 //	GET    /api/harness/limits                   the bounds and defaults the form shows
-//	GET    /api/models                           the model catalog (endpoints, models) and which harnesses use each model
-//	PUT    /api/models                           replace it (validated like a harness's spec.model)
+//	GET    /api/providers                        the model providers and which harnesses use each
+//	PUT    /api/providers                        replace them (validated like a harness's spec.model)
+//	POST   /api/providers/{name}/models          ask a provider for its models
 //	GET    /api/runners/{runner}/settings        its settings and the bounds the UI may set them within
 //	PUT    /api/runners/{runner}/settings        change them (written as the file's owner) and restart it
 //	GET    /api/local                            the runner on this Mac: what is set up, and the setup's progress
@@ -111,6 +112,8 @@ type Server struct {
 	modelsMu sync.Mutex
 	// credMu serializes the credential store and copying from it.
 	credMu sync.Mutex
+	// providerClient asks model providers for their models.
+	providerClient *http.Client
 }
 
 // NewServer returns a Control Center using the config file at cfgPath and
@@ -120,7 +123,7 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfgPath: cfgPath, lib: NewLibrary(libDir), auth: newAuth(), log: log, cfg: cfg, clients: map[RunnerRef]*runnerd.Client{}, local: newLocalRunner(), installs: newRunnerInstaller()}
+	s := &Server{cfgPath: cfgPath, lib: NewLibrary(libDir), auth: newAuth(), log: log, cfg: cfg, clients: map[RunnerRef]*runnerd.Client{}, local: newLocalRunner(), installs: newRunnerInstaller(), providerClient: newProviderClient()}
 	s.installs.activeJobs = s.activeJobs
 	if home, err := os.UserHomeDir(); err == nil {
 		s.sshConfig = filepath.Join(home, ".ssh", "config")
@@ -173,8 +176,9 @@ func NewServer(cfgPath, libDir string, log *slog.Logger) (*Server, error) {
 	mux.HandleFunc("POST /api/harness/decode", s.harnessDecode)
 	mux.HandleFunc("POST /api/harness/encode", s.harnessEncode)
 	mux.HandleFunc("GET /api/harness/limits", s.harnessLimits)
-	mux.HandleFunc("GET /api/models", s.modelsGet)
-	mux.HandleFunc("PUT /api/models", s.modelsPut)
+	mux.HandleFunc("GET /api/providers", s.providersGet)
+	mux.HandleFunc("PUT /api/providers", s.providersPut)
+	mux.HandleFunc("POST /api/providers/{name}/models", s.providerModels)
 	mux.HandleFunc("GET /api/runners/{runner}/settings", s.settingsGet)
 	mux.HandleFunc("PUT /api/runners/{runner}/settings", s.settingsSet)
 	mux.HandleFunc("GET /api/local", s.localState)

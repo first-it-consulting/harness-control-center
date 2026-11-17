@@ -1,7 +1,10 @@
 package control
 
 import (
+	"context"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,105 +12,116 @@ import (
 	"testing"
 )
 
-func goodCatalog() Catalog {
-	return Catalog{
-		Endpoints: []CatalogEndpoint{
-			{Name: "anthropic", Kind: EndpointAnthropic, URL: "https://api.anthropic.com", Credential: "anthropic"},
-			{Name: "studio", Kind: EndpointNetwork, URL: "http://mac-studio.lan:4000", Credential: "omlx"},
-		},
-		Models: []CatalogModel{
-			{ID: "claude-sonnet-5-5", Label: "Claude Sonnet", Endpoint: "anthropic", SmallModel: "claude-haiku-5-5", MaxOutputTokens: 32000, ThinkingTokens: 8000},
-			{ID: "Ornith-1.5-35B-A3B-MLX", Endpoint: "studio", ContextWindow: 262144},
-		},
-	}
+func goodProviders() Catalog {
+	return Catalog{Providers: []Provider{
+		{Name: "anthropic", Type: "anthropic", URL: "https://api.anthropic.com", Credential: "anthropic"},
+		{Name: "studio", Type: "omlx", URL: "http://mac-studio.lan:4000", Credential: "omlx"},
+		{Name: "ollama", Type: "ollama", URL: "http://ollama.example.com:11434", Local: true},
+	}}
 }
 
-func TestCatalogValidate(t *testing.T) {
-	c := goodCatalog()
+func TestProvidersValidate(t *testing.T) {
+	c := goodProviders()
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	m, private := c.Spec(c.Models[1])
-	if !private || m.Endpoint != "http://mac-studio.lan:4000" || m.Credential != "omlx" || m.ContextWindow != 262144 {
-		t.Errorf("spec = %+v, private %v", m, private)
+	if !c.Providers[1].Private() || !c.Providers[2].Private() || c.Providers[0].Private() {
+		t.Error("Private()")
 	}
 	for name, tt := range map[string]struct {
 		change func(*Catalog)
 		want   string
 	}{
-		"http outside the network": {func(c *Catalog) { c.Endpoints[0].URL = "http://api.anthropic.com" }, "must be https://"},
-		"internal name, not network": {func(c *Catalog) {
-			c.Endpoints[1].Kind = EndpointOther
-			c.Endpoints[1].URL = "https://mac-studio.lan:4000"
-		}, "looks internal"},
-		"ip address":         {func(c *Catalog) { c.Endpoints[1].URL = "http://10.0.0.5:4000" }, "IP addresses"},
-		"secret in the url":  {func(c *Catalog) { c.Endpoints[0].URL = "https://key:sk@api.anthropic.com" }, "credentials"},
-		"bad endpoint name":  {func(c *Catalog) { c.Endpoints[0].Name = "Anthropic API" }, "endpoint name"},
-		"duplicate endpoint": {func(c *Catalog) { c.Endpoints[1].Name = "anthropic" }, "another endpoint"},
-		"unknown kind":       {func(c *Catalog) { c.Endpoints[0].Kind = "openai" }, "unknown kind"},
-		"bad credential":     {func(c *Catalog) { c.Endpoints[0].Credential = "../secrets" }, "credential name"},
-		"missing endpoint":   {func(c *Catalog) { c.Models[0].Endpoint = "nope" }, "no endpoint"},
-		"duplicate model":    {func(c *Catalog) { c.Models[1] = c.Models[0] }, "listed twice"},
-		"bad model id":       {func(c *Catalog) { c.Models[0].ID = "a b" }, "model name"},
-		"thinking >= output": {func(c *Catalog) { c.Models[0].ThinkingTokens = 32000 }, "less than maxOutputTokens"},
-		"small window":       {func(c *Catalog) { c.Models[1].ContextWindow = 100 }, "contextWindow"},
-		"label with newline": {func(c *Catalog) { c.Models[0].Label = "a\nb" }, "one line"},
+		"internal, not local": {func(c *Catalog) { c.Providers[0].URL = "https://llm.internal" }, ""},
+		"ip address":          {func(c *Catalog) { c.Providers[1].URL = "http://10.0.0.5:4000" }, "IP addresses"},
+		"secret in the url":   {func(c *Catalog) { c.Providers[0].URL = "https://key:sk@api.anthropic.com" }, "credentials"},
+		"bad name":            {func(c *Catalog) { c.Providers[0].Name = "Anthropic API" }, "provider name"},
+		"duplicate":           {func(c *Catalog) { c.Providers[1].Name = "anthropic" }, "another provider"},
+		"unknown type":        {func(c *Catalog) { c.Providers[0].Type = "gpt" }, "unknown type"},
+		"bad credential":      {func(c *Catalog) { c.Providers[0].Credential = "../x" }, "credential name"},
 	} {
-		c := goodCatalog()
+		c := goodProviders()
 		tt.change(&c)
-		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+		err := c.Validate()
+		if tt.want == "" {
+			if err != nil {
+				t.Errorf("%s: %v", name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
 			t.Errorf("%s: %v, want %q", name, err, tt.want)
 		}
 	}
 }
 
-func TestModelsThroughTheUI(t *testing.T) {
-	ts := newTestServer(t)
-	var v CatalogView
-	if code := ts.do(http.MethodGet, "/api/models", nil, &v); code != http.StatusOK || v.Endpoints == nil || len(v.Models) != 0 {
-		t.Fatalf("empty: %d %+v", code, v)
+// The first format (endpoints and models) is read as providers.
+func TestLoadCatalogFirstFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models.yaml")
+	old := "endpoints:\n  - {name: anthropic, kind: anthropic, url: 'https://api.anthropic.com', credential: anthropic}\n" +
+		"  - {name: studio, kind: network, url: 'http://mac-studio.lan:4000'}\nmodels:\n  - {id: m, endpoint: studio}\n"
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	// A saved harness that uses the network model.
+	c, err := LoadCatalog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Providers) != 2 || c.Providers[0].Type != "anthropic" || c.Providers[1].Type != "other" || c.Providers[1].URL != "http://mac-studio.lan:4000" {
+		t.Errorf("providers = %+v", c.Providers)
+	}
+}
+
+func TestProvidersThroughTheUI(t *testing.T) {
+	ts := newTestServer(t)
+	var out struct{ Providers []ProviderView }
+	if code := ts.do(http.MethodGet, "/api/providers", nil, &out); code != http.StatusOK || len(out.Providers) != 0 {
+		t.Fatalf("empty: %d %+v", code, out)
+	}
 	used := strings.Replace(okHarness, "  prompt: hi\n", `  prompt: hi
-  model: {name: Ornith-1.5-35B-A3B-MLX, endpoint: 'http://mac-studio.lan:4000', credential: omlx}
+  model: {name: Ornith, endpoint: 'http://mac-studio.lan:4000'}
   permissions:
-    credentials: [omlx]
     network: {allowPrivateNetworks: true, egress: [{host: mac-studio.lan, ports: [4000]}]}
 `, 1)
 	if code := ts.do(http.MethodPut, "/api/harnesses", map[string]string{"yaml": used}, nil); code != http.StatusOK {
 		t.Fatalf("save harness: %d", code)
 	}
-	if code := ts.do(http.MethodPut, "/api/models", goodCatalog(), &v); code != http.StatusOK {
+	if code := ts.do(http.MethodPut, "/api/providers", goodProviders(), &out); code != http.StatusOK {
 		t.Fatalf("PUT: %d", code)
 	}
-	if len(v.UsedBy) != 2 || len(v.UsedBy[0]) != 0 || len(v.UsedBy[1]) != 1 || v.UsedBy[1][0] != "hello" {
-		t.Errorf("usedBy = %v", v.UsedBy)
-	}
-	ts.do(http.MethodGet, "/api/models", nil, &v)
-	if len(v.Models) != 2 || v.Models[0].SmallModel != "claude-haiku-5-5" {
-		t.Errorf("after save: %+v", v.Models)
+	if len(out.Providers) != 3 || !out.Providers[1].Private || len(out.Providers[1].UsedBy) != 1 || out.Providers[1].UsedBy[0] != "hello" {
+		t.Errorf("after save: %+v", out.Providers)
 	}
 	data, err := os.ReadFile(filepath.Join(ts.dir, "models.yaml"))
-	if err != nil || !strings.Contains(string(data), "mac-studio.lan") {
-		t.Fatalf("models.yaml: %v %s", err, data)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if fi, err := os.Stat(filepath.Join(ts.dir, "models.yaml")); err == nil && fi.Mode().Perm()&0o077 != 0 && runtime.GOOS != "windows" {
+	if fi, _ := os.Stat(filepath.Join(ts.dir, "models.yaml")); runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
 		t.Errorf("models.yaml mode %v", fi.Mode())
 	}
-
-	// Refused: invalid entries (with every reason), unknown fields; the
-	// file is left alone.
-	bad := goodCatalog()
-	bad.Endpoints[0].URL = "http://api.anthropic.com"
-	bad.Models[0].ThinkingTokens = 99999
-	var out map[string]any
-	if code := ts.do(http.MethodPut, "/api/models", bad, &out); code != http.StatusBadRequest || len(out["errors"].([]any)) != 2 {
-		t.Errorf("invalid: %d %v", code, out)
-	}
-	if rec := ts.rawJSON(http.MethodPut, "/api/models", map[string]any{"endpoints": []any{}, "models": []any{}, "secret": "x"}); rec.Code != http.StatusBadRequest {
-		t.Errorf("unknown field: %d", rec.Code)
+	bad := goodProviders()
+	bad.Providers[0].URL = "http://10.0.0.1"
+	bad.Providers[1].Type = "gpt"
+	var res map[string]any
+	if code := ts.do(http.MethodPut, "/api/providers", bad, &res); code != http.StatusBadRequest || len(res["errors"].([]any)) != 2 {
+		t.Errorf("invalid: %d %v", code, res)
 	}
 	if after, _ := os.ReadFile(filepath.Join(ts.dir, "models.yaml")); string(after) != string(data) {
 		t.Error("a refused change wrote the file")
 	}
+}
+
+// fakeProvider serves a model list as llm.example (the Control Center's
+// client dials it there), recording the requests' auth headers.
+func fakeProvider(t *testing.T, ts *testServer, handler http.HandlerFunc) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	addr := srv.Listener.Addr().String()
+	tr := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}}
+	c := newProviderClient()
+	c.Transport = tr
+	ts.s.providerClient = c
 }

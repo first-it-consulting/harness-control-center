@@ -203,7 +203,7 @@ function route() {
     runners: () => runnersView(),
     runner: () => runnerView(parts[1]),
     credentials: () => credentialsView({ h, api, set, show, fail, say, badge }),
-    models: () => modelsView({ h, api, set, show, fail, say }),
+    models: () => modelsView({ h, api, set, show, fail, say, badge }),
     schedules: () => schedulesView(),
   };
   (routes[parts[0]] || routes.dashboard)();
