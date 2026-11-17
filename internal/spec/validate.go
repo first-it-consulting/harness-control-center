@@ -367,6 +367,10 @@ func ValidPackage(pkg string) bool {
 	return packageRe.MatchString(pkg)
 }
 
+// IsPrivateName reports whether name is internal by convention (a home
+// or company network's name, such as "nas.lan" or "localhost").
+func IsPrivateName(name string) bool { return isPrivateName(name) }
+
 func isPrivateName(name string) bool {
 	if name == "localhost" {
 		return true

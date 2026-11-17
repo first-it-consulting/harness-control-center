@@ -2,6 +2,8 @@ package control
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,136 +11,94 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/first-it-consulting/harness-control-center/internal/safetext"
 	"github.com/first-it-consulting/harness-control-center/internal/spec"
 )
 
-// The model catalog: the endpoints and models a person picks from when
-// they make a harness. A harness gets a copy of the model it uses (its
-// spec.model), so it runs the same on every runner; the catalog only
-// saves typing. It holds no secrets: an endpoint names the credential a
-// runner adds for it, and the secret stays on the runner.
+// Model providers: the services harnesses reach models at (Anthropic's
+// API, Ollama, oMLX, LiteLLM …). A harness picks a provider and one of its
+// models, and gets a copy (its spec.model), so it runs the same on every
+// runner. The Control Center asks a provider for its models with the
+// provider's credential from the store, and only if that credential may
+// go to the provider's host. Claude Code speaks Anthropic's Messages API,
+// so a provider must offer it.
 
-// Endpoint kinds, which decide what an endpoint may be.
+// Provider types: what kind of server it is (for its model list and the
+// defaults the UI offers).
+var providerTypes = []string{"anthropic", "ollama", "omlx", "litellm", "lmstudio", "openrouter", "other"}
+
+// Bounds.
 const (
-	// EndpointAnthropic is Anthropic's own API.
-	EndpointAnthropic = "anthropic"
-	// EndpointNetwork is a model server in the person's own network
-	// (oMLX, LM Studio, LiteLLM …): it may be internal and unencrypted.
-	EndpointNetwork = "network"
-	// EndpointOther is another service that speaks Anthropic's API.
-	EndpointOther = "other"
+	MaxProviders      = 32
+	maxProviderModels = 500
+	maxModelsBody     = 4 << 20
+	providerTimeout   = 15 * time.Second
 )
 
-// Bounds of the catalog.
-const (
-	MaxEndpoints     = 32
-	MaxCatalogModels = 128
-	maxLabel         = 80
-)
-
-// CatalogEndpoint is where models are reached.
-type CatalogEndpoint struct {
+// Provider is one model service.
+type Provider struct {
 	Name string `yaml:"name" json:"name"`
-	Kind string `yaml:"kind" json:"kind"`
+	Type string `yaml:"type" json:"type"`
 	URL  string `yaml:"url" json:"url"`
-	// Credential names the runners' credential for this endpoint.
+	// Credential names a credential of the Control Center's store.
 	Credential string `yaml:"credential,omitempty" json:"credential,omitempty"`
+	// Local: it is in the person's own network (a harness using it then
+	// needs network.allowPrivateNetworks). Internal names (*.lan …) are
+	// local anyway; this covers a home server with a public-looking name.
+	Local bool `yaml:"local,omitempty" json:"local,omitempty"`
 }
 
-// CatalogModel is a model at an endpoint, with what the runtime should
-// know about it (see spec.Model).
-type CatalogModel struct {
-	// ID is the model's name at the endpoint.
-	ID string `yaml:"id" json:"id"`
-	// Label is what people see; empty means the ID.
-	Label           string `yaml:"label,omitempty" json:"label,omitempty"`
-	Endpoint        string `yaml:"endpoint" json:"endpoint"`
-	ContextWindow   int    `yaml:"contextWindow,omitempty" json:"contextWindow,omitempty"`
-	SmallModel      string `yaml:"smallModel,omitempty" json:"smallModel,omitempty"`
-	MaxOutputTokens int    `yaml:"maxOutputTokens,omitempty" json:"maxOutputTokens,omitempty"`
-	ThinkingTokens  int    `yaml:"thinkingTokens,omitempty" json:"thinkingTokens,omitempty"`
-}
-
-// Catalog is models.yaml.
-type Catalog struct {
-	Endpoints []CatalogEndpoint `yaml:"endpoints" json:"endpoints"`
-	Models    []CatalogModel    `yaml:"models" json:"models"`
-}
-
-// Endpoint returns the endpoint called name.
-func (c *Catalog) Endpoint(name string) (CatalogEndpoint, bool) {
-	for _, e := range c.Endpoints {
-		if e.Name == name {
-			return e, true
-		}
+// Private reports whether the provider is in the person's own network.
+func (p Provider) Private() bool {
+	if p.Local {
+		return true
 	}
-	return CatalogEndpoint{}, false
+	u, err := url.Parse(p.URL)
+	return err == nil && spec.IsPrivateName(spec.NormalizeHost(u.Hostname()))
 }
 
-// Spec returns the spec.model a harness gets for m, and whether its
-// endpoint is in the person's own network (the harness then needs
-// network.allowPrivateNetworks).
-func (c *Catalog) Spec(m CatalogModel) (spec.Model, bool) {
-	e, _ := c.Endpoint(m.Endpoint)
-	return spec.Model{
-		Name: m.ID, Endpoint: e.URL, Credential: e.Credential, ContextWindow: m.ContextWindow,
-		SmallModel: m.SmallModel, MaxOutputTokens: m.MaxOutputTokens, ThinkingTokens: m.ThinkingTokens,
-	}, e.Kind == EndpointNetwork
+// Catalog is models.yaml: the providers.
+type Catalog struct {
+	Providers []Provider `yaml:"providers" json:"providers"`
 }
 
-// Validate checks the catalog: every model as a harness would check it.
+// Provider returns the provider called name.
+func (c *Catalog) Provider(name string) (Provider, bool) {
+	i := slices.IndexFunc(c.Providers, func(p Provider) bool { return p.Name == name })
+	if i < 0 {
+		return Provider{}, false
+	}
+	return c.Providers[i], true
+}
+
+// Validate checks every provider as a harness's spec.model would be.
 func (c *Catalog) Validate() error {
 	var errs []error
 	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
-	if len(c.Endpoints) > MaxEndpoints {
-		add("at most %d endpoints", MaxEndpoints)
-	}
-	if len(c.Models) > MaxCatalogModels {
-		add("at most %d models", MaxCatalogModels)
+	if len(c.Providers) > MaxProviders {
+		add("at most %d providers", MaxProviders)
 	}
 	seen := map[string]bool{}
-	for _, e := range c.Endpoints {
-		what := "endpoint " + e.Name
+	for _, p := range c.Providers {
+		what := "provider " + p.Name
 		switch {
-		case !nameRe.MatchString(e.Name):
-			add("endpoint name %q must be 1-63 lowercase letters, digits or '-'", e.Name)
-		case seen[e.Name]:
-			add("%s: there is another endpoint with that name", what)
+		case !nameRe.MatchString(p.Name):
+			add("provider name %q must be 1-63 lowercase letters, digits or '-'", p.Name)
+		case seen[p.Name]:
+			add("%s: there is another provider with that name", what)
 		}
-		seen[e.Name] = true
-		if e.Kind != EndpointAnthropic && e.Kind != EndpointNetwork && e.Kind != EndpointOther {
-			add("%s: unknown kind %q", what, e.Kind)
+		seen[p.Name] = true
+		if !slices.Contains(providerTypes, p.Type) {
+			add("%s: unknown type %q", what, p.Type)
 		}
-		// Unencrypted only within the person's own network.
-		if u, err := url.Parse(e.URL); err == nil && u.Scheme == "http" && e.Kind != EndpointNetwork {
-			add("%s: must be https:// (only a model server on your own network may use http://)", what)
-		}
-		m := spec.Model{Name: "model", Endpoint: e.URL, Credential: e.Credential}
-		if err := spec.ValidateModel(&m, e.Kind == EndpointNetwork); err != nil {
-			add("%s: %s", what, fieldErrors(err))
-		}
-	}
-	models := map[string]bool{}
-	for _, m := range c.Models {
-		what := "model " + m.ID
-		if len(m.Label) > maxLabel || strings.ContainsAny(m.Label, "\r\n") {
-			add("%s: the name shown must be one line of at most %d characters", what, maxLabel)
-		}
-		if _, ok := c.Endpoint(m.Endpoint); !ok {
-			add("%s: no endpoint called %q", what, m.Endpoint)
-			continue
-		}
-		key := m.Endpoint + "\x00" + m.ID
-		if models[key] {
-			add("%s: listed twice for endpoint %s", what, m.Endpoint)
-		}
-		models[key] = true
-		sm, private := c.Spec(m)
-		if err := spec.ValidateModel(&sm, private); err != nil {
+		m := spec.Model{Name: "model", Endpoint: p.URL, Credential: p.Credential}
+		if err := spec.ValidateModel(&m, p.Private()); err != nil {
 			add("%s: %s", what, fieldErrors(err))
 		}
 	}
@@ -158,10 +118,10 @@ func fieldErrors(err error) string {
 	return strings.Join(parts, "; ")
 }
 
-// modelsPath is the catalog next to control.yaml.
 func (s *Server) modelsPath() string { return filepath.Join(filepath.Dir(s.cfgPath), "models.yaml") }
 
-// LoadCatalog reads a catalog file; a missing one is empty.
+// LoadCatalog reads a catalog file; a missing one is empty. A catalog of
+// the first format (endpoints and models) becomes providers.
 func LoadCatalog(path string) (*Catalog, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // the user's own file
 	if errors.Is(err, os.ErrNotExist) {
@@ -170,13 +130,27 @@ func LoadCatalog(path string) (*Catalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	var c Catalog
+	var file struct {
+		Providers []Provider `yaml:"providers"`
+		Endpoints []struct {
+			Name, Kind, URL, Credential string
+		} `yaml:"endpoints"`
+		Models []yaml.Node `yaml:"models"`
+	}
 	if len(bytes.TrimSpace(data)) > 0 {
 		dec := yaml.NewDecoder(bytes.NewReader(data))
 		dec.KnownFields(true)
-		if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
+		if err := dec.Decode(&file); err != nil && !errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
+	}
+	c := Catalog{Providers: file.Providers}
+	for _, e := range file.Endpoints {
+		t := "other"
+		if e.Kind == "anthropic" {
+			t = "anthropic"
+		}
+		c.Providers = append(c.Providers, Provider{Name: e.Name, Type: t, URL: e.URL, Credential: e.Credential})
 	}
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -184,14 +158,15 @@ func LoadCatalog(path string) (*Catalog, error) {
 	return &c, nil
 }
 
-// CatalogView is what GET /api/models answers: the catalog, and which
-// saved harnesses use each model (by index in Models).
-type CatalogView struct {
-	Catalog
-	UsedBy [][]string `json:"usedBy"`
+// ProviderView is a provider as the UI shows it.
+type ProviderView struct {
+	Provider
+	Private bool `json:"private"`
+	// UsedBy are the saved harnesses whose model is at this provider.
+	UsedBy []string `json:"usedBy"`
 }
 
-func (s *Server) modelsGet(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) providersGet(w http.ResponseWriter, _ *http.Request) {
 	s.modelsMu.Lock()
 	c, err := LoadCatalog(s.modelsPath())
 	s.modelsMu.Unlock()
@@ -199,16 +174,16 @@ func (s *Server) modelsGet(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.catalogView(c))
+	writeJSON(w, http.StatusOK, map[string]any{"providers": s.providerViews(c)})
 }
 
-func (s *Server) modelsPut(w http.ResponseWriter, r *http.Request) {
+func (s *Server) providersPut(w http.ResponseWriter, r *http.Request) {
 	var c Catalog
 	if !readJSON(w, r, &c) {
 		return
 	}
 	if err := c.Validate(); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the models are not valid", "errors": splitLines(err)})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the providers are not valid", "errors": splitLines(err)})
 		return
 	}
 	data, err := yaml.Marshal(&c)
@@ -223,23 +198,18 @@ func (s *Server) modelsPut(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.log.Info("model catalog saved", "endpoints", len(c.Endpoints), "models", len(c.Models))
-	writeJSON(w, http.StatusOK, s.catalogView(&c))
+	s.log.Info("model providers saved", "providers", len(c.Providers))
+	writeJSON(w, http.StatusOK, map[string]any{"providers": s.providerViews(&c)})
 }
 
-// catalogView adds which saved harnesses use each model: those whose
-// spec.model has its ID and endpoint URL.
-func (s *Server) catalogView(c *Catalog) CatalogView {
-	v := CatalogView{Catalog: *c, UsedBy: make([][]string, len(c.Models))}
-	if v.Endpoints == nil {
-		v.Endpoints = []CatalogEndpoint{}
-	}
-	if v.Models == nil {
-		v.Models = []CatalogModel{}
+func (s *Server) providerViews(c *Catalog) []ProviderView {
+	out := make([]ProviderView, len(c.Providers))
+	for i, p := range c.Providers {
+		out[i] = ProviderView{Provider: p, Private: p.Private(), UsedBy: []string{}}
 	}
 	entries, err := s.lib.List()
 	if err != nil {
-		return v
+		return out
 	}
 	for _, e := range entries {
 		if e.Error != "" {
@@ -253,18 +223,156 @@ func (s *Server) catalogView(c *Catalog) CatalogView {
 		if err != nil || h.Spec.Model == nil {
 			continue
 		}
-		for i, m := range c.Models {
-			if ep, _ := c.Endpoint(m.Endpoint); h.Spec.Model.Name == m.ID && h.Spec.Model.Endpoint == ep.URL {
-				v.UsedBy[i] = append(v.UsedBy[i], e.Name)
+		for i := range out {
+			if strings.TrimSuffix(h.Spec.Model.Endpoint, "/") == strings.TrimSuffix(out[i].URL, "/") {
+				out[i].UsedBy = append(out[i].UsedBy, e.Name)
 			}
 		}
 	}
-	for i := range v.UsedBy {
-		if v.UsedBy[i] == nil {
-			v.UsedBy[i] = []string{}
-		}
+	return out
+}
+
+// ProviderModel is a model a provider offers.
+type ProviderModel struct {
+	ID    string `json:"id"`
+	Label string `json:"label,omitempty"`
+}
+
+// providerModels asks a provider which models it has.
+func (s *Server) providerModels(w http.ResponseWriter, r *http.Request) {
+	s.modelsMu.Lock()
+	c, err := LoadCatalog(s.modelsPath())
+	s.modelsMu.Unlock()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
-	return v
+	p, ok := c.Provider(r.PathValue("name"))
+	if !ok {
+		writeError(w, http.StatusNotFound, errNotFound("no provider called "+r.PathValue("name")))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), providerTimeout)
+	defer cancel()
+	models, err := s.fetchModels(ctx, p)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("asking %s for its models: %s", p.Name, safetext.Line(err.Error())))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+}
+
+// fetchModels lists a provider's models: GET <url>/v1/models (Anthropic's
+// and OpenAI-style APIs), or Ollama's /api/tags.
+func (s *Server) fetchModels(ctx context.Context, p Provider) ([]ProviderModel, error) {
+	base := strings.TrimSuffix(p.URL, "/")
+	header, value, err := s.providerAuth(p)
+	if err != nil {
+		return nil, err
+	}
+	get := func(path string) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		if header != "" {
+			req.Header.Set(header, value)
+		}
+		if p.Type == "anthropic" {
+			req.Header.Set("anthropic-version", "2023-06-01")
+		}
+		return s.providerClient.Do(req)
+	}
+	resp, err := get("/v1/models")
+	if err == nil && resp.StatusCode == http.StatusNotFound && p.Type == "ollama" {
+		_ = resp.Body.Close()
+		resp, err = get("/api/tags")
+	}
+	if err != nil {
+		return nil, errors.New("the provider does not answer")
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxModelsBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxModelsBody {
+		return nil, errors.New("its answer is too large")
+	}
+	switch {
+	case (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && header == "":
+		return nil, fmt.Errorf("it wants a credential (%s): add its key on the Credentials page and choose it for this provider", resp.Status)
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return nil, fmt.Errorf("it refused the credential (%s)", resp.Status)
+	case resp.StatusCode != http.StatusOK:
+		return nil, fmt.Errorf("it answered %s", resp.Status)
+	}
+	var list struct {
+		Data []struct {
+			ID          string `json:"id"`
+			DisplayName string `json:"display_name"`
+		} `json:"data"`
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, errors.New("its answer is not a model list")
+	}
+	var out []ProviderModel
+	for _, d := range list.Data {
+		out = append(out, ProviderModel{ID: d.ID, Label: d.DisplayName})
+	}
+	for _, m := range list.Models {
+		out = append(out, ProviderModel{ID: m.Name})
+	}
+	// Only what a harness could use, once each.
+	out = slices.DeleteFunc(out, func(m ProviderModel) bool {
+		return spec.ValidateModel(&spec.Model{Name: m.ID, Endpoint: "https://a.example"}, false) != nil
+	})
+	slices.SortFunc(out, func(a, b ProviderModel) int { return strings.Compare(a.ID, b.ID) })
+	out = slices.CompactFunc(out, func(a, b ProviderModel) bool { return a.ID == b.ID })
+	for i := range out {
+		out[i].Label = safetext.Line(out[i].Label)
+	}
+	if len(out) > maxProviderModels {
+		out = out[:maxProviderModels]
+	}
+	if out == nil {
+		out = []ProviderModel{}
+	}
+	return out, nil
+}
+
+// providerAuth is the header a provider's models are asked with: its
+// credential from the store, but only if that credential may go to the
+// provider's host and port (never anywhere else).
+func (s *Server) providerAuth(p Provider) (header, value string, err error) {
+	if p.Credential == "" {
+		return "", "", nil
+	}
+	e, secret, held, err := s.storedCredential(p.Credential)
+	if err != nil {
+		return "", "", err
+	}
+	if !held {
+		return "", "", fmt.Errorf("the credential %s is not on the Credentials page", p.Credential)
+	}
+	scheme, host, port := (&spec.Model{Endpoint: p.URL}).EndpointHostPort()
+	if scheme != e.Scheme || port != e.Port || !slices.Contains(e.Hosts, host) {
+		return "", "", fmt.Errorf("the credential %s is not for %s://%s:%d", p.Credential, scheme, host, port)
+	}
+	return e.Header, e.Prefix + secret, nil
+}
+
+// newProviderClient asks providers: bounded in time, and never following
+// a redirect (which could carry the credential elsewhere).
+func newProviderClient() *http.Client {
+	return &http.Client{
+		Timeout:       providerTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 // splitLines is a joined error's messages.
