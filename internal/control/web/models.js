@@ -1,6 +1,7 @@
-// Models: the connections to the services models run at (Anthropic,
-// Ollama, oMLX, LiteLLM …), laid out like Open WebUI's Connections, and
-// the models they offer. A connection's key is typed right in its dialog
+// Connections: the services models run at (Anthropic, Ollama, oMLX,
+// LiteLLM …), laid out like Open WebUI's Connections. A harness picks a
+// connection and then one of its models (harness form); here they are
+// added, checked, and turned on or off. A connection's key is typed right in its dialog
 // and kept as a secret that goes only to that connection's address; the
 // agent never sees it. Claude Code speaks Anthropic's Messages API, so a
 // connection must offer it.
@@ -34,11 +35,10 @@ export async function modelsView(ui) {
   const { h, api, set, show, fail } = ui;
   const page = { ui, providers: [], credentials: [] };
   const connections = h("section", { class: "card" });
-  const models = h("section", { class: "card" });
   show(
-    h("div", { class: "head" }, h("div", {}, h("h1", {}, "Models"),
-      h("p", { class: "muted" }, "The connections your agents' models are reached through, and the models they offer. The agent (Claude Code) talks Anthropic's Messages API: Anthropic, Ollama, oMLX, LiteLLM, LM Studio and OpenRouter offer it."))),
-    h("div", { class: "stack" }, connections, models));
+    h("div", { class: "head" }, h("div", {}, h("h1", {}, "Connections"),
+      h("p", { class: "muted" }, "The services your agents' models run at. A harness picks one of them and then one of its models. The agent (Claude Code) talks Anthropic's Messages API: Anthropic, Ollama, oMLX, LiteLLM, LM Studio and OpenRouter offer it."))),
+    connections);
   page.render = () => {
     set(connections,
       h("div", { class: "card-head" }, h("h2", {}, "Connections"),
@@ -46,7 +46,6 @@ export async function modelsView(ui) {
       page.providers.length === 0
         ? h("p", { class: "muted" }, "No connections yet. Add the service your models run at with +.")
         : h("div", { class: "list" }, page.providers.map((p, i) => connectionRow(page, p, i))));
-    loadModels(page, models);
   };
   page.reload = async () => {
     try {
@@ -84,30 +83,6 @@ function connectionRow(page, p, index) {
       next[index].disabled = !on || undefined;
       save(page, next).then((err) => err && page.ui.fail(err));
     }, (p.disabled ? "Enable " : "Disable ") + p.name));
-}
-
-// loadModels lists the models of every enabled connection.
-async function loadModels(page, box) {
-  const { h, api, set } = page.ui;
-  const on = page.providers.filter((p) => !p.disabled);
-  set(box, h("div", { class: "card-head" }, h("h2", {}, "Models")),
-    on.length === 0 ? h("p", { class: "muted" }, "Models appear here once a connection is on.") : h("p", { class: "muted" }, "Asking the connections…"));
-  if (on.length === 0) return;
-  const results = await Promise.all(on.map((p) => api("POST", "/api/providers/" + encodeURIComponent(p.name) + "/models")
-    .then((r) => ({ p, models: r.models }), (err) => ({ p, error: err.message }))));
-  const rows = [];
-  for (const r of results) {
-    if (r.error) {
-      rows.push(h("div", { class: "list-row" }, h("div", { class: "list-main" }, h("strong", {}, r.p.name), h("div", { class: "error-text small" }, r.error))));
-      continue;
-    }
-    for (const m of r.models) {
-      rows.push(h("div", { class: "list-row" }, h("div", { class: "list-main" }, h("span", { class: "mono" }, m.id), m.label && h("span", { class: "muted small" }, "  " + m.label)),
-        h("div", { class: "muted small" }, r.p.name)));
-    }
-  }
-  set(box, h("div", { class: "card-head" }, h("h2", {}, "Models")),
-    rows.length === 0 ? h("p", { class: "muted" }, "The connections offer no models.") : h("div", { class: "list" }, rows));
 }
 
 const plain = (p) => {

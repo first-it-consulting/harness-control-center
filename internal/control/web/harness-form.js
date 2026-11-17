@@ -3,7 +3,7 @@
 // server turns it into YAML and checks it (POST /api/harness/encode), so
 // the panel on the right always explains exactly what would be saved.
 //
-// Picking a model from the Models page copies it in, and grants what
+// Picking a connection and a model copies them in, and grants what
 // reaching it needs (its credential, its host and port, the own network
 // for a model server there), saying so next to the choice.
 
@@ -346,12 +346,12 @@ function model(ed) {
   const providers = ed.ctx.providers;
   const m = get(ed.doc, "spec.model");
   const current = providerOf(ed);
-  // Connections switched off on the Models page are not offered (unless
+  // Connections switched off on the Connections page are not offered (unless
   // this harness uses one already).
   const opts = [["", "The runtime's default"], ...providers.filter((p) => !p.disabled || p === current).map((p) => [p.name, p.name + " (" + p.url + ")"])];
   let value = current ? current.name : "";
   if (m && !current) {
-    opts.push(["custom", m.endpoint + " (not a provider on the Models page)"]);
+    opts.push(["custom", m.endpoint + " (not on the Connections page)"]);
     value = "custom";
   }
   const providerSel = h("select", {}, opts.map(([v, l]) => h("option", { value: v, selected: v === value }, l)));
@@ -360,8 +360,8 @@ function model(ed) {
     applyProvider(ed, providers.find((p) => p.name === providerSel.value) || null);
     changed(ed, true);
   });
-  const out = [h("label", {}, "Provider", providerSel,
-    providers.length === 0 ? help(h, "Add your model providers on the Models page to choose them here.") : help(h, "Where the model runs."))];
+  const out = [h("label", {}, "Connection", providerSel,
+    providers.length === 0 ? help(h, "Add the services your models run at on the Connections page to choose them here.") : help(h, "Where the model runs."))];
   if (!m) return out;
 
   // The model: from the provider's list, or typed.
