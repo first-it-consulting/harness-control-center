@@ -463,3 +463,71 @@ func TestE2EToolsUnknownFile(t *testing.T) {
 	}
 	e.assertNoTrace(t, id)
 }
+
+const fwdHarness = `
+apiVersion: hcc/v1alpha1
+kind: Harness
+metadata: {name: e2e-fwd}
+spec:
+  runtime: claude-code
+  prompt: probe direct TCP
+  permissions:
+    network:
+      egress:
+        - host: example.com
+          ports: [80]
+`
+
+// TestE2EForward (ADR-0021): a program without proxy support (nc) reaches
+// an allowed host and port through the guest's forwarder and the egress
+// proxy; another port of that host, and a host not allowed, stay closed.
+func TestE2EForward(t *testing.T) {
+	e := setupE2E(t)
+	if e.network == nil {
+		t.Skip("the runner configuration has no network section")
+	}
+	h, err := spec.Parse([]byte(fwdHarness))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := policy.New(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := json.Marshal(map[string]any{
+		"runtime": "claude-code", "prompt": "probe",
+		"forward": []map[string]any{{"host": "example.com", "addr": "127.77.0.1", "ports": []int{80}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proxyLog console
+	id := fmt.Sprintf("e2e-fwd-%d", time.Now().UnixNano())
+	sp := sandbox.Spec{ID: id, Image: "claude-code", CPUs: 1, MemoryMiB: 512, Timeout: 2 * time.Minute,
+		Task: task, BootArgs: []string{"hcc.mode=fwdtest"}}
+	sp.Network = &sandbox.Network{Proxy: &egress.Proxy{
+		Policy: engine, Blocked: []netip.Prefix{e.network.Subnet}, JobID: id,
+		Log: slog.New(slog.NewTextHandler(&proxyLog, nil)),
+	}}
+	var c console
+	res, err := e.provider.Run(context.Background(), sp, &c)
+	if err != nil || res.Outcome != sandbox.OutcomeExited {
+		t.Fatalf("Run = %v, %v\nconsole:\n%s", res.Outcome, err, c.String())
+	}
+	out := c.String()
+	for marker, expect := range map[string]string{
+		"HCC-FWD-HOSTS":     "1",
+		"HCC-FWD-ALLOWED":   "HTTP/1.",
+		"HCC-FWD-OTHERPORT": "blocked",
+		"HCC-FWD-DENIED":    "blocked",
+	} {
+		if line := consoleLine(out, marker); !strings.Contains(line, expect) {
+			t.Errorf("%s: got %q, want it to contain %q", marker, line, expect)
+		}
+	}
+	if !strings.Contains(proxyLog.String(), "host=example.com port=80") {
+		t.Errorf("the tunnel did not go through the proxy:\n%s", proxyLog.String())
+	}
+	e.assertNoTrace(t, id)
+	t.Logf("console:\n%s", out)
+}
