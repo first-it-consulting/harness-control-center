@@ -756,3 +756,35 @@ func vFlagClassProblem(pat string) string {
 	}
 	return ""
 }
+
+// Saving never replaces another harness by accident: the editor says
+// which harness it opened, and a different name that is taken is refused.
+func TestSaveHarnessRefusesReplacingAnother(t *testing.T) {
+	ts := newTestServer(t)
+	put := func(body map[string]any) (int, map[string]any) {
+		var out map[string]any
+		return ts.do(http.MethodPut, "/api/harnesses", body, &out), out
+	}
+	if code, out := put(map[string]any{"yaml": okHarness, "replaces": ""}); code != http.StatusOK {
+		t.Fatalf("new harness: %d %v", code, out)
+	}
+	// A new harness (or a copy) under a taken name.
+	if code, out := put(map[string]any{"yaml": okHarness, "replaces": ""}); code != http.StatusConflict || out["exists"] != "hello" {
+		t.Errorf("replaced another harness: %d %v", code, out)
+	}
+	if code, out := put(map[string]any{"yaml": okHarness, "replaces": "other"}); code != http.StatusConflict {
+		t.Errorf("renamed onto another harness: %d %v", code, out)
+	}
+	// Saving the harness that was opened, or replacing after confirming.
+	if code, out := put(map[string]any{"yaml": okHarness, "replaces": "hello"}); code != http.StatusOK {
+		t.Errorf("saving the opened harness: %d %v", code, out)
+	}
+	// Callers that do not say (the API before replaces) still replace.
+	if code, out := put(map[string]any{"yaml": okHarness}); code != http.StatusOK {
+		t.Errorf("without replaces: %d %v", code, out)
+	}
+	// An invalid harness is still reported as invalid, not as a conflict.
+	if code, _ := put(map[string]any{"yaml": "kind: Nope", "replaces": ""}); code != http.StatusBadRequest {
+		t.Errorf("invalid harness: %d", code)
+	}
+}

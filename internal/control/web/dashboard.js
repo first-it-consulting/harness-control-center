@@ -116,7 +116,7 @@ export async function dashboardView(ui) {
     savePrefs({ range: range.id, runner: runnerFilter });
     render();
   } }, r.label));
-  const runnerSelect = h("select", { "aria-label": "Runner", onchange: () => {
+  const runnerSelect = h("select", { name: "runner", "aria-label": "Runner", onchange: () => {
     runnerFilter = runnerSelect.value;
     savePrefs({ range: range.id, runner: runnerFilter });
     render();
@@ -177,11 +177,11 @@ export async function dashboardView(ui) {
       items.push(["warning", approvals.length + (approvals.length === 1 ? " request waits" : " requests wait") + " for your decision (shown at the top of every page)."]);
     }
     for (const r of runners) {
-      if (!r.status) items.push(["critical", "Runner " + r.name + " is unreachable.", "#/runners"]);
-      else if (r.status.killed) items.push(["critical", "Runner " + r.name + " is stopped (kill switch): it refuses new jobs.", "#/runners"]);
+      if (!r.status) items.push(["critical", "Runner " + r.name + " is unreachable.", "#/runner/" + encodeURIComponent(r.name)]);
+      else if (r.status.killed) items.push(["critical", "Runner " + r.name + " is stopped (kill switch): it refuses new jobs.", "#/runner/" + encodeURIComponent(r.name)]);
     }
     const failed = jobs.filter((j) => j.state === "failed").length;
-    if (failed > 0) items.push(["critical", failed + (failed === 1 ? " job" : " jobs") + " failed in this range.", "#/jobs"]);
+    if (failed > 0) items.push(["critical", failed + (failed === 1 ? " job" : " jobs") + " failed in this range.", "#/jobs/failed"]);
     const paused = data.schedules.filter((s) => mine2(s) && s.state === "paused").length;
     if (paused > 0) items.push(["warning", paused + (paused === 1 ? " schedule is" : " schedules are") + " paused.", "#/schedules"]);
     if (items.length === 0) {
@@ -208,6 +208,7 @@ export async function dashboardView(ui) {
     const finished = jobs.filter((j) => OUTCOME_OF[j.state] && OUTCOME_OF[j.state] !== "active");
     const ok = finished.filter((j) => j.state === "succeeded").length;
     const failed = finished.filter((j) => j.state === "failed").length;
+    const stopped = finished.length - ok - failed; // timed out, over budget, cancelled
     const t = jobs.map(tokens).reduce((a, b) => ({ in: a.in + b.in, out: a.out + b.out, cost: a.cost + (b.priced ? b.cost : 0), unpriced: a.unpriced + (b.priced ? 0 : 1) }), { in: 0, out: 0, cost: 0, unpriced: 0 });
     const scheduled = jobs.filter((j) => j.schedule).length;
     const tile = (label, value, sub) => h("div", { class: "tile" }, h("div", { class: "tile-label" }, label), h("div", { class: "tile-value" }, value), h("div", { class: "tile-sub muted" }, sub));
@@ -215,7 +216,7 @@ export async function dashboardView(ui) {
       tile("Running now", String(active), queued + " queued · " + slots + " slots"),
       tile("Jobs", jobs.length.toLocaleString(), scheduled + " started by schedules"),
       tile("Success rate", finished.length ? Math.round((ok / finished.length) * 100) + "%" : "–",
-        finished.length ? ok + " of " + finished.length + " finished · " + failed + " failed" : "no finished jobs"),
+        finished.length ? ok + " of " + finished.length + " succeeded · " + failed + " failed" + (stopped ? " · " + stopped + " stopped" : "") : "no finished jobs"),
       tile("Tokens", compact(t.in + t.out), compact(t.in) + " in · " + compact(t.out) + " out"),
       tile("Cost", "$" + t.cost.toFixed(2), t.unpriced ? t.unpriced + (t.unpriced === 1 ? " job" : " jobs") + " on models without a price" : "all models priced"));
   }
@@ -427,7 +428,7 @@ export async function dashboardView(ui) {
       h("tbody", {}, runners.map((r) => {
         const st = r.status;
         return h("tr", {},
-          h("td", {}, h("a", { href: "#/runners" }, r.name)),
+          h("td", {}, h("a", { href: "#/runner/" + encodeURIComponent(r.name) }, r.name)),
           h("td", {}, st ? (st.killed ? badge("stopped", "killed") : badge("ready", "succeeded")) : badge("unreachable", "failed")),
           h("td", { class: "num" }, st ? st.running + " of " + st.maxConcurrent + (st.queued ? " (+" + st.queued + " queued)" : "") : "–"),
           h("td", {}, st ? fmtTime(st.lastContact) : "–"));

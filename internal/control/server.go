@@ -959,10 +959,30 @@ func (s *Server) harness(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"yaml": string(data), "check": c})
 }
 
+// saveBody is a harness to save. Replaces, when sent, names the harness
+// the editor opened ("" for a new one): saving under a different name that
+// is taken is refused (409), so a copy or a new harness never silently
+// replaces another one. Without it the save replaces as before.
+type saveBody struct {
+	YAML     string  `json:"yaml"`
+	Replaces *string `json:"replaces,omitempty"`
+}
+
 func (s *Server) saveHarness(w http.ResponseWriter, r *http.Request) {
-	var b yamlBody
+	var b saveBody
 	if !readJSON(w, r, &b) {
 		return
+	}
+	if b.Replaces != nil {
+		if h, err := spec.Parse([]byte(b.YAML)); err == nil && h.Metadata.Name != *b.Replaces {
+			if _, err := s.lib.Get(h.Metadata.Name); err == nil {
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error":  "a harness named " + h.Metadata.Name + " already exists",
+					"exists": h.Metadata.Name,
+				})
+				return
+			}
+		}
 	}
 	name, err := s.lib.Put([]byte(b.YAML))
 	if err != nil {

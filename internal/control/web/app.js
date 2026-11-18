@@ -22,8 +22,7 @@ const TEMPLATE = `# A new harness. Everything not written here is denied:
 apiVersion: hcc/v1alpha1
 kind: Harness
 metadata:
-  name: my-harness
-  description: What this agent should do.
+  name: NAME
 spec:
   runtime: claude-code
   prompt: Write a haiku about sandboxes to haiku.txt.
@@ -97,9 +96,12 @@ function h(tag, attrs, ...children) {
       el.setAttribute(k, String(v));
     }
   }
+  // Form fields need a name or id (autofill, tools); give one if missing.
+  if ((tag === "input" || tag === "select" || tag === "textarea") && !el.name && !el.id) el.name = "f" + ++fieldSeq;
   append(el, children);
   return el;
 }
+let fieldSeq = 0;
 
 function append(el, children) {
   for (const c of children.flat()) {
@@ -196,7 +198,7 @@ function route() {
   }
   const routes = {
     dashboard: () => dashboardView({ h, api, set, show, every, fail, say, badge, fmtTime, fmtDuration, localPanel }),
-    jobs: () => jobsView(),
+    jobs: () => jobsView(parts[1] || ""),
     job: () => jobView(parts[1], parts[2]),
     harnesses: () => harnessesView(),
     harness: () => harnessView(parts[1]),
@@ -208,7 +210,9 @@ function route() {
     network: () => networkView({ h, api, set, show, fail, say, badge }),
     schedules: () => schedulesView(),
   };
-  (routes[parts[0]] || routes.dashboard)();
+  if (parts[0] === "") routes.dashboard();
+  else if (routes[parts[0]]) routes[parts[0]]();
+  else notFoundView();
   view.focus();
 }
 
@@ -220,13 +224,30 @@ function every(ms, fn) {
 
 // --- jobs ---
 
-async function jobsView() {
+function notFoundView() {
+  show(h("div", { class: "empty" }, h("h1", {}, "Page not found"),
+    h("p", { class: "muted" }, "There is no page at this address."), h("a", { class: "button primary", href: "#/dashboard" }, "Go to the Dashboard")));
+}
+
+// JOB_FILTERS are the Jobs page's views (#/jobs/<id>).
+const JOB_FILTERS = [
+  ["", "All jobs", () => true],
+  ["failed", "Failed", (j) => j.state === "failed"],
+  ["stopped", "Stopped (time, budget, cancelled)", (j) => ["timed_out", "over_budget", "cancelled"].includes(j.state)],
+  ["active", "Running or waiting", (j) => !TERMINAL.has(j.state)],
+  ["succeeded", "Succeeded", (j) => j.state === "succeeded"],
+];
+
+async function jobsView(filter) {
+  const chosen = JOB_FILTERS.find(([id]) => id === filter) || JOB_FILTERS[0];
+  const show_ = h("select", { name: "jobs-filter", "aria-label": "Show", onchange: (e) => { location.hash = "#/jobs" + (e.target.value ? "/" + e.target.value : ""); } },
+    JOB_FILTERS.map(([id, label]) => h("option", { value: id, selected: id === chosen[0] }, label)));
   const body = h("tbody");
   const errors = h("div");
   show(
     h("div", { class: "head" },
       h("div", {}, h("h1", {}, "Jobs"), h("p", { class: "muted" }, "Every run on every runner, newest first.")),
-      h("div", { class: "actions" }, h("a", { class: "button primary", href: "#/harnesses" }, "Start a harness"))),
+      h("div", { class: "actions" }, h("label", { class: "inline" }, "Show ", show_), h("a", { class: "button primary", href: "#/harnesses" }, "Start a harness"))),
     errors,
     h("div", { class: "table-wrap" }, h("table", {},
       h("thead", {}, h("tr", {}, ["State", "Harness", "Runner", "Started", "Duration", "Usage", "Results", "Detail"].map((t) => h("th", {}, t)))),
@@ -236,11 +257,12 @@ async function jobsView() {
       const data = await api("GET", "/api/jobs");
       set(errors, ...Object.entries(data.errors).map(([r, e]) =>
         h("div", { class: "error-box" }, "Runner " + r + " is unreachable: " + e)));
-      if (data.jobs.length === 0) {
-        set(body, h("tr", {}, h("td", { colspan: 8, class: "muted" }, "No jobs yet.")));
+      const jobs = data.jobs.filter(chosen[2]);
+      if (jobs.length === 0) {
+        set(body, h("tr", {}, h("td", { colspan: 8, class: "muted" }, data.jobs.length === 0 ? "No jobs yet." : "No jobs to show here.")));
         return;
       }
-      set(body, ...data.jobs.map((j) => {
+      set(body, ...jobs.map((j) => {
         const href = "#/job/" + encodeURIComponent(j.runner) + "/" + encodeURIComponent(j.id);
         return h("tr", { class: "link", onclick: () => { location.hash = href; } },
           h("td", {}, badge(j.state)),
@@ -248,8 +270,8 @@ async function jobsView() {
           h("td", {}, j.runner),
           h("td", {}, fmtTime(j.started || j.created)),
           h("td", {}, fmtDuration(j.started, j.finished)),
-          h("td", {}, fmtUsage(j.usage)),
-          h("td", {}, j.results && j.results.files > 0 ? plural(j.results.files, "file") : "–"),
+          h("td", { title: j.usage ? undefined : "No usage recorded: the job used no model, or the runner no longer has its details" }, fmtUsage(j.usage)),
+          h("td", { title: j.results && j.results.files > 0 ? undefined : "No files handed back" }, j.results && j.results.files > 0 ? plural(j.results.files, "file") : "–"),
           h("td", { class: "detail" }, j.error || ""));
       }));
     } catch (err) {
@@ -267,7 +289,7 @@ async function jobView(runner, id) {
   const helpers = h("div");
   const consoleText = h("pre", { class: "console" }, "Loading…");
   show(head, h("div", { class: "card" }, facts), helpers, results, h("h2", {}, "Console"),
-    h("p", { class: "muted" }, "What the agent printed. Control characters are shown visibly."), consoleText);
+    h("p", { class: "muted" }, "What the sandbox printed while the job ran: the virtual machine starting, then the agent. Control characters are shown visibly."), consoleText);
   const jobPath = "/api/runners/" + encodeURIComponent(runner) + "/jobs/" + encodeURIComponent(id);
 
   const load = async () => {
@@ -396,8 +418,16 @@ async function harnessesView() {
   }
 }
 
-function harnessView(name) {
-  return harnessEditor({ h, api, set, show, fail, say, runDialog, checkBlock }, name, TEMPLATE);
+async function harnessView(name) {
+  let template = "";
+  if (!name) {
+    // A name no harness has yet, so saving the template never replaces one.
+    const taken = new Set(await api("GET", "/api/harnesses").then((l) => l.map((e) => e.name)).catch(() => []));
+    let n = "new-harness";
+    for (let i = 2; taken.has(n); i++) n = "new-harness-" + i;
+    template = TEMPLATE.replace("name: NAME", "name: " + n);
+  }
+  return harnessEditor({ h, api, set, show, fail, say, runDialog, checkBlock }, name, template);
 }
 
 function checkBlock(c) {
@@ -498,7 +528,7 @@ async function schedulesView() {
     h("div", { class: "head" },
       h("div", {}, h("h1", {}, "Schedules"),
         h("p", { class: "muted" }, "Harnesses with a trigger run on their own. Times are UTC on the runner; shown here in your time.")),
-      h("div", { class: "actions" }, h("a", { class: "button primary", href: "#/harnesses" }, "Add one from a harness"))),
+      h("div", { class: "actions" }, h("a", { class: "button primary", href: "#/harnesses", title: "Open a harness and set \"When it runs\" to a schedule" }, "Choose a harness to schedule"))),
     errors,
     h("div", { class: "table-wrap" }, h("table", {},
       h("thead", {}, h("tr", {}, ["State", "Harness", "Runner", "When", "Runs", "Next run", "Last run", "Detail", ""].map((t) => h("th", {}, t)))),
@@ -555,7 +585,7 @@ function scheduleRow(s) {
 // runnerFields returns the inputs for a runner entry, filled from ref, and
 // a function that reads them back.
 function runnerFields(ref) {
-  const name = h("input", { required: true, placeholder: "hcc-dev", pattern: "[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?" });
+  const name = h("input", { required: true, placeholder: "build-box", pattern: "[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?" });
   const kind = h("select", {}, h("option", { value: "ssh" }, "over ssh"), h("option", { value: "socket" }, "on this computer"));
   // Over ssh, a host from your ssh configuration, or any other you type.
   const other = ""; // no ssh alias is empty
