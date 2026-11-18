@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/first-it-consulting/harness-control-center/internal/runnerd"
 	"github.com/first-it-consulting/harness-control-center/internal/safetext"
 )
 
@@ -225,7 +226,7 @@ func (m *runnerInstaller) install(ref RunnerRef, st *runnerInstallState, passwor
 	m.logf(st, "Uploading the installer to %s…", ref.SSH)
 	// A fresh directory of the user's on the host, for this install only.
 	var dirOut bytes.Buffer
-	if err := m.runCommand(ctx, root, "ssh", []string{"-T", "-o", "BatchMode=yes", "--", ref.SSH, `mktemp -d "$HOME/hcc-install.XXXXXXXXXX"`}, nil, nil, &dirOut); err != nil {
+	if err := m.runCommand(ctx, root, "ssh", runnerd.SSHArgs("-T", "--", ref.SSH, `mktemp -d "$HOME/hcc-install.XXXXXXXXXX"`), nil, nil, &dirOut); err != nil {
 		return fmt.Errorf("prepare %s: %w", ref.SSH, err)
 	}
 	dir := strings.TrimSpace(dirOut.String())
@@ -235,7 +236,7 @@ func (m *runnerInstaller) install(ref RunnerRef, st *runnerInstallState, passwor
 	files := []string{filepath.Join(tmp, "hcc-linux-amd64"), filepath.Join(tmp, "hcc-helper-linux-amd64"), filepath.Join(tmp, "hcc-guest-linux-amd64"),
 		filepath.Join(root, "deploy", "install-runner.sh"), filepath.Join(root, "deploy", "hcc-runner.service"), filepath.Join(root, "deploy", "sudo-askpass"),
 		filepath.Join(root, "deploy", "images")}
-	args := append([]string{"-q", "-r"}, files...)
+	args := runnerd.SSHArgs(append([]string{"-q", "-r"}, files...)...)
 	args = append(args, ref.SSH+":"+dir+"/")
 	if err := m.runCommand(ctx, root, "scp", args, nil, nil, log); err != nil {
 		return fmt.Errorf("upload to %s: %w", ref.SSH, err)
@@ -277,7 +278,7 @@ chmod 0700 "$SUDO_ASKPASS"
 		stdin = append(append([]byte(nil), password...), '\n')
 		defer clear(stdin)
 	}
-	if err := m.runCommand(ctx, root, "ssh", []string{"-T", "-o", "BatchMode=yes", "--", ref.SSH, "sh -c '" + script + "'"}, nil, stdin, log); err != nil {
+	if err := m.runCommand(ctx, root, "ssh", runnerd.SSHArgs("-T", "--", ref.SSH, "sh -c '"+script+"'"), nil, stdin, log); err != nil {
 		return fmt.Errorf("install on %s: %w", ref.SSH, err)
 	}
 	m.logf(st, "Runner %s installed. A new status check should reach it shortly.", ver)
