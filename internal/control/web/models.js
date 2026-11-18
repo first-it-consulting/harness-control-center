@@ -21,7 +21,7 @@ const typeOf = (id) => TYPES.find((t) => t.id === id) || TYPES[TYPES.length - 1]
 const AUTH = {
   none: { label: "None", header: "", prefix: "" },
   bearer: { label: "Bearer", header: "Authorization", prefix: "Bearer " },
-  apikey: { label: "API key (x-api-key)", header: "x-api-key", prefix: "" },
+  apikey: { label: "API key", header: "x-api-key", prefix: "" },
   custom: { label: "Custom header", header: "", prefix: "" },
 };
 const authOf = (c) => {
@@ -126,12 +126,19 @@ function editConnection(page, index) {
   const auth = h("select", {}, Object.entries(AUTH).map(([k, a]) => h("option", { value: k }, a.label)));
   const key = h("input", { type: "password", autocomplete: "new-password",
     placeholder: cred ? "•••••••• stored — leave empty to keep" : "the key" });
-  const eye = h("button", { type: "button", class: "icon-button", title: "Show what you typed", onclick: () => { key.type = key.type === "password" ? "text" : "password"; } }, "👁");
+  const eye = h("button", { type: "button", class: "icon-button", title: "Show the key", "aria-label": "Show the key",
+    onclick: () => {
+      const shown = key.type === "password";
+      key.type = shown ? "text" : "password";
+      eye.title = shown ? "Hide the key" : "Show the key";
+      eye.setAttribute("aria-label", eye.title);
+      eye.firstChild.className = "icon " + (shown ? "icon-eye-off" : "icon-eye");
+    } }, h("span", { class: "icon icon-eye" }));
   const customHeader = h("input", { autocomplete: "off", placeholder: "X-My-Key", pattern: "[A-Za-z0-9\\-]{1,64}" });
   const name = h("input", { required: true, pattern: "[a-z0-9]([a-z0-9\\-]{0,61}[a-z0-9])?", autocomplete: "off" });
   const local = h("input", { type: "checkbox" });
   const problem = h("div", {});
-  const keyRow = h("div", { class: "row" }, auth, key, eye);
+  const keyRow = h("div", { class: "row tight auth" }, auth, key, eye);
   const sync = () => {
     key.hidden = eye.hidden = auth.value === "none";
     customHeader.closest && (customHeader.parentElement && (customHeader.parentElement.hidden = auth.value !== "custom"));
