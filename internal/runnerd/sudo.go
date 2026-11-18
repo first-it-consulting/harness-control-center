@@ -61,7 +61,7 @@ func SudoSSH(ctx context.Context, host string, password []byte, args []string, i
 	defer clear(stdin)
 	// The user's login shell may not be sh: run the script with sh.
 	//nolint:gosec // host and args are validated above; the script is ours; "--" ends ssh's options
-	cmd := exec.CommandContext(ctx, "ssh", "-T", "-o", "BatchMode=yes", "--", host, "sh -c '"+script+"'")
+	cmd := exec.CommandContext(ctx, "ssh", SSHArgs("-T", "--", host, "sh -c '"+script+"'")...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

@@ -43,6 +43,17 @@ var (
 	remotePathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]{1,255}$`)
 )
 
+// sshOptions go on every ssh and scp to a runner host: never ask for a
+// password (BatchMode), and give up connecting after ConnectTimeout. With
+// ConnectTimeout ssh connects without blocking, which also avoids macOS
+// failing a plain blocking connect to some LAN names ("Undefined error: 0").
+var sshOptions = []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=15"}
+
+// SSHArgs returns ssh's (or scp's) options for a runner host, then rest.
+func SSHArgs(rest ...string) []string {
+	return append(append([]string(nil), sshOptions...), rest...)
+}
+
 // NewSSHClient reaches a remote daemon through ssh, using the user's ssh
 // configuration (host keys, keys, jump hosts): each connection runs
 // "hcc runner stdio" on the remote host, which relays to its local
@@ -56,8 +67,8 @@ func NewSSHClient(host, remoteSocket string) (*Client, error) {
 	}
 	return newClient(func(ctx context.Context) (net.Conn, error) {
 		//nolint:gosec // host and socket are validated above; "--" ends ssh's options
-		cmd := exec.CommandContext(ctx, "ssh", "-T", "-o", "BatchMode=yes", "--", host,
-			"hcc", "runner", "stdio", "--socket", remoteSocket)
+		cmd := exec.CommandContext(ctx, "ssh", SSHArgs("-T", "--", host,
+			"hcc", "runner", "stdio", "--socket", remoteSocket)...)
 		return commandConn(cmd)
 	}), nil
 }

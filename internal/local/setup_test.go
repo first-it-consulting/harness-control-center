@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/first-it-consulting/harness-control-center/internal/sandbox/vz"
 )
@@ -362,5 +363,69 @@ func TestServiceStop(t *testing.T) {
 	// Stopping what is not running is fine.
 	if err := s.Stop(context.Background()); err != nil {
 		t.Error(err)
+	}
+}
+
+// slowLaunchd is launchd letting go of an agent only a while after
+// bootout returned: until then print still finds it and bootstrap fails.
+type slowLaunchd struct {
+	loaded    bool
+	lingering int // print calls the agent stays after bootout
+	refusals  int // bootstraps refused after it is gone
+	calls     []string
+}
+
+func (f *slowLaunchd) run(_ context.Context, args ...string) error {
+	f.calls = append(f.calls, args[0])
+	switch args[0] {
+	case "bootout":
+		f.loaded = false
+	case "print":
+		if f.lingering > 0 {
+			f.lingering--
+			return nil
+		}
+		if !f.loaded {
+			return errors.New("not loaded")
+		}
+	case "bootstrap":
+		if f.lingering > 0 || f.refusals > 0 {
+			f.refusals--
+			return errors.New("Bootstrap failed: 5: Input/output error")
+		}
+		f.loaded = true
+	}
+	return nil
+}
+
+func TestInstallWaitsForLaunchdToLetGo(t *testing.T) {
+	dir := t.TempDir()
+	fl := &slowLaunchd{loaded: true, lingering: 3, refusals: 1}
+	var paused []time.Duration
+	s := Service{Plist: filepath.Join(dir, "x.plist"), Launchctl: fl.run, pause: func(d time.Duration) { paused = append(paused, d) }}
+	started, err := s.Install(context.Background(), "/bin/hcc", Layout{Dir: dir}, true)
+	if err != nil || !started || !fl.loaded {
+		t.Fatalf("started %v, loaded %v, err %v (calls %v)", started, fl.loaded, err, fl.calls)
+	}
+	if len(paused) != 4 { // three while it lingered, one after the refusal
+		t.Errorf("paused %v (calls %v)", paused, fl.calls)
+	}
+}
+
+func TestInstallGivesUpWhenLaunchdKeepsRefusing(t *testing.T) {
+	dir := t.TempDir()
+	fl := &slowLaunchd{refusals: 100}
+	s := Service{Plist: filepath.Join(dir, "x.plist"), Launchctl: fl.run, pause: func(time.Duration) {}}
+	if _, err := s.Install(context.Background(), "/bin/hcc", Layout{Dir: dir}, true); err == nil || !strings.Contains(err.Error(), "Input/output error") {
+		t.Fatalf("err %v", err)
+	}
+	n := 0
+	for _, c := range fl.calls {
+		if c == "bootstrap" {
+			n++
+		}
+	}
+	if n != 3 {
+		t.Errorf("%d bootstraps", n)
 	}
 }

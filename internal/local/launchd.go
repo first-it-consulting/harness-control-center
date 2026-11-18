@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
 )
 
 // ServiceLabel names the local runner's launchd agent.
@@ -22,6 +23,22 @@ type Service struct {
 	Plist string
 	// Launchctl runs launchctl (replaceable for tests).
 	Launchctl func(ctx context.Context, args ...string) error
+	// pause waits between launchctl calls (tests make it instant).
+	pause func(time.Duration)
+}
+
+// wait pauses for d, or less if ctx ends.
+func (s Service) wait(ctx context.Context, d time.Duration) {
+	if s.pause != nil {
+		s.pause(d)
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
 }
 
 // DefaultService is the user's own agent.
@@ -105,10 +122,23 @@ func (s Service) Install(ctx context.Context, exe string, l Layout, restart bool
 		return false, err
 	}
 	_ = s.Launchctl(ctx, "bootout", serviceTarget()) // not loaded is fine
-	if err := s.Launchctl(ctx, "bootstrap", domain(), s.Plist); err != nil {
-		return false, err
+	// bootout returns before launchd has let go of the agent, and a
+	// bootstrap that comes too soon fails ("Bootstrap failed: 5:
+	// Input/output error"), leaving the runner stopped. Wait until it is
+	// gone, and try the bootstrap again if launchd still refuses it.
+	for i := 0; i < 40 && s.Running(ctx); i++ {
+		s.wait(ctx, 250*time.Millisecond)
 	}
-	return true, nil
+	for try := 0; try < 3; try++ {
+		if err = s.Launchctl(ctx, "bootstrap", domain(), s.Plist); err == nil {
+			return true, nil
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		s.wait(ctx, time.Second)
+	}
+	return false, err
 }
 
 // Running reports whether launchd has the agent loaded.
