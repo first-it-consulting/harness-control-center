@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.1.3](https://github.com/first-it-consulting/harness-control-center/compare/v0.1.2...v0.1.3) (2026-11-18)
+
+
+### Features
+
+* **guest:** programs without proxy support reach the allowed hosts ([#31](https://github.com/first-it-consulting/harness-control-center/issues/31)) ([6633c87](https://github.com/first-it-consulting/harness-control-center/commit/6633c87912466abf052af3ab4de6e73114b02456))
+* hand secrets to the agent explicitly (ADR-0020) ([#30](https://github.com/first-it-consulting/harness-control-center/issues/30)) ([c998184](https://github.com/first-it-consulting/harness-control-center/commit/c99818411c0ee2b81c933bd868024e86f9cdec61))
+* **spec:** small model, output and thinking limits for a harness's model ([#22](https://github.com/first-it-consulting/harness-control-center/issues/22)) ([e812056](https://github.com/first-it-consulting/harness-control-center/commit/e812056f3b1485a974b2f3c12413ba6b13d8159c))
+* **web:** a Models page for endpoints and models ([#23](https://github.com/first-it-consulting/harness-control-center/issues/23)) ([787b4fb](https://github.com/first-it-consulting/harness-control-center/commit/787b4fbbd34abf77a1f7d9a9c4db9f2766795e77))
+* **web:** change a runner's settings from the Control Center ([#19](https://github.com/first-it-consulting/harness-control-center/issues/19)) ([1baa6db](https://github.com/first-it-consulting/harness-control-center/commit/1baa6db9deb0cb3ae0ae4baedee40fed8e0a8852))
+* **web:** change a runner's tools from its page ([#29](https://github.com/first-it-consulting/harness-control-center/issues/29)) ([3b90713](https://github.com/first-it-consulting/harness-control-center/commit/3b90713cf7b4d83b2c38801b6cb6c1272b17b4c9))
+* **web:** edit a harness in a form, with YAML as a second tab ([#24](https://github.com/first-it-consulting/harness-control-center/issues/24)) ([4992dc5](https://github.com/first-it-consulting/harness-control-center/commit/4992dc5102b5e85ccc8ea085f4d819b56cd90ebf))
+* **web:** keep credentials in the Control Center and copy them to runners ([#26](https://github.com/first-it-consulting/harness-control-center/issues/26)) ([2afca0d](https://github.com/first-it-consulting/harness-control-center/commit/2afca0d6537d89558f2bb97b1ae18f921dcf6185))
+* **web:** model providers instead of a model list ([#27](https://github.com/first-it-consulting/harness-control-center/issues/27)) ([11b05ab](https://github.com/first-it-consulting/harness-control-center/commit/11b05abb312f62fc26e453a6fe631feef2ce3c04))
+* **web:** network policies to attach to harnesses ([#28](https://github.com/first-it-consulting/harness-control-center/issues/28)) ([88b6818](https://github.com/first-it-consulting/harness-control-center/commit/88b68183d73bbdcdf2b80cd4b16c2278e791f54d))
+* **web:** runner cards that open a page per runner ([#25](https://github.com/first-it-consulting/harness-control-center/issues/25)) ([10e7796](https://github.com/first-it-consulting/harness-control-center/commit/10e7796c55dfd0474efc533b2c19053550aebe10))
+* **web:** secrets and variables, laid out like GitHub's page ([#32](https://github.com/first-it-consulting/harness-control-center/issues/32)) ([24e4f6b](https://github.com/first-it-consulting/harness-control-center/commit/24e4f6b3a2ac0ef760658732c868f85368686b07))
+* **web:** the Models page as connections, like Open WebUI ([#33](https://github.com/first-it-consulting/harness-control-center/issues/33)) ([2fe90be](https://github.com/first-it-consulting/harness-control-center/commit/2fe90be013ea1d85cee2f43cb5a3af981d47d1ac))
+
+
+### Bug Fixes
+
+* reach runners on Macs, and restart the local runner reliably ([#37](https://github.com/first-it-consulting/harness-control-center/issues/37)) ([519c7cf](https://github.com/first-it-consulting/harness-control-center/commit/519c7cf150d5405fc0b511b197b3bbcc6266c910))
+* **runner:** rebuild the image only when it changes; show catalog progress ([#20](https://github.com/first-it-consulting/harness-control-center/issues/20)) ([2b718e1](https://github.com/first-it-consulting/harness-control-center/commit/2b718e1d0a4bea7cfd9369e4fd9ef2f2b010b2e5))
+* **web:** a standard eye icon and one-line auth row ([#35](https://github.com/first-it-consulting/harness-control-center/issues/35)) ([89ec4e4](https://github.com/first-it-consulting/harness-control-center/commit/89ec4e46234259fce0be241a7561001cb3130dbf))
+* **web:** fixes from a UI audit ([#39](https://github.com/first-it-consulting/harness-control-center/issues/39)) ([0d29465](https://github.com/first-it-consulting/harness-control-center/commit/0d2946565acc7722ed74f2d5c3ec17cc491b1829))
+* **web:** pick the model from all of the connection's models ([#38](https://github.com/first-it-consulting/harness-control-center/issues/38)) ([9372525](https://github.com/first-it-consulting/harness-control-center/commit/9372525706648392e1a8ca6d737a033c6beeabbf))
+* **web:** the connections page lists connections only ([#34](https://github.com/first-it-consulting/harness-control-center/issues/34)) ([3406519](https://github.com/first-it-consulting/harness-control-center/commit/3406519383dd0ab69e8c53371360f724cc6888c9))
+
 ## [0.1.2](https://github.com/first-it-consulting/harness-control-center/compare/v0.1.1...v0.1.2) (2026-10-30)
 
 
