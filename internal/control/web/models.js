@@ -76,7 +76,9 @@ function connectionRow(page, p, index) {
       h("div", { class: "mono" }, p.url),
       h("div", { class: "muted small" }, [p.name, t.label, p.private ? "in your network" : null, p.credential ? "key: " + p.credential : "no key",
         p.usedBy.length > 0 ? "used by " + p.usedBy.length + " harness" + (p.usedBy.length > 1 ? "es" : "") : null].filter(Boolean).join(" · "),
-      p.url.startsWith("http://") && [" ", badge("unencrypted", "failed")])),
+      p.url.startsWith("http://") && [" ", badge("unencrypted", "failed")]),
+      p.disabled && p.usedBy.length > 0 && h("div", { class: "note warn small" },
+        "Switched off, but " + p.usedBy.join(", ") + (p.usedBy.length > 1 ? " use" : " uses") + " it: they cannot reach their model until it is on again, or they pick another connection.")),
     h("button", { class: "icon-button", title: "Edit", "aria-label": "Edit " + p.name, onclick: () => editConnection(page, index) }, "⚙"),
     toggle(page.ui, !p.disabled, (on) => {
       const next = page.providers.map(plain);

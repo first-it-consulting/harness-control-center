@@ -291,3 +291,6 @@ input.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2
 
 /* A hint that needs attention (e.g. a model the connection does not offer). */
 .note.warn { color: var(--warn); }
+
+/* A small labelled control in a page's actions (the Jobs filter). */
+.actions label.inline { display: flex; align-items: center; gap: 0.4rem; margin: 0; }

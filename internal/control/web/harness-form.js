@@ -186,7 +186,16 @@ async function save(ed) {
     await encode(ed);
   }
   try {
-    const r = await api("PUT", "/api/harnesses", { yaml: ed.yaml });
+    // replaces names the harness being edited ("" for a new one): saving
+    // under another existing name is refused unless confirmed.
+    let r;
+    try {
+      r = await api("PUT", "/api/harnesses", { yaml: ed.yaml, replaces: ed.name || "" });
+    } catch (err) {
+      if (err.status !== 409 || !err.data || !err.data.exists) throw err;
+      if (!confirm("A harness named " + err.data.exists + " already exists. Replace it with this one?")) return;
+      r = await api("PUT", "/api/harnesses", { yaml: ed.yaml, replaces: err.data.exists });
+    }
     say("Saved " + r.name + ".");
     if (r.name !== ed.name) location.hash = "#/harness/" + encodeURIComponent(r.name);
   } catch (err) {
@@ -251,7 +260,7 @@ const help = (h, t) => h("span", { class: "muted note" }, t);
 
 // text binds an input to a path.
 function text(ed, path, attrs, transform = (v) => v) {
-  const el = ed.ui.h("input", { autocomplete: "off", ...attrs, value: get(ed.doc, path) ?? "" });
+  const el = ed.ui.h("input", { autocomplete: "off", name: path, ...attrs, value: get(ed.doc, path) ?? "" });
   el.addEventListener("input", () => {
     put(ed.doc, path, transform(el.value.trim() === "" ? undefined : el.value));
     changed(ed);
@@ -268,7 +277,7 @@ function select(ed, path, options, attrs = {}, rerender = false) {
   const current = get(ed.doc, path) ?? "";
   const opts = options.slice();
   if (current !== "" && !opts.some(([v]) => String(v) === String(current))) opts.push([current, String(current)]);
-  const el = h("select", attrs, opts.map(([v, label]) => h("option", { value: String(v), selected: String(v) === String(current) }, label)));
+  const el = h("select", { name: path, ...attrs }, opts.map(([v, label]) => h("option", { value: String(v), selected: String(v) === String(current) }, label)));
   el.addEventListener("change", () => {
     put(ed.doc, path, el.value === "" ? undefined : el.value);
     changed(ed, rerender);
