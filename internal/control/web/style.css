@@ -278,3 +278,13 @@ input.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2
 .actions.spread { display: flex; justify-content: space-between; }
 .ok-text { color: var(--ok); }
 .error-text { color: var(--danger); }
+
+/* Icons from the UI's own SVG files, drawn in the text colour. */
+.icon { display: inline-block; width: 1.1rem; height: 1.1rem; background: currentColor; vertical-align: middle;
+  -webkit-mask: var(--icon) center / contain no-repeat; mask: var(--icon) center / contain no-repeat; }
+.icon-eye { --icon: url(eye.svg); }
+.icon-eye-off { --icon: url(eye-off.svg); }
+/* The auth row: a narrow choice, the key, its eye, on one line. */
+.row.tight.auth > select { flex: 0 0 9.5rem; width: 9.5rem; }
+.row.tight.auth > input { flex: 1 1 auto; min-width: 0; }
+.row.tight.auth > .icon-button { flex: 0 0 auto; }
