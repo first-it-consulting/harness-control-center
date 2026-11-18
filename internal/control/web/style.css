@@ -288,3 +288,6 @@ input.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2
 .row.tight.auth > select { flex: 0 0 9.5rem; width: 9.5rem; }
 .row.tight.auth > input { flex: 1 1 auto; min-width: 0; }
 .row.tight.auth > .icon-button { flex: 0 0 auto; }
+
+/* A hint that needs attention (e.g. a model the connection does not offer). */
+.note.warn { color: var(--warn); }

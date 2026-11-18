@@ -348,7 +348,8 @@ function model(ed) {
   const current = providerOf(ed);
   // Connections switched off on the Connections page are not offered (unless
   // this harness uses one already).
-  const opts = [["", "The runtime's default"], ...providers.filter((p) => !p.disabled || p === current).map((p) => [p.name, p.name + " (" + p.url + ")"])];
+  const opts = [["", "The runtime's default"], ...providers.filter((p) => !p.disabled || p === current)
+    .map((p) => [p.name, p.name + " (" + p.url + ")" + (p.disabled ? " — switched off" : "")])];
   let value = current ? current.name : "";
   if (m && !current) {
     opts.push(["custom", m.endpoint + " (not on the Connections page)"]);
@@ -362,25 +363,13 @@ function model(ed) {
   });
   const out = [h("label", {}, "Connection", providerSel,
     providers.length === 0 ? help(h, "Add the services your models run at on the Connections page to choose them here.") : help(h, "Where the model runs."))];
+  if (current && current.disabled) {
+    out.push(h("div", { class: "error-box" }, current.name + " is switched off on the Connections page. Switch it on there, or pick another connection."));
+  }
   if (!m) return out;
 
-  // The model: from the provider's list, or typed.
-  const listID = "provider-models";
-  const list = h("datalist", { id: listID });
-  const name = text(ed, "spec.model.name", { required: true, list: listID, placeholder: "Pick or type the model's name" });
-  const status = help(h, "");
-  if (current) {
-    status.textContent = "Asking " + current.name + " for its models…";
-    loadModels(ed, current).then((r) => {
-      if (r.error) {
-        status.textContent = "Could not list its models (" + r.error + "). Type the model's name.";
-        return;
-      }
-      list.replaceChildren(...r.models.map((x) => h("option", { value: x.id }, x.label || x.id)));
-      status.textContent = r.models.length + " models offered; click the field to choose.";
-    });
-  }
-  out.push(h("label", {}, "Model", name, list, status));
+  // The model: one of the connection's models, or typed.
+  out.push(modelPicker(ed, "spec.model.name", current, { label: "Model", required: true }));
 
   const e = endpointOf(m.endpoint);
   const granted = [e && "network access to " + e.host + ":" + e.port, m.credential && "the credential " + m.credential,
@@ -393,12 +382,70 @@ function model(ed) {
     h("div", { class: "form-stack" },
       h("label", {}, "Context window (tokens)", number(ed, "spec.model.contextWindow", { min: "8192", max: "1000000", step: "1", placeholder: "the runtime's guess" }),
         help(h, "Only for a model Claude Code does not know; it then assumes 200,000.")),
-      h("label", {}, "Model for quick side tasks", text(ed, "spec.model.smallModel", { list: listID, placeholder: "the same model" }),
-        help(h, "A faster model at the same provider for summaries and titles.")),
+      modelPicker(ed, "spec.model.smallModel", current, { label: "Model for quick side tasks", empty: "The same model",
+        hint: "A faster model at the same connection for summaries and titles." }),
       h("div", { class: "row" },
         h("label", {}, "Longest answer (tokens)", number(ed, "spec.model.maxOutputTokens", { min: "1024", max: "262144", step: "1", placeholder: "runtime default" })),
         h("label", {}, "Thinking per answer (tokens)", number(ed, "spec.model.thinkingTokens", { min: "1024", max: "262144", step: "1", placeholder: "no extended thinking" }))))));
   return out;
+}
+
+// modelPicker chooses the model at path from the connection's models: a
+// list of all of them (a text field with suggestions filters them by what
+// is typed, so it showed only the current one). A model the connection
+// does not offer stays, marked; "Other model…" lets one be typed, and
+// without a list (no connection, or it does not answer) it is typed.
+function modelPicker(ed, path, conn, { label, required = false, empty = "", hint = "" }) {
+  const { h } = ed.ui;
+  const OTHER = "\u0000other";
+  const typed = text(ed, path, { required, placeholder: "The model's name, as the connection calls it" });
+  const status = help(h, hint);
+  const wrap = h("label", {}, label, typed, status);
+  if (!conn) return wrap;
+
+  const sel = h("select", { required }, h("option", { value: get(ed.doc, path) ?? "" }, "Asking " + conn.name + " for its models…"));
+  sel.disabled = true;
+  typed.hidden = true;
+  wrap.replaceChildren(label, sel, typed, status);
+  const show = (other) => {
+    typed.hidden = !other;
+    if (other) typed.focus();
+  };
+  sel.addEventListener("change", () => {
+    if (sel.value === OTHER) {
+      show(true);
+      return;
+    }
+    show(false);
+    typed.value = sel.value;
+    put(ed.doc, path, sel.value === "" ? undefined : sel.value);
+    changed(ed);
+  });
+  loadModels(ed, conn).then((r) => {
+    const cur = get(ed.doc, path) ?? "";
+    if (r.error) {
+      wrap.replaceChildren(label, typed, status);
+      typed.hidden = false;
+      status.textContent = "Could not list " + conn.name + "'s models (" + r.error + "). Type the model's name.";
+      return;
+    }
+    const ids = r.models.map((x) => x.id);
+    const opts = [];
+    if (!required || cur === "") opts.push(h("option", { value: "" }, required ? "Choose a model…" : empty));
+    if (cur !== "" && !ids.includes(cur)) opts.push(h("option", { value: cur }, cur + " (not offered by " + conn.name + ")"));
+    opts.push(...r.models.map((x) => h("option", { value: x.id }, x.label && x.label !== x.id ? x.label + " (" + x.id + ")" : x.id)));
+    opts.push(h("option", { value: OTHER }, "Other model…"));
+    sel.replaceChildren(...opts);
+    sel.value = cur;
+    sel.disabled = false;
+    if (cur !== "" && !ids.includes(cur)) {
+      status.textContent = conn.name + " does not offer " + cur + ". Pick one of its " + ids.length + " models.";
+      status.classList.add("warn");
+    } else {
+      status.textContent = hint || ids.length + " models at " + conn.name + ".";
+    }
+  });
+  return wrap;
 }
 
 // applyProvider points the model at a provider (null: the runtime's
